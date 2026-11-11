@@ -24,3 +24,19 @@ machine configuration. Keep existing host and Lab VM policy intact.
   accuracy/cost on the same fixtures. No claim of optimality or winning guarantees.
 
 Source and CLI text are English. User-facing handoff may be German.
+
+## Local development helpers
+
+`just dev-setup` explicitly starts project-scoped Ichnora memory, indexes source
+with AST Index and writes local MCP configuration. `just dev-status` checks the
+actual service and index. Reindex after source changes with `just index`.
+
+Before recalling memory, verify `memory_status.scope` matches this checkout.
+Capture durable decisions, evidence and task checkpoints; check dependencies
+before trusting an older claim. Do not collect transcripts or store benchmark
+reference answers, evaluation inputs, credentials or private output in memory.
+Memory is for development continuity; `hacklab solve/benchmark/submit` never
+loads it. Before structural navigation, inspect AST `code_explore` status and
+use paths relative to its returned root. Queries do not refresh the index.
+Use `agent-evidence` for bounded, digest-bound reads; `agent-tool-meter` measures
+CLI time and output bytes, not model tokens. Keep its logs outside Git.

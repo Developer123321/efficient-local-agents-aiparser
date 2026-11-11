@@ -26,8 +26,14 @@ Each HTTP attempt -> local private SQLite receipt
 | `tracking.py` | Metadata receipts, honest unknown usage/cost and private export |
 | `benchmark.py` | Separate reference labels, deterministic practice rubric and comparison |
 | `cli.py` | Local readiness, run/benchmark/inspection and JSONL adapter |
+| `devtools.py` | Explicit local development memory/index lifecycle and project MCP setup |
 
 ## Evidence and memory
+
+Development assistants have a separate optional Ichnora memory service and AST
+source index, configured by `just dev-setup`. They hold project decisions and
+code structure. The competition loop does not import or query those helpers;
+the evaluation memory behavior below remains task-local.
 
 The document index/cache is created for each task. No answer, result or summary
 from a previous task is reused. The live harness has no response cache and no

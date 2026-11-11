@@ -31,7 +31,20 @@ def doctor(config: Config) -> dict:
         "python": platform.python_version(),
         "platform": platform.system(),
         "packages": packages,
-        "tools": {tool: bool(shutil.which(tool)) for tool in ("nix", "uv", "bob", "git")},
+        "tools": {
+            tool: bool(shutil.which(tool))
+            for tool in (
+                "nix",
+                "uv",
+                "bob",
+                "git",
+                "ichnora",
+                "ast-index",
+                "agent-evidence",
+                "agent-tool-meter",
+                "tabula",
+            )
+        },
         "kvm_accessible": os.access("/dev/kvm", os.R_OK | os.W_OK),
         "mode": config.model.provider,
         "small_model_configured": bool(config.model.base_url and config.model.model),

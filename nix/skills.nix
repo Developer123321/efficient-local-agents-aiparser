@@ -12,6 +12,8 @@ let
     fast-checks = unix-skills + "/skills/code/fast-checks";
     test-freshness = unix-skills + "/skills/code/test-freshness";
     repository-evidence = private-skills + "/skills/code/repository-evidence";
+    ichnora-memory = private-skills + "/skills/agent/ichnora-memory";
+    ast-navigation = private-skills + "/skills/code/ast-navigation";
     hypothesis-testing = private-skills + "/skills/code/hypothesis-testing";
     workload-measurement = private-skills + "/skills/agent/workload-measurement";
     python-task-scripts = private-skills + "/skills/code/python-task-scripts";

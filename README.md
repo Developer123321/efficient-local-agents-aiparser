@@ -22,6 +22,26 @@ With Python 3.12 and `uv` already installed, omit `nix develop`. Python packages
 are locked by `uv.lock`; `uv sync --locked --offline` works after one complete
 successful sync on that machine. No GPU or model download is required.
 
+## Enable development memory and code navigation
+
+The default Nix shell and VM include Ichnora, AST Index, agent-evidence,
+agent-tool-meter and Tabula, pinned to their own source revisions.
+
+```sh
+nix develop                 # Or nix develop .#with-bob
+uv sync --locked
+just dev-setup              # Start/enroll local memory, index code, configure MCP
+just dev-status
+# Start your coding assistant in this checkout; Bob reads .bob/mcp.json.
+```
+
+Ichnora retains development decisions and task checkpoints across sessions.
+AST Index supplies bounded structural code navigation. `just index` explicitly
+refreshes the code snapshot; `just dev-down` stops this project's memory process.
+Both use private state outside the repository. The competition agent continues
+to use only its current task's evidence. See [tool integration](docs/tools.md)
+for lifecycle, MCP, scope and actual verification.
+
 ## Boot a separate VM
 
 ```sh
@@ -58,6 +78,8 @@ Bob is a separate coding assistant; see [tool integration](docs/tools.md).
 | Command | Purpose |
 | --- | --- |
 | `just check` | Format/lint checks and offline regression tests |
+| `just dev-setup` / `just dev-status` | Prepare and check local development memory, AST and MCP |
+| `just index` / `just dev-down` | Refresh code navigation / stop project memory |
 | `hacklab doctor` | Local readiness and credential-presence checks; no API requests |
 | `hacklab solve --task task.json --root data/ --config configs/live.toml` | Run one task |
 | `hacklab benchmark --dataset bench/smoke.jsonl --repeat 3 --out results/run.json` | Run local fixtures and track individual attempts |

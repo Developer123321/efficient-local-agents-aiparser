@@ -15,10 +15,39 @@
       url = "git+https://github.com/timfewi/private-skills-catalog.git?ref=main";
       flake = false;
     };
+    # Only the local developer tools are composed here, not another assistant
+    # deployment or its browser/model/service configuration.
+    project-check = {
+      url = "git+https://github.com/timfewi/project-check-nix.git?ref=main";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    ichnora = {
+      url = "git+https://github.com/timfewi/ichnora.git?ref=main";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.project-check.follows = "project-check";
+    };
+    ast-index = {
+      url = "git+https://github.com/timfewi/ast-index-nix.git?ref=main";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    agent-evidence = {
+      url = "git+https://github.com/timfewi/agent-evidence-nix.git?ref=main";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.project-check.follows = "project-check";
+    };
+    agent-tool-meter = {
+      url = "git+https://github.com/timfewi/agent-tool-meter-nix.git?ref=main";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.project-check.follows = "project-check";
+    };
+    tabula = {
+      url = "git+https://github.com/timfewi/tabula-repo-nix.git?ref=main";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    {
+    inputs@{
       self,
       nixpkgs,
       bobshell,
@@ -32,7 +61,9 @@
         inherit system;
         config.allowUnfreePredicate = package: nixpkgs.lib.getName package == "bobshell";
       };
-      tools = import ./nix/tools.nix { inherit pkgs; };
+      baseTools = import ./nix/tools.nix { inherit pkgs; };
+      devTools = import ./nix/dev-tools.nix { inherit inputs system; };
+      tools = baseTools ++ builtins.attrValues devTools;
       skills = import ./nix/skills.nix { inherit pkgs unix-skills private-skills; };
       bob = bobshell.packages.${system}.bobshell;
       mkShell =
@@ -69,13 +100,17 @@
         default = mkShell false;
         with-bob = mkShell true;
       };
-      packages.${system} = {
+      packages.${system} = devTools // {
         default = vm.config.system.build.vm;
         vm = vm.config.system.build.vm;
         vm-with-bob = vmWithBob.config.system.build.vm;
         tools = pkgs.buildEnv {
           name = "hackathon-tools";
           paths = tools;
+        };
+        dev-tools = pkgs.buildEnv {
+          name = "hackathon-dev-tools";
+          paths = builtins.attrValues devTools;
         };
         inherit skills;
       };

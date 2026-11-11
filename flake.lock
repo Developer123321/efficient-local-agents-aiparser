@@ -1,5 +1,74 @@
 {
   "nodes": {
+    "agent-evidence": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "project-check": [
+          "project-check"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793659599,
+        "narHash": "sha256-CN/UQHmKfIYfcCSWugOFDtKwbw4sHEI24G6g8dwjI0s=",
+        "ref": "main",
+        "rev": "84af70269cc9cfa169ddf036ea0a56264397b42b",
+        "revCount": 18,
+        "type": "git",
+        "url": "https://github.com/timfewi/agent-evidence-nix.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/agent-evidence-nix.git"
+      }
+    },
+    "agent-tool-meter": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "project-check": [
+          "project-check"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793659595,
+        "narHash": "sha256-WrD6z/JGwXcIB2BMFriJLYo6FVGgDhAWevs/vrJh8B4=",
+        "ref": "main",
+        "rev": "8b581fdbba635ee7480fbda61f0d4838af63e5ca",
+        "revCount": 28,
+        "type": "git",
+        "url": "https://github.com/timfewi/agent-tool-meter-nix.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/agent-tool-meter-nix.git"
+      }
+    },
+    "ast-index": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793999519,
+        "narHash": "sha256-KpvSPP62cDsPmJpvlrwbkbuyjUjUn9uLcZXA0xKdsBU=",
+        "ref": "main",
+        "rev": "57e324a1db52173011ad2e7a9e090816f7abcd31",
+        "revCount": 35,
+        "type": "git",
+        "url": "https://github.com/timfewi/ast-index-nix.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/ast-index-nix.git"
+      }
+    },
     "bobshell": {
       "inputs": {
         "nixpkgs": [
@@ -19,6 +88,30 @@
         "ref": "main",
         "type": "git",
         "url": "https://github.com/timfewi/bobshell.nix.git"
+      }
+    },
+    "ichnora": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "project-check": [
+          "project-check"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794385637,
+        "narHash": "sha256-1UkvxKl3jzwpn1esmVg4eTVBdqiIQNKVq8eVM8Dhbh8=",
+        "ref": "main",
+        "rev": "60f66b75ff995c83e3fa250376ec6385e583482e",
+        "revCount": 25,
+        "type": "git",
+        "url": "https://github.com/timfewi/ichnora.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/ichnora.git"
       }
     },
     "nixpkgs": {
@@ -54,12 +147,60 @@
         "url": "https://github.com/timfewi/private-skills-catalog.git"
       }
     },
+    "project-check": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793906762,
+        "narHash": "sha256-kGxW930Qfibqmv7j44s2Lpe8Q5066lvx48LTNOdx94k=",
+        "ref": "main",
+        "rev": "998156a1a05335ae6ee11aa649a672b5e845d802",
+        "revCount": 25,
+        "type": "git",
+        "url": "https://github.com/timfewi/project-check-nix.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/project-check-nix.git"
+      }
+    },
     "root": {
       "inputs": {
+        "agent-evidence": "agent-evidence",
+        "agent-tool-meter": "agent-tool-meter",
+        "ast-index": "ast-index",
         "bobshell": "bobshell",
+        "ichnora": "ichnora",
         "nixpkgs": "nixpkgs",
         "private-skills": "private-skills",
+        "project-check": "project-check",
+        "tabula": "tabula",
         "unix-skills": "unix-skills"
+      }
+    },
+    "tabula": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793660147,
+        "narHash": "sha256-d0OTQDdHo+5Qi50VC9coIcSx5cQo1UaHDwWCFlkw1u4=",
+        "ref": "main",
+        "rev": "e756b8799f8eee18875feb6dd3667c5631940027",
+        "revCount": 21,
+        "type": "git",
+        "url": "https://github.com/timfewi/tabula-repo-nix.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/tabula-repo-nix.git"
       }
     },
     "unix-skills": {

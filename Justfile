@@ -5,11 +5,11 @@ setup:
     uv sync --locked
 
 fmt:
-    uv run --locked ruff format src tests
-    uv run --locked ruff check --fix src tests
+    uv run --locked ruff format src tests scripts
+    uv run --locked ruff check --fix src tests scripts
 
 fmt-check:
-    uv run --locked ruff format --check src tests
+    uv run --locked ruff format --check src tests scripts
 
 check:
     bash scripts/check
@@ -22,6 +22,22 @@ start:
 
 doctor:
     uv run --locked hacklab doctor
+
+dev-setup:
+    uv run --locked hacklab-dev setup
+    if [ -n "${HACKATHON_SKILLS_DIR:-}" ]; then bash scripts/vm-skills; fi
+
+dev-status:
+    uv run --locked hacklab-dev status
+
+dev-down:
+    uv run --locked hacklab-dev down
+
+dev-check:
+    uv run --locked python scripts/smoke-dev-tools.py
+
+index:
+    uv run --locked hacklab-dev index
 
 bench:
     uv run --locked hacklab benchmark --config configs/mock.toml --out results/mock.json

@@ -18,6 +18,7 @@ dev = ["pytest>=8,<10", "ruff>=0.14,<1"]
 
 [project.scripts]
 hacklab = "hacklab.cli:main"
+hacklab-dev = "hacklab.devtools:main"
 
 [build-system]
 requires = ["hatchling>=1.27,<2"]

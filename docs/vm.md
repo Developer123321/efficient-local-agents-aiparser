@@ -41,6 +41,11 @@ SQLite, DuckDB, PDF extraction, OCR, Pandoc, tmux and timing tools. No GPU or
 local model weights are required. Keep at least 4 GiB RAM for the host; build
 and dependency caches need additional disk space beyond the sparse guest disk.
 
+Ichnora, AST Index, agent-evidence, agent-tool-meter and Tabula are also included
+as pinned packages. After syncing the Python project, run `just dev-setup` to
+prepare this checkout's memory service, AST snapshot and local MCP clients. The
+same command works in the existing Lab VM after entering this project's shell.
+
 The VM includes a read-only snapshot of the reviewed Git-backed project source.
 At first console login it copies that snapshot into `~/workspace/python-vm`
 only if that directory does not exist. Existing projects are preserved. Ignored
@@ -134,7 +139,7 @@ The default VM excludes Bob.
 
 ## Your tools and skills
 
-`nix/skills.nix` selects ten relevant skills directly from the pinned
+`nix/skills.nix` selects twelve relevant skills directly from the pinned
 `unix-agent-skills` and `private-skills-catalog` sources. It creates immutable
 links, without copying or forking their instructions. `HACKATHON_SKILLS_DIR`
 points to the selection. To expose it to an assistant that supports the
@@ -180,14 +185,15 @@ devShells.x86_64-linux.hackathon =
 This reuses the provider's `lib.x86_64-linux.toolPackages` selection, including
 its configured Project Check, Tabula, evidence and tool measurement tools. It
 does not create another agent deployment. Existing managed agent launchers
-remain available from the Lab VM's system PATH. Ichnora memory, AST Index,
-Scopeglass and secured Research still need their existing explicit service and
-host bindings; this shell does not start or enroll them. This optional consumer
-composition must be evaluated against that consumer's retained pins before use.
+remain available from the Lab VM's system PATH. This project prepares its own
+scoped Ichnora and AST state through `just dev-setup`; existing managed services
+keep their own configuration. Scopeglass and secured Research still need their
+existing explicit service and host bindings. This optional consumer composition
+must be evaluated against that consumer's retained pins before use.
 
 ## Reproducibility and verification
 
-`flake.lock` fixes Nixpkgs, the Bob packaging and both skill catalogs. `uv.lock`
+`flake.lock` fixes Nixpkgs, Bob, the development tools and both skill catalogs. `uv.lock`
 fixes the Python dependency resolution. Enter the shell before syncing to use
 the Nix-provided Python interpreter. Download dependencies and run the demo on
 the target machine before travelling; the first build and first `uv sync` need
