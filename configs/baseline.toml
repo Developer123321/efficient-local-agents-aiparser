@@ -1,0 +1,15 @@
+# A deliberately simple live baseline for controlled A/B comparisons.
+[model]
+provider = "openai"
+response_format = "json_object"
+
+[jev]
+enabled = false
+
+[limits]
+max_steps = 3
+max_calls = 5
+max_retries = 1
+max_context_chars = 12000
+max_output_tokens = 1000
+max_total_tokens = 8000

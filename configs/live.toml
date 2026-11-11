@@ -1,0 +1,28 @@
+# Set URL, model and key in .env after the organizers announce the model.
+# base_url is the API prefix BEFORE /chat/completions, for example https://host/v1.
+# This adapter assumes an OpenAI-compatible API; replace the adapter if required.
+[model]
+provider = "openai"
+response_format = "json_object"
+# input_usd_per_million = 0.0  # Replace with the organizer's actual scoring tariff.
+# output_usd_per_million = 0.0
+
+[jev]
+enabled = true
+model = "jev-1.14.0"
+base_url = "https://api.typesafe.ai/v1/systemone"
+# Public list price is NOT necessarily the event's scoring tariff.
+# input_usd_per_million = 0.042
+# output_usd_per_million = 0.0
+threshold = 0.8  # Starting value, not a measured optimum.
+
+[limits]
+max_steps = 6
+max_calls = 10
+max_retries = 1
+timeout_seconds = 25
+task_timeout_seconds = 180
+max_context_chars = 24000
+max_output_tokens = 1400
+max_total_tokens = 16000
+# max_cost_usd = 0.02  # Requires all enabled prices to be explicitly configured.

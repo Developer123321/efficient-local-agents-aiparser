@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+variant=vm
+tcg=false
+while (($#)); do
+  case "$1" in
+    --bob) variant=vm-with-bob ;;
+    --tcg) tcg=true ;;
+    -h|--help)
+      printf '%s\n' 'Usage: scripts/vm-run [--bob] [--tcg]' \
+        "State: ${XDG_STATE_HOME:-$HOME/.local/state}/efficient-local-agents/vm" \
+        'SSH: ssh -p 2222 hackathon@127.0.0.1 (install your public key at first console login)'
+      exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
+command -v nix >/dev/null || { printf '%s\n' 'Install Nix with flakes before starting the VM.' >&2; exit 1; }
+state_root=${XDG_STATE_HOME:-${HOME}/.local/state}/efficient-local-agents/vm
+umask 077
+mkdir -p -- "$state_root"
+chmod 700 -- "$state_root"
+command -v flock >/dev/null || { printf '%s\n' 'flock is required; enter nix develop or install util-linux.' >&2; exit 1; }
+exec 9>"$state_root/runner.lock"
+flock -n 9 || { printf '%s\n' 'This VM disk already has an active runner.' >&2; exit 1; }
+if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+  printf '%s\n' 'KVM is unavailable. Use the devShell inside your existing Lab VM, or pass --tcg for slow software emulation.' >&2
+  if ! "$tcg"; then exit 1; fi
+fi
+runner=$(nix build --no-link --print-out-paths "${repo}#${variant}")
+export NIX_DISK_IMAGE="$state_root/hackathon.qcow2"
+if "$tcg"; then
+  export QEMU_OPTS="${QEMU_OPTS:-} -accel tcg -cpu max"
+fi
+cd -- "$state_root"
+exec "$runner/bin/run-hackathon-vm"

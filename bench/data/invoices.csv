@@ -1,0 +1,5 @@
+invoice_id,status,amount_eur
+I-101,approved,120.50
+I-102,pending,99.99
+I-103,approved,79.50
+I-104,rejected,500.00

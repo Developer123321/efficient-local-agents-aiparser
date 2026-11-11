@@ -1,0 +1,3 @@
+Memo A, undated: The storage quota is 500 GB.
+Memo B, undated: The storage quota is 750 GB.
+Neither memo identifies an owner, approval, or superseding revision.

@@ -1,0 +1,8 @@
+# Offline plumbing baseline, never a model-quality measurement.
+[model]
+provider = "mock"
+
+[limits]
+max_steps = 6
+max_calls = 10
+max_total_tokens = 16000

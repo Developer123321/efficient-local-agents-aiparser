@@ -1,0 +1,85 @@
+{
+  "nodes": {
+    "bobshell": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794260586,
+        "narHash": "sha256-ujnpKX3eUaNXzDT0t23EjSxtYdiTqBqy4xSBLu/N2S4=",
+        "ref": "main",
+        "rev": "e537fbddc5adaf768a9b08000d732a267112d141",
+        "revCount": 1,
+        "type": "git",
+        "url": "https://github.com/timfewi/bobshell.nix.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/bobshell.nix.git"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1794042290,
+        "narHash": "sha256-ziZn2PvCJE5JEEpqTdxXwJpPB+L3YqoCpTAMCzyaP3U=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "f4a03c008967841f2a0b3cb7c436fc6fc31671f6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "private-skills": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794042010,
+        "narHash": "sha256-VmyDVpApH2xiU//DXCeAw2M2G8ZH5bzJOqHQgSyNq9w=",
+        "ref": "main",
+        "rev": "a22ba13a90159d3aad758b76e620af1efc1f4745",
+        "revCount": 21,
+        "type": "git",
+        "url": "https://github.com/timfewi/private-skills-catalog.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/private-skills-catalog.git"
+      }
+    },
+    "root": {
+      "inputs": {
+        "bobshell": "bobshell",
+        "nixpkgs": "nixpkgs",
+        "private-skills": "private-skills",
+        "unix-skills": "unix-skills"
+      }
+    },
+    "unix-skills": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794254909,
+        "narHash": "sha256-GSQ51lw6+MW/eIKIrv3k2K6yDT2lbha+sAzCZt3367s=",
+        "ref": "main",
+        "rev": "3008ce1e31a6c8e43dc8e59ab094d534394d1937",
+        "revCount": 15,
+        "type": "git",
+        "url": "https://github.com/timfewi/unix-agent-skills.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/timfewi/unix-agent-skills.git"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

@@ -1,0 +1,30 @@
+{ pkgs }:
+with pkgs;
+[
+  python312
+  uv
+  ruff
+  git
+  gh
+  just
+  jq
+  yq-go
+  ripgrep
+  fd
+  curl
+  openssh
+  sqlite
+  duckdb
+  poppler-utils
+  tesseract
+  pandoc
+  p7zip
+  zstd
+  tmux
+  nano
+  util-linux
+  hyperfine
+  time
+  shellcheck
+  nixfmt
+]

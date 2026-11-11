@@ -1,0 +1,6 @@
+{
+  "id": "example-contact",
+  "question": "Who is the incident contact? Cite the relevant line.",
+  "documents": ["contact.txt"],
+  "constraints": {}
+}
