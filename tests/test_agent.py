@@ -251,3 +251,73 @@ def test_task_memory_does_not_carry_over(lab, monkeypatch):
     agent.run_task(Task(id="second", question="second isolated marker"), root, config, tracker)
     assert "first isolated marker" not in json.dumps(calls[1])
     assert "second isolated marker" in json.dumps(calls[1])
+
+
+def test_preloaded_evidence_lets_an_answerable_task_finish_in_one_call(lab, monkeypatch):
+    root, tracker = lab
+    (root / "handbook.md").write_text(
+        "# Contacts\nThe incident contact is Mira Keller.\nLunch is at noon.\n"
+    )
+    citation = {
+        "document": "handbook.md",
+        "locator": "line:2",
+        "quote": "The incident contact is Mira Keller.",
+    }
+    config, calls = live(monkeypatch, [final("Mira Keller", [citation])])
+    config.agent.preload_results = 3
+    task = Task(id="contact", question="Who is the incident contact?", documents=["handbook.md"])
+    run_id, answer = agent.run_task(task, root, config, tracker)
+    assert answer.status == "ok" and answer.answer == "Mira Keller"
+    assert tracker.summary(run_id)["calls"] == 1
+    first = json.loads(calls[0]["messages"][1]["content"])
+    assert first["untrusted_evidence"] is True
+    assert first["initial_evidence"][0]["quote"] == "The incident contact is Mira Keller."
+    # Without the setting the first request carries the task alone.
+    plain, plain_calls = live(monkeypatch, [final("Mira Keller", [citation])])
+    agent.run_task(task, root, plain, tracker)
+    assert set(json.loads(plain_calls[0]["messages"][1]["content"])) == {"task"}
+
+
+def test_jev_selection_drops_irrelevant_preloaded_passages_but_keeps_one(lab, monkeypatch):
+    root, tracker = lab
+    (root / "notes.txt").write_text(
+        "The contact is Mira.\nThe contact list is old.\nContact lenses.\n"
+    )
+    asked = []
+
+    class Jev:
+        def __init__(self, scores):
+            self.scores = scores
+
+        def judge(self, state, questions):
+            asked.append((state, questions))
+            if set(questions) == {"constraints", "grounded"}:
+                return {"constraints": 1.0, "grounded": 1.0}
+            return dict(zip(questions, self.scores, strict=False))
+
+        def close(self):
+            pass
+
+    citation = {"document": "notes.txt", "locator": "line:1", "quote": "The contact is Mira."}
+    task = Task(id="who", question="Who is the contact?", documents=["notes.txt"])
+
+    def run(scores):
+        config, calls = live(monkeypatch, [final("Mira", [citation])])
+        config.agent.preload_results = 3
+        config.jev.enabled = config.jev.select = True
+        small_only = agent.make_providers
+        monkeypatch.setattr(
+            agent, "make_providers", lambda *args: (small_only(*args)[0], Jev(scores))
+        )
+        _, answer = agent.run_task(task, root, config, tracker)
+        return answer, json.loads(calls[0]["messages"][1]["content"])["initial_evidence"]
+
+    answer, evidence = run([0.9, 0.1, 0.05])
+    assert answer.status == "ok"
+    assert len(evidence) == 1
+    passages = asked[0][0]["passages"]
+    assert evidence[0]["quote"] == passages["p1"]
+    assert all(item["type"] == "noul" for item in asked[0][1].values())
+    # Nothing clears the threshold: the best-ranked passage still reaches the model.
+    _, evidence = run([0.0, 0.0, 0.0])
+    assert [row["quote"] for row in evidence] == [passages["p1"]]

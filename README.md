@@ -47,13 +47,15 @@ for lifecycle, MCP, scope and actual verification.
 ```sh
 bash scripts/vm-smoke                # Once per machine: boot a disposable guest and check it
 bash scripts/vm-run                  # Persistent guest with IBM Bob Shell; --no-bob without
-ssh -p 2222 hackathon@127.0.0.1      # vm-run authorizes your host's public SSH key
 ```
+
+The guest console opens in that terminal. The guest runs no SSH daemon and no
+port is forwarded.
 
 On a NixOS host, `nixosModules.host` provides the same guest as an on-demand
 service with `python-vm start|stop|view`. The guest seeds this project into
 `~/workspace/python-vm` with the selected skills linked for Bob; `just ready`
-there syncs dependencies and prepares development memory, code index and MCP. See [VM operation](docs/vm.md) for persistence, SSH,
+there syncs dependencies and prepares development memory, code index and MCP. See [VM operation](docs/vm.md) for persistence, the console,
 `--memory`/`--cpus`, Bob's license and login steps, project transfer and running
 on your Security Laptop or inside the Lab VM. Running the development shell
 directly inside the existing Lab VM avoids nested virtualization.
@@ -66,11 +68,21 @@ chmod 600 .env
 # Edit .env locally: SMALL_MODEL_BASE_URL, SMALL_MODEL_NAME, SMALL_MODEL_API_KEY,
 # TYPESAFE_API_KEY. Use the endpoint and model provided by the organizers.
 uv run --locked hacklab doctor --config configs/live.toml
+uv run --locked hacklab probe --config configs/live.toml   # One small request per model
 uv run --locked hacklab solve --config configs/live.toml \
   --task bench/task.example.json --root bench/data
-uv run --locked hacklab benchmark --config configs/live.toml --out results/live.json
+for profile in baseline live jev-select; do
+  uv run --locked hacklab benchmark --config configs/$profile.toml --out results/$profile.json
+done
+uv run --locked hacklab compare results/baseline.json results/live.json
 uv run --locked hacklab stats
 ```
+
+`probe` shows at once whether URL, key, token parameter and response format
+fit, with the reported model and token usage. The three profiles differ in
+few, named settings: `baseline` has no Jev and no preloaded evidence, `live`
+adds both, `jev-select` also lets Jev filter the evidence. Keep the one that
+wins on the organizers' development benchmark.
 
 The generative adapter assumes an OpenAI-compatible `/chat/completions` endpoint;
 this is configurable preparation, **not a verified organizer API contract**.
@@ -90,6 +102,7 @@ login are runtime steps described in [VM operation](docs/vm.md#ibm-bob).
 | `just dev-setup` / `just dev-status` | Prepare and check local development memory, AST and MCP |
 | `just index` / `just dev-down` | Refresh code navigation / stop project memory |
 | `hacklab doctor` | Local readiness and credential-presence checks; no API requests |
+| `hacklab probe --config configs/live.toml` | One tracked minimal request to each configured model |
 | `hacklab solve --task task.json --root data/ --config configs/live.toml` | Run one task |
 | `hacklab benchmark --dataset bench/smoke.jsonl --repeat 3 --out results/run.json` | Run local fixtures and track individual attempts |
 | `hacklab compare results/baseline.json results/candidate.json` | Compare accuracy, cost and p95 on the same data |

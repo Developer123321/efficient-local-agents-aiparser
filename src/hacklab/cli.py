@@ -56,14 +56,72 @@ def doctor(config: Config) -> dict:
     }
 
 
+def probe(config: Config, tracker: Tracker) -> dict:
+    """One small tracked request to each configured model: is the contract right?"""
+    from hacklab.providers import Budget, ProviderError, make_providers
+
+    run_id = tracker.start_run("probe", config.model_dump(), mode=config.model.provider)
+    report: dict = {}
+    providers: list = []
+    try:
+        small, jev = make_providers(config, Budget(config.limits), tracker, run_id)
+        providers = [small, jev]
+        checks = [
+            (
+                "small_model",
+                lambda: small.complete(
+                    [{"role": "user", "content": 'Return ONLY this JSON object: {"ok": true}'}],
+                    {"type": "object"},
+                ),
+            )
+        ]
+        if jev is not None:
+            checks.append(
+                (
+                    "jev",
+                    lambda: jev.judge(
+                        {"text": "The invoice total is 120 EUR."},
+                        {"amount": {"type": "noul", "instructions": "`text` states an amount."}},
+                    ),
+                )
+            )
+        for name, call in checks:
+            try:
+                report[name] = {"ok": True, "reply": call()}
+            except ProviderError as exc:
+                report[name] = {"ok": False, "error": str(exc)}
+    except ProviderError as exc:
+        report["setup"] = {"ok": False, "error": str(exc)}
+    finally:
+        for provider in providers:
+            if provider is not None:
+                provider.close()
+        ok = bool(report) and all(item["ok"] for item in report.values())
+        tracker.finish_run(run_id, "ok" if ok else "error")
+    keys = (
+        "provider",
+        "model",
+        "status",
+        "input_tokens",
+        "output_tokens",
+        "latency_ms",
+        "cost_usd",
+    )
+    return {
+        "ok": ok,
+        **report,
+        "calls": [{key: call.get(key) for key in keys} for call in tracker.calls(run_id)],
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     app = argparse.ArgumentParser(description="Small-model local agent lab")
     app.add_argument("--db", type=Path, default=Path(".state/tracking.sqlite"))
     commands = app.add_subparsers(dest="command", required=True)
-    for name in ("doctor", "solve", "benchmark", "submit"):
+    for name in ("doctor", "probe", "solve", "benchmark", "submit"):
         sub = commands.add_parser(name)
         sub.add_argument("--config", type=Path)
-        if name != "doctor":
+        if name not in ("doctor", "probe"):
             sub.add_argument("--root", type=Path, default=Path("bench/data"))
         if name == "solve":
             sub.add_argument("--task", type=Path, required=True)
@@ -115,6 +173,10 @@ def main() -> int:
             emit(doctor(config))
             return 0
         tracker = Tracker(args.db)
+        if args.command == "probe":
+            result = probe(config, tracker)
+            emit(result)
+            return int(not result["ok"])
         if args.command == "runs":
             emit(tracker.runs(args.limit))
         elif args.command == "stats":

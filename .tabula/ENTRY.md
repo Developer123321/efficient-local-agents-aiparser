@@ -7,8 +7,10 @@ harness. Start with the [README](../README.md) and
 ## Competition runtime
 
 [Task and answer contracts](../src/hacklab/models.py) separate task input from
-benchmark labels. The [agent loop](../src/hacklab/agent.py) dispatches bounded
-[document and arithmetic tools](../src/hacklab/tools.py). The
+benchmark labels. The [agent loop](../src/hacklab/agent.py) can preload search
+results, let Jev filter them and dispatches bounded
+[document and arithmetic tools](../src/hacklab/tools.py), which read CSV/TSV,
+HTML, e-mail, PDF, DOCX and XLSX and one decimal convention per table column. The
 [HTTP providers](../src/hacklab/providers.py) count every actual request attempt;
 [tracking](../src/hacklab/tracking.py) keeps usage and cost unknown when missing.
 The [practice evaluator](../src/hacklab/benchmark.py) is distinct from official
@@ -28,7 +30,7 @@ The [flake](../flake.nix) pins the workbench, Bob packaging, development tools
 and skill sources; [the tool list](../nix/tools.nix) selects Python 3.15.
 [VM configuration](../nix/vm.nix) seeds a writable Git-backed checkout with
 linked skills at first boot. [The runner](../scripts/vm-run) starts the guest
-with Bob and passes one SSH public key; [the host module](../nix/host.nix) wraps
+with Bob on its console, the only way in: no SSH daemon, no forwarded port; [the host module](../nix/host.nix) wraps
 it as an on-demand user service with the [`python-vm` command](../scripts/python-vm.sh); [the smoke test](../scripts/vm-smoke)
 boots a disposable guest and checks it. The [Justfile](../Justfile) selects
 explicit workflows; [the fast gate](../scripts/check) runs Python formatting,

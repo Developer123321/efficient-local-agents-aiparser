@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -116,6 +117,33 @@ class Budget:
             raise BudgetExceeded("reported_token_usage_exceeded_budget")
         if self.limits.max_cost_usd is not None and self.cost_usd > self.limits.max_cost_usd:
             raise BudgetExceeded("reported_cost_exceeded_budget")
+
+
+def decision_object(content: str) -> dict[str, Any]:
+    """Find the one JSON object in a small model's reply.
+
+    Small models often wrap the object in a code fence, reasoning tags or a
+    sentence. Recovering it locally costs nothing; a repair turn costs a call.
+    """
+    text = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+    try:
+        value = json.loads(text)
+    except ValueError:
+        value = None
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", text):
+            try:
+                value, _ = decoder.raw_decode(text, match.start())
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                break
+            value = None
+        if value is None:
+            raise ModelOutputError("model_content_must_be_json_text") from None
+    if not isinstance(value, dict):
+        raise ModelOutputError("model_decision_must_be_object")
+    return value
 
 
 def _token(value: Any) -> int | None:
@@ -326,9 +354,10 @@ class SmallModelProvider(_HTTPProvider):
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0,
-            "max_tokens": self.limits.max_output_tokens,
+            self.config.max_tokens_parameter: self.limits.max_output_tokens,
         }
+        if self.config.temperature != "omit":
+            body["temperature"] = self.config.temperature
         if self.config.response_format == "json_object":
             body["response_format"] = {"type": "json_object"}
         elif self.config.response_format == "json_schema":
@@ -348,13 +377,7 @@ class SmallModelProvider(_HTTPProvider):
             content = choice["message"]["content"]
             if not isinstance(content, str):
                 raise ModelOutputError("model_content_must_be_json_text")
-            content = content.strip()
-            if content.startswith("```json\n") and content.endswith("\n```"):
-                content = content[8:-4]
-            decision = json.loads(content)
-            if not isinstance(decision, dict):
-                raise ModelOutputError("model_decision_must_be_object")
-            return decision
+            return decision_object(content)
 
         return self.request(body, parse, output_allowance=self.limits.max_output_tokens)
 

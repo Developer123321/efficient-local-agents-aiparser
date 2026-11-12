@@ -3,7 +3,7 @@
 import os
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
@@ -16,6 +16,10 @@ class ModelConfig(StrictModel):
     model: str = ""
     api_key_env: str = "SMALL_MODEL_API_KEY"
     response_format: Literal["json_schema", "json_object", "none"] = "json_object"
+    # Endpoints differ in how the output allowance is named and whether they
+    # accept a temperature at all; "omit" leaves the field out of the request.
+    max_tokens_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    temperature: Annotated[float, Field(ge=0, le=2)] | Literal["omit"] = 0.0
     input_usd_per_million: float | None = Field(default=None, ge=0)
     output_usd_per_million: float | None = Field(default=None, ge=0)
 
@@ -28,6 +32,10 @@ class JevConfig(StrictModel):
     input_usd_per_million: float | None = Field(default=None, ge=0)
     output_usd_per_million: float | None = Field(default=None, ge=0)
     threshold: float = Field(default=0.8, ge=0, le=1)
+    # Optional pre-filter: Jev drops preloaded passages that are clearly
+    # irrelevant before the generator pays for them. Keeps the best passage.
+    select: bool = False
+    select_threshold: float = Field(default=0.3, ge=0, le=1)
 
 
 class Limits(StrictModel):
@@ -42,9 +50,19 @@ class Limits(StrictModel):
     max_cost_usd: float | None = Field(default=None, gt=0)
 
 
+class AgentConfig(StrictModel):
+    # Search results for the question placed in the first prompt, so that an
+    # answerable task needs one generator call instead of a search turn first.
+    preload_results: int = Field(default=0, ge=0, le=20)
+    # How table aggregates read numbers such as 1.234,56: "auto" infers the
+    # convention per column and reports it; set it once the data is known.
+    decimal_separator: Literal["auto", "point", "comma"] = "auto"
+
+
 class Config(StrictModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     jev: JevConfig = Field(default_factory=JevConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     limits: Limits = Field(default_factory=Limits)
 
     @model_validator(mode="after")

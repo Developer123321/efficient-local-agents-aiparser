@@ -122,6 +122,10 @@ def benchmark(dataset: Path, root: Path, config: Config, tracker, repeat: int = 
         "cost_usd": None if None in costs else sum(costs),
         "unknown_cost_calls": sum(r["usage"]["unknown_cost_calls"] for r in records),
         "calls": sum(r["usage"]["calls"] for r in records),
+        # Tokens stay comparable while the event's prices are still unknown.
+        "known_input_tokens": sum(r["usage"]["known_input_tokens"] for r in records),
+        "known_output_tokens": sum(r["usage"]["known_output_tokens"] for r in records),
+        "usage_complete": all(r["usage"]["usage_complete"] for r in records),
         "p50_elapsed_ms": statistics.median(durations),
         "p95_elapsed_ms": _percentile(durations, 0.95),
         "by_category": {
@@ -139,9 +143,13 @@ def compare(left: dict, right: dict) -> dict:
     costs_known = left["cost_usd"] is not None and right["cost_usd"] is not None
     accuracy_delta = right["accuracy"] - left["accuracy"]
     cost_delta = right["cost_usd"] - left["cost_usd"] if costs_known else None
+    tokens = ("known_input_tokens", "known_output_tokens", "calls")
     return {
         "accuracy_delta": accuracy_delta,
         "cost_delta_usd": cost_delta,
+        **{
+            f"{key}_delta": right[key] - left[key] for key in tokens if key in left and key in right
+        },
         "p95_delta_ms": right["p95_elapsed_ms"] - left["p95_elapsed_ms"],
         "right_dominates": (
             accuracy_delta >= 0 and cost_delta <= 0 and (accuracy_delta > 0 or cost_delta < 0)

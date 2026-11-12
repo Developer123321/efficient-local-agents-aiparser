@@ -7,6 +7,7 @@ System One request. It never generates code, prose or arbitrary tool arguments.
 
 ```text
 Task (no reference labels)
+  -> optional preloaded search results -> optional Jev relevance filter
   -> bounded JSON planner -> search / read / table / calculate
   -> exact document + locator + quote checks
   -> optional batched Jev grounding + constraints judgment
@@ -28,6 +29,27 @@ Each HTTP attempt -> local private SQLite receipt
 | `cli.py` | Local readiness, run/benchmark/inspection and JSONL adapter |
 | `devtools.py` | Explicit local development memory/index lifecycle and project MCP setup |
 
+## Spending fewer calls
+
+Cost counts as much as accuracy, and every model turn is paid for. Three
+settings remove turns or tokens without removing checks; all are off in
+`configs/baseline.toml` so that their effect can be measured:
+
+- `[agent] preload_results` runs the question through the local search before
+  the first model call and puts the best passages into the task message. A task
+  those passages answer needs one generator call instead of search, then answer.
+- `[jev] select` asks Jev one Noul per preloaded passage, in a single request,
+  and drops passages below `select_threshold`. The best-ranked passage always
+  stays, and a failed selection falls back to the unfiltered passages.
+- The reply parser recovers the decision object from code fences, reasoning
+  tags or surrounding prose, so those habits of small models no longer cost a
+  repair turn.
+
+`[model] max_tokens_parameter` adapts the request to an endpoint that names
+the output allowance `max_completion_tokens`, and `temperature = "omit"` leaves
+that field out for a model that rejects it. `hacklab probe` shows which is
+needed.
+
 ## Evidence and memory
 
 Development assistants have a separate optional Ichnora memory service and AST
@@ -42,13 +64,22 @@ evaluation. Exact document hashes identify parsed input. Short, recent
 decision/observation pairs form working memory within the task and are dropped
 when the configured context-character allowance is reached.
 
-Document tools accept UTF-8 text/Markdown/JSON, comma-delimited CSV, text PDFs,
-DOCX and XLSX. They enforce byte, expansion, row/unit, response and quote limits.
+Document tools accept text/Markdown/JSON, CSV and TSV, HTML, e-mail (`.eml`),
+text PDFs, DOCX and XLSX. Text is read as UTF-8 and otherwise as Windows-1252.
+CSV uses the separator its header line uses most (comma, semicolon, tab or
+pipe). They enforce byte, expansion, row/unit, response and quote limits.
 Scanned PDFs need an explicit offline OCR preprocessing step; they are not
 silently interpreted as empty text. Spreadsheet formulas are rejected so that
-stale cached values are not mistaken for authoritative numbers. Numeric table
-values use a decimal point without currency or thousands separators; normalize
-locale-specific input explicitly and preserve the original evidence.
+stale cached values are not mistaken for authoritative numbers.
+
+Table aggregates read one column under one decimal convention. Currency signs,
+spaces and apostrophes are ignored, so `1.234,56 €` and `CHF 1'250.00` both
+work. With `decimal_separator = "auto"` the column's own values decide; a
+column that shows both conventions is rejected. A value such as `1.234` fits
+both: it is read with a decimal point unless the column shows a decimal comma
+elsewhere, and the result reports `number_format` and the count of such
+`ambiguous_numbers`. Set `decimal_separator` once the event's data is known.
+The cited quote always keeps the original text.
 
 An exact quote check proves that the cited string exists at that location. It
 does not prove that an inference follows, that an uncited conflicting document

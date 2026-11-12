@@ -18,23 +18,18 @@ let
     runtimeInputs = [
       pkgs.bash
       pkgs.coreutils
-      pkgs.gnugrep
-      pkgs.openssh
       pkgs.util-linux
     ];
     text = ''
       state=''${1:?state directory}
       umask 077
       mkdir -p -- "$state"
-      # A key used only for this guest: no personal key is needed or exposed.
-      if [[ ! -f "$state/id_ed25519" ]]; then
-        ssh-keygen -q -t ed25519 -N "" -C python-vm -f "$state/id_ed25519"
-      fi
       export HACKATHON_VM_STATE="$state"
       export HACKATHON_VM_RUNNER=${cfg.runner}
-      export HACKATHON_VM_SSH_PUBKEY="$state/id_ed25519.pub"
-      # A private control socket lets `stop` ask the guest to power off cleanly.
-      export QEMU_OPTS="-qmp unix:qmp.sock,server=on,wait=off"
+      # Two private sockets in the state directory, no network listener: one
+      # lets `stop` ask the guest to power off cleanly, the other carries the
+      # guest console that `view` attaches to.
+      export QEMU_OPTS="-qmp unix:qmp.sock,server=on,wait=off -chardev socket,id=console,path=console.sock,server=on,wait=off -device virtio-serial-pci -device virtconsole,chardev=console"
       exec bash ${../scripts/vm-run} --memory ${toString cfg.memoryMiB} --cpus ${toString cfg.vcpu}
     '';
   };
@@ -65,7 +60,7 @@ let
     name = "python-vm";
     runtimeInputs = [
       pkgs.coreutils
-      pkgs.openssh
+      pkgs.socat
       pkgs.systemd
     ];
     text = ''
@@ -88,7 +83,7 @@ in
       default = null;
       example = "/home/alice/.local/state/python-vm";
       description = ''
-        Directory for the guest disk, its SSH key and the per-boot store image.
+        Directory for the guest disk, the per-boot store image and control sockets.
         Null uses the operator's XDG state directory. Keep it on persistent
         storage; the disk holds credentials and work.
       '';

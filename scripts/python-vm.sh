@@ -3,16 +3,11 @@
 state=${configured_state:-${XDG_STATE_HOME:-$HOME/.local/state}/python-vm}
 unit=python-vm.service
 usage() {
-  echo "Usage: python-vm {start|stop|restart|status|logs|view|ssh [ARGUMENTS...]}" >&2
+  echo "Usage: python-vm {start|stop|restart|status|logs|view}" >&2
 }
-guest() {
-  ssh -p 2222 -i "$state/id_ed25519" -o IdentitiesOnly=yes \
-    -o UserKnownHostsFile="$state/known_hosts" -o StrictHostKeyChecking=accept-new \
-    hackathon@127.0.0.1 "$@"
-}
+[[ $# -le 1 ]] || { usage; exit 2; }
 case "${1:-status}" in
 start | stop | restart)
-  [[ $# -le 1 ]] || { usage; exit 2; }
   exec systemctl --user "$1" "$unit"
   ;;
 status)
@@ -26,20 +21,18 @@ view)
     echo 'The VM is not running. Start it with python-vm start.' >&2
     exit 1
   fi
-  for _ in $(seq 60); do
-    if guest -o BatchMode=yes -o ConnectTimeout=2 true 2>/dev/null; then
-      # One persistent terminal session, so a closed window loses no work.
-      guest -t 'cd ~/workspace/python-vm 2>/dev/null; exec tmux new-session -A -s main'
-      exit
-    fi
-    sleep 2
+  # A relative address keeps the socket path within the kernel's length limit.
+  cd -- "$state/run"
+  for _ in $(seq 30); do
+    [[ -S console.sock ]] && break
+    sleep 1
   done
-  echo 'The guest did not accept SSH within two minutes; see python-vm logs.' >&2
-  exit 1
-  ;;
-ssh)
-  shift
-  guest "$@"
+  if [[ ! -S console.sock ]]; then
+    echo 'The guest console is unavailable; see python-vm logs.' >&2
+    exit 1
+  fi
+  echo 'Guest console; press Enter for a prompt, Ctrl-] to detach. The session keeps running.'
+  exec socat STDIO,raw,echo=0,escape=0x1d UNIX-CONNECT:console.sock
   ;;
 *)
   usage

@@ -1,0 +1,26 @@
+# live.toml plus one change: Jev drops clearly irrelevant preloaded passages
+# before the generator reads them. Compare against live.toml on the same data.
+[model]
+provider = "openai"
+response_format = "json_object"
+
+[jev]
+enabled = true
+model = "jev-1.14.0"
+base_url = "https://api.typesafe.ai/v1/systemone"
+threshold = 0.7
+select = true
+select_threshold = 0.3
+
+[agent]
+preload_results = 8
+
+[limits]
+max_steps = 6
+max_calls = 10
+max_retries = 1
+timeout_seconds = 25
+task_timeout_seconds = 180
+max_context_chars = 24000
+max_output_tokens = 1400
+max_total_tokens = 16000

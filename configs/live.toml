@@ -1,9 +1,12 @@
-# Set URL, model and key in .env after the organizers announce the model.
-# base_url is the API prefix BEFORE /chat/completions, for example https://host/v1.
-# This adapter assumes an OpenAI-compatible API; replace the adapter if required.
+# The candidate profile. Set URL, model and key in .env after the organizers
+# announce the model. base_url is the API prefix BEFORE /chat/completions, for
+# example https://host/v1. This adapter assumes an OpenAI-compatible API.
 [model]
 provider = "openai"
 response_format = "json_object"
+# If the endpoint rejects a request, these two are the usual reasons:
+# max_tokens_parameter = "max_completion_tokens"
+# temperature = "omit"
 # input_usd_per_million = 0.0  # Replace with the organizer's actual scoring tariff.
 # output_usd_per_million = 0.0
 
@@ -14,7 +17,13 @@ base_url = "https://api.typesafe.ai/v1/systemone"
 # Public list price is NOT necessarily the event's scoring tariff.
 # input_usd_per_million = 0.042
 # output_usd_per_million = 0.0
-threshold = 0.8  # Starting value, not a measured optimum.
+threshold = 0.7  # TypeSafe's suggested starting point, not a measured optimum.
+
+[agent]
+# Search results for the question in the first prompt: an answerable task then
+# needs one generator call instead of a search turn first.
+preload_results = 5
+# decimal_separator = "comma"  # Fix once the data's convention is known; default "auto".
 
 [limits]
 max_steps = 6

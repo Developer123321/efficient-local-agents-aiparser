@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import csv
 import hashlib
+import io
 import json
 import math
 import re
@@ -16,6 +17,8 @@ import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation, localcontext
+from email import message_from_bytes, policy
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
 
@@ -31,7 +34,21 @@ MAX_SEARCH_CHARS = 2_000_000
 MAX_SEARCH_UNITS = 20_000
 MAX_RESPONSE_CHARS = 24_000
 MAX_QUOTE_CHARS = 2000
-SUPPORTED = {".txt", ".md", ".json", ".csv", ".pdf", ".docx", ".xlsx"}
+SUPPORTED = {
+    ".txt",
+    ".md",
+    ".json",
+    ".csv",
+    ".tsv",
+    ".html",
+    ".htm",
+    ".eml",
+    ".pdf",
+    ".docx",
+    ".xlsx",
+}
+_CURRENCY = re.compile(r"(?i)eur|usd|chf|gbp|[€$£%]")
+_BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "section"}
 
 
 class ToolError(ValueError):
@@ -92,6 +109,126 @@ def _decimal(value: Any) -> Decimal:
     if not result.is_finite() or abs(result) > Decimal("1e100"):
         raise ToolError("Numeric value exceeds the supported finite range")
     return result
+
+
+def _decode(data: bytes) -> str:
+    """UTF-8 first; exports from office software are often Windows-1252."""
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")
+
+
+def _delimiter(header: str) -> str:
+    """The separator the header line uses most, outside quoted cells."""
+    outside = re.sub(r'"[^"]*"', "", header)
+    counts = {candidate: outside.count(candidate) for candidate in ",;\t|"}
+    best = max(counts, key=lambda candidate: (counts[candidate], candidate == ","))
+    return best if counts[best] else ","
+
+
+class _HTMLText(HTMLParser):
+    """Visible text of an HTML document, one line per block element."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._hidden = 0
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in {"script", "style"}:
+            self._hidden += 1
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+        elif tag in {"td", "th"}:
+            self.parts.append(" | ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"}:
+            self._hidden = max(0, self._hidden - 1)
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._hidden:
+            self.parts.append(data)
+
+
+def _html_lines(content: str) -> list[str]:
+    parser = _HTMLText()
+    parser.feed(content)
+    parser.close()
+    lines = (" ".join(line.split()).strip(" |") for line in "".join(parser.parts).splitlines())
+    return [line for line in lines if line]
+
+
+def _number_parts(value: Any) -> tuple[str, bool, str]:
+    """Digits with separators, sign, and what the separators say about the convention."""
+    text = _CURRENCY.sub("", str(value).strip())
+    negative = text.startswith("(") and text.endswith(")")
+    if negative:
+        text = text[1:-1]
+    text = re.sub(r"[\s\u00a0\u202f'’]", "", text)
+    if text.endswith("-"):
+        negative, text = not negative, text[:-1]
+    if text[:1] in {"+", "-"}:
+        negative, text = negative != (text[0] == "-"), text[1:]
+    if not re.fullmatch(r"[0-9.,]*[0-9][0-9.,]*", text):
+        raise ToolError("A numeric, non-empty value is required")
+    dots, commas = text.count("."), text.count(",")
+    if dots and commas:
+        return text, negative, "point" if text.rfind(".") > text.rfind(",") else "comma"
+    if not dots and not commas:
+        return text, negative, "none"
+    separator = "." if dots else ","
+    grouped = re.fullmatch(rf"\d{{1,3}}(\{separator}\d{{3}})+", text) is not None
+    if dots + commas > 1:
+        if not grouped:
+            raise ToolError("Number has misplaced separators")
+        # A separator that repeats can only group thousands.
+        return text, negative, "comma" if separator == "." else "point"
+    if grouped:
+        return text, negative, "ambiguous"
+    return text, negative, "point" if separator == "." else "comma"
+
+
+def parse_numbers(values: list[Any], style: str = "auto") -> tuple[list[Decimal], str, int]:
+    """Read one column of numbers under a single decimal convention.
+
+    Returns the numbers, the convention used ("point" or "comma") and how many
+    values would also be valid numbers under the other convention, such as
+    1.234. Currency signs, spaces and apostrophes are ignored.
+    """
+    direct: dict[int, Decimal] = {}
+    parts: dict[int, tuple[str, bool, str]] = {}
+    for index, value in enumerate(values):
+        if isinstance(value, bool) or value is None:
+            raise ToolError("A numeric, non-empty value is required")
+        if isinstance(value, (int, float)):
+            direct[index] = _decimal(value)
+        else:
+            parts[index] = _number_parts(value)
+    evidence = {kind for _, _, kind in parts.values()} & {"point", "comma"}
+    if style == "auto":
+        if len(evidence) > 1:
+            raise ToolError("Column mixes decimal point and decimal comma; set decimal_separator")
+        style = evidence.pop() if evidence else "point"
+    group, decimal = (",", ".") if style == "point" else (".", ",")
+    numbers = []
+    for index in range(len(values)):
+        if index in direct:
+            numbers.append(direct[index])
+            continue
+        text, negative, _ = parts[index]
+        whole, _, fraction = text.partition(decimal)
+        if group in fraction or (
+            group in whole and not re.fullmatch(rf"\d{{1,3}}(\{group}\d{{3}})+", whole)
+        ):
+            raise ToolError("Number does not fit the column's decimal convention")
+        number = _decimal(whole.replace(group, "") + ("." + fraction if fraction else ""))
+        numbers.append(-number if negative else number)
+    ambiguous = sum(kind == "ambiguous" for _, _, kind in parts.values())
+    return numbers, style, ambiguous
 
 
 def _number_text(value: Decimal) -> str:
@@ -170,7 +307,13 @@ class ToolRegistry:
         "table": TableArgs,
     }
 
-    def __init__(self, root: Path, allowed_documents: list[str] | None = None):
+    def __init__(
+        self,
+        root: Path,
+        allowed_documents: list[str] | None = None,
+        decimal_separator: str = "auto",
+    ):
+        self.decimal_separator = decimal_separator
         self.root = root.resolve(strict=True)
         if not self.root.is_dir():
             raise ToolError("Document root must be a directory")
@@ -184,7 +327,10 @@ class ToolRegistry:
             "search": "Rank matching evidence snippets in task documents. No web access.",
             "read": "Read document units from a 1-based start (line/page/row).",
             "calculate": "Compute bounded decimal arithmetic without executing code.",
-            "table": "Filter exact column values and aggregate CSV/XLSX rows deterministically.",
+            "table": (
+                "Filter exact column values and aggregate CSV/TSV/XLSX rows deterministically. "
+                "Aggregates read amounts such as 1.234,56 EUR and report number_format."
+            ),
         }
         return [
             {
@@ -289,21 +435,40 @@ class ToolRegistry:
             units.append(unit)
 
         if suffix in {".txt", ".md", ".json"}:
-            content = path.read_text(encoding="utf-8-sig")
+            content = _decode(path.read_bytes())
             if suffix == ".json":
                 # Reject malformed JSON instead of silently treating it as text.
                 json.loads(content)
             for i, line in enumerate(content.splitlines(), 1):
                 append(Unit(f"line:{i}", line))
-        elif suffix == ".csv":
-            with path.open(encoding="utf-8-sig", newline="") as stream:
-                reader = csv.DictReader(stream)
-                columns = list(reader.fieldnames or [])
-                self._check_columns(columns)
-                for row_number, values in enumerate(reader, 2):
-                    if None in values or any(v is None for v in values.values()):
-                        raise ToolError("CSV row has a different number of cells from the header")
-                    append(Unit(f"row:{row_number}", self._row_text(values), values))
+        elif suffix in {".html", ".htm"}:
+            for i, line in enumerate(_html_lines(_decode(path.read_bytes())), 1):
+                append(Unit(f"line:{i}", line))
+        elif suffix == ".eml":
+            message = message_from_bytes(path.read_bytes(), policy=policy.default)
+            lines = [
+                f"{header}: {message[header]}"
+                for header in ("From", "To", "Cc", "Date", "Subject")
+                if message[header]
+            ]
+            body = message.get_body(preferencelist=("plain", "html"))
+            if body is not None:
+                text = body.get_content()
+                lines += (
+                    _html_lines(text) if body.get_content_subtype() == "html" else text.splitlines()
+                )
+            for i, line in enumerate(lines, 1):
+                append(Unit(f"line:{i}", line))
+        elif suffix in {".csv", ".tsv"}:
+            content = _decode(path.read_bytes())
+            delimiter = "\t" if suffix == ".tsv" else _delimiter(content.split("\n", 1)[0])
+            reader = csv.DictReader(io.StringIO(content, newline=""), delimiter=delimiter)
+            columns = list(reader.fieldnames or [])
+            self._check_columns(columns)
+            for row_number, values in enumerate(reader, 2):
+                if None in values or any(v is None for v in values.values()):
+                    raise ToolError("CSV row has a different number of cells from the header")
+                append(Unit(f"row:{row_number}", self._row_text(values), values))
         elif suffix == ".pdf":
             from pypdf import PdfReader
 
@@ -584,7 +749,9 @@ class ToolRegistry:
                 raise ToolError("No matching rows; a numeric aggregate is undefined")
             with localcontext() as context:
                 context.prec = 50
-                numbers = [_decimal(unit.values.get(column)) for unit in matching]
+                numbers, number_format, ambiguous = parse_numbers(
+                    [unit.values.get(column) for unit in matching], self.decimal_separator
+                )
                 if operation == "sum":
                     numeric = sum(numbers, Decimal(0))
                 elif operation == "mean":
@@ -594,8 +761,15 @@ class ToolRegistry:
                 else:
                     numeric = max(numbers)
                 value = _number_text(numeric)
+        interpretation: dict[str, Any] = {}
+        if operation != "count":
+            interpretation["number_format"] = "decimal_" + number_format
+            if ambiguous:
+                # Values such as 1.234 are valid under both conventions.
+                interpretation["ambiguous_numbers"] = ambiguous
         return {
             "value": value,
+            **interpretation,
             "operation": operation,
             "column": column,
             "matched_rows": len(matching),

@@ -120,10 +120,16 @@ def _safe_config(config: dict) -> dict:
         for key in ("provider", "model", "response_format", "api_key_env"):
             if key in values:
                 output[key] = _label(values[key])
-        for key in ("enabled",):
+        for key in ("enabled", "select"):
             if type(values.get(key)) is bool:
                 output[key] = values[key]
-        for key in ("input_usd_per_million", "output_usd_per_million", "threshold"):
+        for key in (
+            "input_usd_per_million",
+            "output_usd_per_million",
+            "threshold",
+            "select_threshold",
+            "temperature",
+        ):
             if values.get(key) is None:
                 output[key] = None
             elif type(values[key]) in (int, float) and math.isfinite(values[key]):
@@ -142,6 +148,13 @@ def _safe_config(config: dict) -> dict:
             except ValueError:
                 pass
         safe[section] = output
+    agent = config.get("agent", {})
+    if isinstance(agent, dict):
+        safe["agent"] = {
+            key: value if type(value) is int else _label(value)
+            for key, value in agent.items()
+            if key in {"preload_results", "decimal_separator"} and type(value) in (int, str)
+        }
     limits = config.get("limits", {})
     allowed_limits = {
         "max_steps",

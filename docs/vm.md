@@ -32,17 +32,13 @@ On an x86_64 Linux machine with Nix flakes and KVM:
 
 ```console
 bash scripts/vm-run                 # Includes IBM Bob Shell; --no-bob leaves it out
-ssh -p 2222 hackathon@127.0.0.1     # From a second host terminal
 ```
 
-`vm-run` builds the guest, hands it one SSH public key and boots it on the
-serial console. At every boot it authorizes the first of `~/.ssh/id_ed25519.pub`,
-`id_ecdsa.pub` and `id_rsa.pub`; set `HACKATHON_VM_SSH_PUBKEY=/path/key.pub` to
-choose another file. Only that public key line reaches the guest, through a QEMU
-firmware entry that systemd stores on tmpfs. The private key stays on the host,
-and no host directory is mounted. An editor on the host can work in the guest
-over the same SSH connection. `nix-ld` is enabled for the prebuilt binaries
-such editors install; no editor remote session was tested.
+`vm-run` builds the guest and opens its console in the same terminal, logged in
+as `hackathon`. That console is the only way in: **the guest runs no SSH daemon,
+no port is forwarded and nothing is mounted from the host.** Start `tmux` in the
+console for several windows, and type `fit` after resizing the terminal window,
+because a serial console cannot report its size.
 
 The default guest has 4 vCPUs, 8 GiB RAM and a 40 GiB sparse persistent disk.
 On a smaller laptop start it with, for example, `--memory 6144 --cpus 2`. Keep
@@ -74,7 +70,7 @@ Build through the normal Git-backed flake reference (`nix build .#vm`), not a
 
 The console logs into the ordinary `hackathon` account, initially with an empty
 local password so its first `passwd` works. Root is locked. Set the password
-before leaving the console unattended. Then, on the console or over SSH:
+before leaving the console unattended; `sudo` needs it. Then:
 
 ```console
 passwd
@@ -83,31 +79,15 @@ just ready          # Dependency sync, development memory, code index, MCP, skil
 just benchmark
 ```
 
-SSH accepts public keys and rejects password/root login. The host listener binds
-only `127.0.0.1:2222`; there is no LAN listener. QEMU user-mode NAT allows the
-guest to reach the model APIs, and the guest's firewall rejects new connections
-to the host's loopback services. The host home, workspace, SSH agent and device
-files are not mounted into the guest. Reach a service inside the guest with an
-SSH tunnel, for example `ssh -p 2222 -L 8000:127.0.0.1:8000 hackathon@127.0.0.1`.
+QEMU user-mode NAT lets the guest reach the model APIs. Nothing reaches the
+guest: the host opens no listener for it, and the guest's firewall rejects new
+connections to the host's loopback services. The host home, workspace, SSH
+agent and device files are not mounted into the guest.
 
-For later updates, copy reviewed, versioned project source from the host:
-
-```console
-bash scripts/vm-copy
-ssh -p 2222 hackathon@127.0.0.1
-cd ~/workspace/python-vm
-uv sync --locked
-just doctor
-just benchmark
-```
-
-`vm-copy` copies Git-tracked files from the current checkout, including staged
-source changes. Ignored runtime data and secrets are excluded. It keeps normal
-SSH host-key checks and does not copy `.git`. Copy private datasets separately
-with `scp -P 2222`. Enter event API keys inside the guest or resolve them using
-your existing runtime secret manager.
-If an update adds new source files, review and `git add` those exact paths in
-the guest before using Nix there; never stage private runtime data.
+Move work in and out through the network, as the guest sees it: `git` against
+the shared repository, downloads with `curl`, or `wormhole receive` for a file
+sent from another machine with Magic Wormhole. Enter event API keys inside the
+guest.
 
 Shut the guest down with `sudo poweroff`. Its disk remains at
 `${XDG_STATE_HOME:-$HOME/.local/state}/efficient-local-agents/vm/hackathon.qcow2`.
@@ -119,9 +99,11 @@ privately; it may contain credentials, documents and traces. Never commit or
 publish it.
 
 `bash scripts/vm-smoke` checks a build end to end on the current machine. It
-boots a disposable disk with a throwaway key, then runs the dependency sync,
-`just check`, the mock benchmark and a native-wheel import inside the guest. It
-needs KVM, a free port 2222 and PyPI access, and leaves the real disk untouched.
+boots a disposable disk and drives the guest console to run
+`scripts/guest-check` there: no SSH daemon or network listener, the host's
+loopback out of reach, `just ready`, `just check`, the mock benchmark and a
+native-wheel import. It needs KVM and PyPI access, and leaves the real disk
+untouched.
 
 ## On a NixOS host: `python-vm`
 
@@ -145,8 +127,7 @@ The module installs a user service that is never started automatically and the
 | Command | Effect |
 | --- | --- |
 | `python-vm start` / `stop` / `restart` | Control the VM; `stop` asks the guest to power off cleanly |
-| `python-vm view` | Open the guest's persistent `tmux` session in `~/workspace/python-vm` |
-| `python-vm ssh [ARGUMENTS...]` | Run SSH against the guest, for example `python-vm ssh -L 8000:127.0.0.1:8000` |
+| `python-vm view` | Attach this terminal to the guest console; Ctrl-] detaches and the session keeps running |
 | `python-vm status` / `logs` | Service state and the guest's boot console |
 
 Without `follows`, the guest keeps the package set this repository tests. A
@@ -159,17 +140,15 @@ runner=$(nix build --no-link --print-out-paths \
 HACKATHON_VM_RUNNER=$runner bash scripts/vm-smoke
 ```
 
-No sudo is involved: QEMU runs as the operator with user-mode networking. The
-first start creates an SSH key used only for this guest, so no personal key is
-needed. Disk, key and the per-boot store image live in
+No sudo is involved: QEMU runs as the operator with user-mode networking. Disk,
+the per-boot store image and two private control sockets live in
 `~/.local/state/python-vm` unless `stateDirectory` names another path; keep it
 on persistent storage. The service ends with the operator's login session.
 
-The guest reaches the Internet through the host's ordinary outbound path and
-is not reachable from the network the host is connected to: the only listener
-is `127.0.0.1:2222` on the host. The guest's firewall also rejects new
-connections to the host's own loopback services, which QEMU's user network
-would otherwise expose at `10.0.2.2`.
+The host gains no network listener at all. `view` uses a Unix socket that only
+the operator can open, so reaching the guest from another machine means logging
+in to the host first, for example over the host's own Tailscale SSH, and
+running `python-vm view` there. The guest is not a Tailnet node.
 
 ## KVM and nested guests
 

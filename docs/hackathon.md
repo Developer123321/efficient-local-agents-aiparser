@@ -76,8 +76,9 @@ reference sources; the runtime need not download skills or documentation. The
 TypeSafe skill is pinned in `flake.lock` and linked for the coding assistant.
 It recommends atomic questions with the decision logic in code, bundling
 questions that share state, and 0.7/0.3 as starting Noul thresholds. The
-harness default of 0.8 and its single Noul gate are uncalibrated; compare both
-on the event's fixtures.
+live profile starts its verification gate at 0.7 and can let Jev filter
+preloaded passages at 0.3; neither value is calibrated, so compare the
+profiles on the event's fixtures.
 
 ## Our recommended team plan
 

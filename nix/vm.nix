@@ -16,8 +16,7 @@ in
       enable = true;
       # QEMU user networking maps 10.0.2.2 and fec0::2 to the host's loopback
       # services. The guest needs them only as a next hop and for DHCP, so
-      # nothing in the guest may open connections to the host itself. Replies
-      # stay allowed: forwarded SSH arrives from that same address.
+      # nothing in the guest may open connections to the host itself.
       extraCommands = ''
         for tables in iptables ip6tables; do
           $tables -N hackathon-host 2>/dev/null || $tables -F hackathon-host
@@ -43,15 +42,8 @@ in
     cores = 4;
     diskSize = 40960;
     graphics = false;
-    # QEMU's user network forwards only a loopback listener on the receiving host.
-    forwardPorts = [
-      {
-        from = "host";
-        host.address = "127.0.0.1";
-        host.port = 2222;
-        guest.port = 22;
-      }
-    ];
+    # No port is forwarded: the guest is reachable only through its console.
+    forwardPorts = [ ];
     # The caller's HOME/workspace is never mounted into this guest.
     sharedDirectories = lib.mkForce { };
     # Nothing is shared, so the fixed-size shared memory backend is not needed;
@@ -62,24 +54,15 @@ in
   };
   services = {
     getty.autologinUser = "hackathon";
-    openssh = {
-      enable = true;
-      openFirewall = true;
-      # scripts/vm-run passes one public key per boot; see hackathon-ssh-key.
-      authorizedKeysFiles = [ "/run/hackathon-ssh/%u" ];
-      settings = {
-        PasswordAuthentication = false;
-        KbdInteractiveAuthentication = false;
-        PermitRootLogin = "no";
-      };
-    };
+    # No SSH daemon and no listener of any kind; work happens on the console.
+    openssh.enable = false;
   };
   users.users.hackathon = {
     isNormalUser = true;
     uid = 1000;
     extraGroups = [ "wheel" ];
     # An empty initial console password permits the first ordinary passwd call.
-    # SSH rejects all password authentication; set a password on first boot.
+    # Nothing can log in over the network; set a password for sudo on first boot.
     initialHashedPassword = "";
   };
   users.users.root.initialHashedPassword = "!";
@@ -104,27 +87,7 @@ in
   environment.sessionVariables.LD_LIBRARY_PATH = lib.makeLibraryPath wheelLibraries;
 
   systemd.services = {
-    # The key lives on tmpfs: it follows the host's current choice at every boot
-    # and no host file is mounted. A public key is not a secret.
-    hackathon-ssh-key = {
-      description = "Install the SSH public key passed by scripts/vm-run";
-      wantedBy = [ "multi-user.target" ];
-      before = [ "sshd.service" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ImportCredential = "hackathon.authorized_keys";
-        RuntimeDirectory = "hackathon-ssh";
-      };
-      script = ''
-        key="''${CREDENTIALS_DIRECTORY:-}/hackathon.authorized_keys"
-        if [ -s "$key" ]; then
-          install -m 0644 "$key" /run/hackathon-ssh/hackathon
-        fi
-      '';
-    };
-    # Seeding at boot instead of at the first interactive shell makes the project
-    # available to SSH commands and editor remote sessions as well.
+    # Seeding at boot keeps the first console login free of setup work.
     hackathon-seed = {
       description = "Seed the reviewed project source into the workspace once";
       wantedBy = [ "multi-user.target" ];
@@ -158,22 +121,38 @@ in
     Welcome to the efficient local agents workbench.
     Source is seeded into ~/workspace/python-vm at first boot.
     Set a console password: passwd
-    Host connection: ssh -p 2222 hackathon@127.0.0.1
-      scripts/vm-run passes your host's public SSH key at every boot.
+    This guest runs no SSH daemon and forwards no port; use this console.
+    After resizing the terminal window, type: fit
     Run: cd ~/workspace/python-vm; just ready; just benchmark
     Join the team history: gh auth login; git fetch origin; git reset origin/main
-    To update source later, use scripts/vm-copy from the host.
     Keep API keys in runtime .env or your existing secret manager, never in Nix.
   '';
   # A Git-backed flake supplies reviewed versioned source, excluding ignored
   # runtime credentials, virtual environments, datasets and benchmark traces.
   environment.etc."hackathon-source".source = hackathonSource;
   programs.bash.interactiveShellInit = ''
+    # A serial console cannot report its size; ask the terminal instead.
+    fit() {
+      local rows cols
+      [ -t 0 ] || return 0
+      printf '\e7\e[999;999H\e[6n\e8' >/dev/tty
+      IFS='[;' read -rs -d R -t 1 _ rows cols </dev/tty || return 0
+      case "$rows$cols" in
+        *[!0-9]* | "") return 0 ;;
+      esac
+      stty rows "$rows" cols "$cols"
+    }
+    # The host service's console; the foreground runner and the smoke test use ttyS0.
+    if [ "$(tty)" = /dev/hvc0 ]; then fit; fi
     if [ ! -e "$HOME/.hackathon-welcome" ]; then
       cat /etc/hackathon-help
       touch "$HOME/.hackathon-welcome"
     fi
   '';
   documentation.enable = false;
-  environment.systemPackages = [ pkgs.cacert ];
+  environment.systemPackages = [
+    pkgs.cacert
+    # Files reach an SSH-less guest through the network: `wormhole receive`.
+    pkgs.magic-wormhole
+  ];
 }

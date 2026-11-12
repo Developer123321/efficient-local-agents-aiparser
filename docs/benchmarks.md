@@ -20,7 +20,7 @@ paths and retry/validation behavior using synthetic responses.
 
 ## Controlled live comparison
 
-Start from a run with Jev disabled, then test Jev and budget settings separately:
+Start from a run with Jev and preloading disabled, then add them:
 
 ```sh
 uv run --locked hacklab benchmark --config configs/baseline.toml \
@@ -29,6 +29,10 @@ uv run --locked hacklab benchmark --config configs/live.toml \
   --dataset bench/smoke.jsonl --repeat 3 --out results/candidate.json
 uv run --locked hacklab compare results/baseline.json results/candidate.json
 ```
+
+`compare` reports the change in accuracy, known cost, calls and input/output
+tokens. Tokens and calls remain comparable while the event's prices are
+unknown. `configs/jev-select.toml` is `live.toml` plus Jev's passage filter.
 
 These example profiles vary multiple settings and are starting points. For a
 causal ablation copy the baseline config and change exactly one setting. Use

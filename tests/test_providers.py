@@ -374,3 +374,46 @@ def test_invalid_jev_probability_is_rejected(receipt, value):
     with pytest.raises(ProviderError, match="jev_probability_invalid"):
         provider.judge({}, {"claim": {"type": "noul", "instructions": "Check."}})
     assert len(receipt[0].calls(receipt[1])) == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"action":"final"}',
+        '```json\n{"action":"final"}\n```',
+        '```\n{"action":"final"}\n```',
+        'Here is my decision:\n{"action":"final"}\nI hope this helps.',
+        '<think>The user wants {"x": 1} maybe.</think>\n{"action":"final"}',
+        'Sure. [1, 2] then {"action":"final"} and {"action":"read"}',
+    ],
+)
+def test_decision_is_recovered_from_wrapped_model_output(content):
+    from hacklab.providers import decision_object
+
+    assert decision_object(content) == {"action": "final"}
+
+
+@pytest.mark.parametrize("content", ["", "no json here", "[1, 2, 3]", '"text"', "{broken"])
+def test_output_without_a_json_object_is_a_repairable_model_error(content):
+    from hacklab.providers import decision_object
+
+    with pytest.raises(ModelOutputError):
+        decision_object(content)
+
+
+def test_endpoint_specific_token_parameter_and_omitted_temperature(receipt):
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=completion())
+
+    provider, _ = small(
+        receipt, handler, max_tokens_parameter="max_completion_tokens", temperature="omit"
+    )
+    provider.complete([{"role": "user", "content": "x"}], {})
+    assert bodies[0]["max_completion_tokens"] == Limits().max_output_tokens
+    assert "max_tokens" not in bodies[0] and "temperature" not in bodies[0]
+    default, _ = small(receipt, handler)
+    default.complete([{"role": "user", "content": "x"}], {})
+    assert bodies[1]["max_tokens"] == Limits().max_output_tokens and bodies[1]["temperature"] == 0

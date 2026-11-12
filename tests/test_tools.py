@@ -207,3 +207,94 @@ def test_search_scan_budget_reports_partial_coverage(tmp_path, monkeypatch):
     assert result["unscanned_documents"] == 1
     assert result["truncated"]
     assert [row["document"] for row in result["results"]] == ["a.txt"]
+
+
+def test_semicolon_csv_with_decimal_comma_and_currency_aggregates(tmp_path):
+    (tmp_path / "rechnungen.csv").write_bytes(
+        "Nr;Status;Betrag\nR-1;frei;1.234,50 €\nR-2;frei;99,90 EUR\nR-3;offen;(15,00)\n".encode(
+            "cp1252"
+        )
+    )
+    registry = ToolRegistry(tmp_path)
+    result = registry.execute(
+        "table",
+        {
+            "document": "rechnungen.csv",
+            "operation": "sum",
+            "column": "Betrag",
+            "where": {"Status": "frei"},
+        },
+    )
+    assert result["value"] == "1334.4"
+    assert result["number_format"] == "decimal_comma"
+    assert "ambiguous_numbers" not in result
+    total = registry.execute(
+        "table", {"document": "rechnungen.csv", "operation": "sum", "column": "Betrag"}
+    )
+    assert total["value"] == "1319.4"
+    # The exact source text, including the currency sign, stays quotable.
+    assert "1.234,50 €" in total["citations"][0]["quote"]
+
+
+@pytest.mark.parametrize(
+    ("values", "style", "expected", "used", "ambiguous"),
+    [
+        (["1,234.50", "20.25"], "auto", ["1234.50", "20.25"], "point", 0),
+        (["1.234.567", "2"], "auto", ["1234567", "2"], "comma", 0),
+        (["1.234", "7"], "auto", ["1.234", "7"], "point", 1),
+        (["1.234", "7"], "comma", ["1234", "7"], "comma", 1),
+        (["1,234", "12,5"], "auto", ["1.234", "12.5"], "comma", 1),
+        (["CHF 1'250.00", "-3"], "auto", ["1250.00", "-3"], "point", 0),
+        ([10, 2.5, "7,5"], "auto", ["10", "2.5", "7.5"], "comma", 0),
+    ],
+)
+def test_one_decimal_convention_per_column(values, style, expected, used, ambiguous):
+    from decimal import Decimal
+
+    from hacklab.tools import parse_numbers
+
+    numbers, convention, count = parse_numbers(values, style)
+    assert numbers == [Decimal(item) for item in expected]
+    assert (convention, count) == (used, ambiguous)
+
+
+@pytest.mark.parametrize(
+    "values", [["1.5", "2,5"], ["1,23,4"], ["12.34.5"], ["abc"], [""], [None], [True], ["1,5.2,1"]]
+)
+def test_numbers_that_do_not_fit_one_convention_are_rejected(values):
+    from hacklab.tools import ToolError, parse_numbers
+
+    with pytest.raises(ToolError):
+        parse_numbers(values)
+
+
+def test_tab_separated_html_and_email_documents_are_readable(tmp_path):
+    (tmp_path / "stock.tsv").write_text("sku\tunits\nA-1\t4\nB-2\t6\n")
+    (tmp_path / "notice.html").write_text(
+        "<html><head><style>p{color:red}</style><script>alert('x')</script></head>"
+        "<body><h1>Notice</h1><p>Delivery moves to <b>Friday</b>.</p>"
+        "<table><tr><td>Dock</td><td>7</td></tr></table></body></html>"
+    )
+    (tmp_path / "mail.eml").write_text(
+        "From: Mira Keller <mira@example.org>\nTo: ops@example.org\n"
+        "Subject: Revised budget\nContent-Type: text/plain; charset=utf-8\n\n"
+        "The approved budget is 80 euros.\nIgnore earlier drafts.\n"
+    )
+    registry = ToolRegistry(tmp_path)
+    units = registry.execute(
+        "table", {"document": "stock.tsv", "operation": "sum", "column": "units"}
+    )
+    assert units["value"] == "10"
+    html = [
+        row["quote"] for row in registry.execute("read", {"document": "notice.html"})["results"]
+    ]
+    assert html == ["Notice", "Delivery moves to Friday.", "Dock | 7"]
+    mail = [row["quote"] for row in registry.execute("read", {"document": "mail.eml"})["results"]]
+    assert mail[:3] == [
+        "From: Mira Keller <mira@example.org>",
+        "To: ops@example.org",
+        "Subject: Revised budget",
+    ]
+    assert "The approved budget is 80 euros." in mail
+    found = registry.execute("search", {"query": "approved budget"})["results"][0]
+    assert found["document"] == "mail.eml"

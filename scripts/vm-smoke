@@ -1,57 +1,45 @@
 #!/usr/bin/env bash
-# Boots the VM on a disposable disk with a throwaway SSH key and checks the
-# guest end to end. Needs KVM, a free 127.0.0.1:2222 and PyPI access.
+# Boots the VM on a disposable disk and checks the guest end to end by driving
+# its console, the only way into the guest. Needs KVM and PyPI access.
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 work=$(mktemp -d "${TMPDIR:-/tmp}/hackathon-vm-smoke.XXXXXX")
 qemu=
 cleanup() {
+  exec 3>&- 2>/dev/null || true
   if [[ -n "$qemu" ]]; then kill "$qemu" 2>/dev/null || true; wait "$qemu" 2>/dev/null || true; fi
   rm -rf -- "$work"
 }
 trap cleanup EXIT
-ssh-keygen -q -t ed25519 -N '' -C vm-smoke -f "$work/key"
-# The guest host key is new on every disposable disk, so it cannot be pinned here.
-guest() {
-  ssh -p 2222 -i "$work/key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-    hackathon@127.0.0.1 "$@"
-}
-XDG_STATE_HOME=$work/state HACKATHON_VM_SSH_PUBKEY=$work/key.pub \
-  bash "$repo/scripts/vm-run" "$@" --memory 6144 --cpus 3 </dev/null >"$work/console.log" 2>&1 &
+log=$work/console.log
+mkfifo "$work/keys"
+# For this test only, QEMU listens on one host loopback port. The guest must
+# fail to reach it through the host's address in QEMU's user network.
+probe=$((20000 + RANDOM))
+XDG_STATE_HOME=$work/state QEMU_NET_OPTS="hostfwd=tcp:127.0.0.1:$probe-:9" \
+  bash "$repo/scripts/vm-run" "$@" --memory 6144 --cpus 3 \
+  <"$work/keys" >"$log" 2>&1 &
 qemu=$!
-for _ in $(seq 150); do
-  if guest true 2>/dev/null; then break; fi
-  if ! kill -0 "$qemu" 2>/dev/null; then tail -n 30 "$work/console.log" >&2; exit 1; fi
-  sleep 2
-done
-guest true || { tail -n 30 "$work/console.log" >&2; printf '%s\n' 'Guest SSH did not come up.' >&2; exit 1; }
-guest 'bash -s' <<'GUEST'
-set -euo pipefail
-echo "python: $(python3 --version), fallback: $(python3.14 --version), uv: $(uv --version)"
-echo "resources: $(nproc) vCPUs, $(awk '/MemTotal/ {printf "%d MiB", $2/1024}' /proc/meminfo)"
-if command -v bob >/dev/null; then echo "bob: $(bob --version 2>&1 | tail -n 1)"; else echo "bob: not in this variant"; fi
-# The host's loopback services must stay out of the guest's reach; the SSH
-# forward itself listens there, so it is a listener that certainly exists.
-if timeout 3 bash -c '</dev/tcp/10.0.2.2/2222' 2>/dev/null; then
-  echo 'The guest reached a host loopback service.' >&2
-  exit 1
-fi
-echo "host loopback: unreachable from the guest"
-cd ~/workspace/python-vm
-git remote get-url origin
-test -r .bob/skills/typesafe-ai/SKILL.md || test -r .agents/skills/typesafe-ai/SKILL.md
-echo "skills: $(find .bob/skills .agents/skills -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) linked"
-just ready >/dev/null
-just dev-status >/dev/null
-test -r .bob/mcp.json
-echo "development memory, code index and MCP configuration: ready"
-just check
-just benchmark >/dev/null
-just dev-down >/dev/null
-# Binary wheels that need libstdc++ and zlib from the guest.
-uv run --locked --with numpy --with pandas --with pymupdf --with duckdb \
-  python -c 'import numpy, pandas, pymupdf, duckdb; print("native wheels: ok")'
-GUEST
+exec 3>"$work/keys"
+# Waits until the console log shows a pattern, or fails with the log's tail.
+expect() {
+  local pattern=$1 seconds=$2
+  for _ in $(seq "$seconds"); do
+    if grep -aEq -- "$pattern" "$log"; then return 0; fi
+    if ! kill -0 "$qemu" 2>/dev/null; then break; fi
+    sleep 1
+  done
+  tr -d '\r' <"$log" | tail -n 30 >&2
+  printf 'The guest console never showed: %s\n' "$pattern" >&2
+  return 1
+}
+expect 'hackathon@hackathon:[^ ]*\]\$' 300
+# One short line: the checks themselves are part of the seeded project.
+printf '%s\n' "echo SMOKE_BEGIN; HOST_PROBE_PORT=$probe bash ~/workspace/python-vm/scripts/guest-check; echo \"SMOKE_EXIT=\$?\"" >&3
+expect 'SMOKE_EXIT=[0-9]+' 600
+# Drop terminal control sequences, then show what the guest printed.
+tr -d '\r' <"$log" | sed -E 's/\x1b\][^\x07\x1b]*(\x07|\x1b\\)//g; s/\x1b\[[0-9;?]*[A-Za-z]//g' |
+  sed -n '/SMOKE_BEGIN$/,/SMOKE_EXIT=[0-9]/p' | sed '1d'
+grep -aq 'SMOKE_EXIT=0' "$log" || { printf '%s\n' 'Guest checks failed.' >&2; exit 1; }
 printf '%s\n' 'VM smoke test passed.'
