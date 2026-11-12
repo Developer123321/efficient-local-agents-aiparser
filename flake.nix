@@ -15,6 +15,12 @@
       url = "git+https://github.com/timfewi/private-skills-catalog.git?ref=main";
       flake = false;
     };
+    # TypeSafe's own MIT-licensed guidance for building against Jev. Reviewed
+    # at the locked revision: instructions only, no scripts.
+    typesafe-skills = {
+      url = "git+https://github.com/typesafe-ai/skills.git?ref=main";
+      flake = false;
+    };
     # Only the local developer tools are composed here, not another assistant
     # deployment or its browser/model/service configuration.
     project-check = {
@@ -53,6 +59,7 @@
       bobshell,
       unix-skills,
       private-skills,
+      typesafe-skills,
       ...
     }:
     let
@@ -61,10 +68,18 @@
         inherit system;
         config.allowUnfreePredicate = package: nixpkgs.lib.getName package == "bobshell";
       };
-      baseTools = import ./nix/tools.nix { inherit pkgs; };
+      workbench = import ./nix/tools.nix { inherit pkgs; };
+      inherit (workbench) python;
       devTools = import ./nix/dev-tools.nix { inherit inputs system; };
-      tools = baseTools ++ builtins.attrValues devTools;
-      skills = import ./nix/skills.nix { inherit pkgs unix-skills private-skills; };
+      tools = workbench.packages ++ builtins.attrValues devTools;
+      skills = import ./nix/skills.nix {
+        inherit
+          pkgs
+          unix-skills
+          private-skills
+          typesafe-skills
+          ;
+      };
       bob = bobshell.packages.${system}.bobshell;
       mkShell =
         withBob:
@@ -72,10 +87,12 @@
           packages = tools ++ [ skills ] ++ nixpkgs.lib.optional withBob bob;
           HACKATHON_SKILLS_DIR = "${skills}/share/hackathon-skills";
           UV_PYTHON_DOWNLOADS = "never";
-          UV_PYTHON = "${pkgs.python312}/bin/python3.12";
+          UV_PYTHON = python.interpreter;
           shellHook = ''
             export PYTHONNOUSERSITE=1
-            printf '%s\n' 'Python 3.12 workbench ready. Run: uv sync --frozen; just doctor; just benchmark'
+            # Lets binary wheels (numpy, pandas, pymupdf, duckdb) find libstdc++ and zlib.
+            export LD_LIBRARY_PATH=${nixpkgs.lib.makeLibraryPath workbench.wheelLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            printf '%s\n' 'Python ${python.pythonVersion} workbench ready. Run: uv sync --locked; just doctor; just benchmark'
           '';
         };
       mkVM =
@@ -127,7 +144,14 @@
           meta.description = "Run the QEMU VM with the existing IBM Bob package";
         };
       };
-      nixosModules.default = import ./nix/module.nix { inherit tools skills bob; };
+      nixosModules.default = import ./nix/module.nix {
+        inherit
+          tools
+          python
+          skills
+          bob
+          ;
+      };
       nixosConfigurations = {
         hackathon = vm;
         hackathon-with-bob = vmWithBob;
@@ -138,6 +162,8 @@
         test '${toString vm.config.virtualisation.diskSize}' = 40960
         test '${toString vm.config.services.openssh.settings.PasswordAuthentication}' = ""
         test '${toString vm.config.hackathon.bob.enable}' = ""
+        test '${vm.config.environment.sessionVariables.UV_PYTHON}' = '${python}/bin/python3.15'
+        test '${toString vm.config.programs.nix-ld.enable}' = 1
         touch "$out"
       '';
       formatter.${system} = pkgs.nixfmt-tree;

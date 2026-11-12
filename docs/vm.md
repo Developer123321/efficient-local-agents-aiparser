@@ -16,7 +16,7 @@ guest's normal workspace and enter its Python shell:
 git clone https://github.com/timfewi/python-vm.git
 cd python-vm
 nix develop
-uv sync --frozen
+uv sync --locked
 just doctor
 just benchmark
 ```
@@ -28,18 +28,32 @@ provider is changed by this repository.
 
 ## Dedicated QEMU VM
 
-On an x86_64 Linux machine with Nix flakes enabled:
+On an x86_64 Linux machine with Nix flakes and KVM:
 
 ```console
-nix build .#vm
-bash scripts/vm-run
+bash scripts/vm-run                 # Includes IBM Bob Shell; --no-bob leaves it out
+ssh -p 2222 hackathon@127.0.0.1     # From a second host terminal
 ```
 
+`vm-run` builds the guest, hands it one SSH public key and boots it on the
+serial console. At every boot it authorizes the first of `~/.ssh/id_ed25519.pub`,
+`id_ecdsa.pub` and `id_rsa.pub`; set `HACKATHON_VM_SSH_PUBKEY=/path/key.pub` to
+choose another file. Only that public key line reaches the guest, through a QEMU
+firmware entry that systemd stores on tmpfs. The private key stays on the host,
+and no host directory is mounted. An editor on the host can work in the guest
+over the same SSH connection. `nix-ld` is enabled for the prebuilt binaries
+such editors install; no editor remote session was tested.
+
 The default guest has 4 vCPUs, 8 GiB RAM and a 40 GiB sparse persistent disk.
-It provides Python 3.12, uv, Ruff, Git/GitHub CLI, Just, ripgrep, fd, jq/yq,
-SQLite, DuckDB, PDF extraction, OCR, Pandoc, tmux and timing tools. No GPU or
-local model weights are required. Keep at least 4 GiB RAM for the host; build
-and dependency caches need additional disk space beyond the sparse guest disk.
+On a smaller laptop start it with, for example, `--memory 6144 --cpus 2`. Keep
+at least 4 GiB RAM for the host.
+
+It provides Python 3.15 (with `python3.14` as a fallback interpreter), uv, Ruff,
+Git/GitHub CLI, Just, ripgrep, fd, jq/yq, SQLite, DuckDB, PDF extraction, OCR
+for English and German, Pandoc, tmux, vim and timing tools. No GPU or local
+model weights are required. Binary wheels that load `libstdc++` or `zlib`, such
+as numpy, pandas, pymupdf and duckdb, import without extra setup. If a package
+has no CPython 3.15 wheel yet, run `export UV_PYTHON=3.14` and sync again.
 
 Ichnora, AST Index, agent-evidence, agent-tool-meter and Tabula are also included
 as pinned packages. After syncing the Python project, run `just dev-setup` to
@@ -47,46 +61,42 @@ prepare this checkout's memory service, AST snapshot and local MCP clients. The
 same command works in the existing Lab VM after entering this project's shell.
 
 The VM includes a read-only snapshot of the reviewed Git-backed project source.
-At first console login it copies that snapshot into `~/workspace/python-vm`
+At first boot a system service copies that snapshot into `~/workspace/python-vm`
 only if that directory does not exist. Existing projects are preserved. Ignored
 credentials, traces, datasets and `.venv` are excluded from the source snapshot.
-The fresh copy is initialized as a local Git repository with the pristine seed
-tracked, without an origin or historical commits. This retains Git filtering
-for later Nix commands before any runtime secrets are added.
+The fresh copy is a local Git repository with the pristine seed staged and
+`origin` set to this project's GitHub URL, without historical commits. This
+retains Git filtering for later Nix commands before any runtime secrets are
+added. To continue on the shared history, authenticate and run
+`git fetch origin && git reset origin/main`.
 Build through the normal Git-backed flake reference (`nix build .#vm`), not a
 `path:` reference that bypasses Git filtering.
 
 The console logs into the ordinary `hackathon` account, initially with an empty
 local password so its first `passwd` works. Root is locked. Set the password
-before leaving the console unattended. On first login:
+before leaving the console unattended. Then, on the console or over SSH:
 
 ```console
 passwd
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-# Paste your host's PUBLIC SSH key, as one line, into this file:
-nano ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-# The project is already available:
 cd ~/workspace/python-vm
-uv sync --frozen
+uv sync --locked
 just doctor
 just benchmark
 ```
 
-Keep the private key on the host. SSH accepts public keys and rejects password/root
-login. The host listener binds only `127.0.0.1:2222`; there is no LAN listener.
-QEMU user-mode NAT allows the guest to reach the model APIs. The host home,
-workspace, SSH agent and device files are not mounted into the guest.
+SSH accepts public keys and rejects password/root login. The host listener binds
+only `127.0.0.1:2222`; there is no LAN listener. QEMU user-mode NAT allows the
+guest to reach the model APIs. The host home, workspace, SSH agent and device
+files are not mounted into the guest. Reach a service inside the guest with an
+SSH tunnel, for example `ssh -p 2222 -L 8000:127.0.0.1:8000 hackathon@127.0.0.1`.
 
-For later updates, copy reviewed, versioned project source from the host and
-connect after installing the public key:
+For later updates, copy reviewed, versioned project source from the host:
 
 ```console
 bash scripts/vm-copy
 ssh -p 2222 hackathon@127.0.0.1
 cd ~/workspace/python-vm
-uv sync --frozen
+uv sync --locked
 just doctor
 just benchmark
 ```
@@ -94,17 +104,24 @@ just benchmark
 `vm-copy` copies Git-tracked files from the current checkout, including staged
 source changes. Ignored runtime data and secrets are excluded. It keeps normal
 SSH host-key checks and does not copy `.git`. Copy private datasets separately
-when needed. Enter event API keys inside the guest or resolve them using your
-existing runtime secret manager.
+with `scp -P 2222`. Enter event API keys inside the guest or resolve them using
+your existing runtime secret manager.
 If an update adds new source files, review and `git add` those exact paths in
 the guest before using Nix there; never stage private runtime data.
 
 Shut the guest down with `sudo poweroff`. Its disk remains at
 `${XDG_STATE_HOME:-$HOME/.local/state}/efficient-local-agents/vm/hackathon.qcow2`.
-`vm-run` holds an exclusive lock to reject a second runner against that disk.
-To move a configured guest,
-shut it down first and copy that disk privately; it may contain credentials,
-documents and traces. Never commit or publish it.
+The `run/` directory beside it holds the Nix store image that the runner
+rewrites at every start (the system closure is about 2 GiB); it is kept off
+`/tmp`, which is often RAM-backed. `vm-run` holds an exclusive lock to reject a second runner against
+that disk. To move a configured guest, shut it down first and copy that disk
+privately; it may contain credentials, documents and traces. Never commit or
+publish it.
+
+`bash scripts/vm-smoke` checks a build end to end on the current machine. It
+boots a disposable disk with a throwaway key, then runs the dependency sync,
+`just check`, the mock benchmark and a native-wheel import inside the guest. It
+needs KVM, a free port 2222 and PyPI access, and leaves the real disk untouched.
 
 ## KVM and nested guests
 
@@ -121,39 +138,59 @@ affect the agent's API-only Python runtime.
 ## IBM Bob
 
 Your existing private packaging is consumed at the revision in `flake.lock`.
-Use the separate shell or VM variant:
+`scripts/vm-run` starts the guest that contains it; the Nix shell has a
+separate variant:
 
 ```console
-nix develop .#with-bob
+bash scripts/vm-run             # Guest with Bob Shell
+bash scripts/vm-run --no-bob    # Guest without the unfree package
+nix develop .#with-bob          # Shell with Bob on an existing machine
 bob --version
-# Or:
-bash scripts/vm-run --bob
 ```
+
+Bob needs three runtime steps that no build performs. Do them once in the
+guest before the event; the guest disk keeps the result:
+
+1. Read and accept IBM's terms: `bob --accept-license chat`.
+2. Authenticate. The guest has no browser, so IBM's documented route for such
+   environments applies: create an API key with scope Inference in the Bob web
+   portal and export it as `BOB_API_KEY`, for example in the guest's
+   `~/.bashrc`. Browser login from this headless guest is untested.
+3. Start `bob chat` in `~/workspace/python-vm` and ask it to list its skills.
+
+In that directory Bob loads `AGENTS.md` as workspace rules, reads the project
+skills in `.bob/skills` and, after `just dev-setup`, the MCP servers in
+`.bob/mcp.json`. Bob asks before activating a skill unless you allow the
+`skill` permission in its own settings.
 
 Bob is a coding assistant for building the solution. It is not silently used as
 a third competition model. IBM account authentication, event credits and terms
 remain runtime steps; no key, consent record or IBM payload is committed here.
 Consult the existing [`bobshell.nix` instructions](https://github.com/timfewi/bobshell.nix#license-and-authentication-at-runtime).
 Do not upload Bob-containing closures or VM images to a public binary cache.
-The default VM excludes Bob.
 
 ## Your tools and skills
 
-`nix/skills.nix` selects twelve relevant skills directly from the pinned
-`unix-agent-skills` and `private-skills-catalog` sources. It creates immutable
-links, without copying or forking their instructions. `HACKATHON_SKILLS_DIR`
-points to the selection. To expose it to an assistant that supports the
-`.agents/skills` convention:
+`nix/skills.nix` selects twelve skills directly from the pinned
+`unix-agent-skills` and `private-skills-catalog` sources, plus TypeSafe's own
+`typesafe-ai` skill for building against Jev. It creates immutable links,
+without copying or forking their instructions. `HACKATHON_SKILLS_DIR` points to
+the selection. The dedicated guest links it into the seeded project at first
+boot: `.bob/skills` with Bob, `.agents/skills` without. Elsewhere, or after a
+pin update:
 
 ```console
 bash scripts/vm-skills
 ```
 
-Existing files are preserved. You may pass a different skill-discovery
-directory as the first argument when your assistant documents another layout.
-Restart the assistant after linking. Merely exposing a directory does not
-prove every client has loaded it. Skills help the development assistant;
-the competition harness uses its own short, bounded runtime prompts.
+The script chooses `.bob/skills` when `bob` is installed and `.agents/skills`
+otherwise; pass another skill-discovery directory as the first argument when
+your assistant documents a different layout. It refreshes its own links and
+preserves every other file. Use one location: Bob 2.1.0 scans both and reports
+a skill found twice as shadowed. Restart the assistant after linking. Merely
+exposing a directory does not prove every client has loaded it. Skills help
+the development assistant; the competition harness uses its own short, bounded
+runtime prompts.
 
 For an existing NixOS guest, the optional module installs this workbench without
 creating another VM:
@@ -207,16 +244,8 @@ nix build .#checks.x86_64-linux.vm-contract
 nix build .#vm
 ```
 
-The development run in this cloud environment successfully evaluated the full
-flake, both VM variants and both shells with Nix 2.35.6, and checked formatting
-with the pinned Nixpkgs formatter. This cloud has no `/dev/kvm`, no installed
-`/nix` and no mount permission for a local chroot. An attempted contract build
-was blocked while setting up its build environment with
-`cannot set domain name: Operation not permitted`. A VM build/boot has not
-been established here.
-
-Evaluation checks option types and derivations. A VM build still does not
-demonstrate a successful boot, guest networking, target-hardware KVM, IBM login
-or the organizer's unknown benchmark contract. Record those checks on the
-actual laptop separately. The event adapters and offline practice benchmarks
-are described in the project README.
+[VERIFICATION.md](../VERIFICATION.md) records the build, the boot and the guest
+checks that actually ran, and what remains untested. Evaluation checks option
+types and derivations; `scripts/vm-smoke` is the check that boots the guest.
+Neither demonstrates IBM login, the event network or the organizer's unknown
+benchmark contract. Repeat the smoke test on the laptop you will bring.

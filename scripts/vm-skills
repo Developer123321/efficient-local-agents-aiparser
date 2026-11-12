@@ -3,7 +3,8 @@ set -euo pipefail
 
 if [[ ${1:-} == --help || $# -gt 1 ]]; then
   printf '%s\n' 'Usage: scripts/vm-skills [destination]' \
-    'Default: .agents/skills in this checkout. Links the pinned catalog selection; never overwrites files.'
+    'Default: .bob/skills in this checkout when bob is installed, else .agents/skills.' \
+    'Links the pinned catalog selection; never overwrites files that are not its own links.'
   exit 0
 fi
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -12,16 +13,32 @@ if [[ -z "$source_dir" || ! -d "$source_dir" ]]; then
   printf '%s\n' 'Enter nix develop first, or enable the hackathon NixOS module.' >&2
   exit 1
 fi
-destination=${1:-$repo/.agents/skills}
+# One location only: Bob 2.1.0 also scans .agents/skills and reports a skill
+# found in both places as shadowed.
+if (($#)); then
+  destination=$1
+elif command -v bob >/dev/null; then
+  destination=$repo/.bob/skills
+else
+  destination=$repo/.agents/skills
+fi
 mkdir -p -- "$destination"
 for skill in "$source_dir"/*; do
   [[ -d "$skill" ]] || continue
-  target="$destination/${skill##*/}"
-  if [[ -e "$target" || -L "$target" ]]; then
-    if [[ -L "$target" && $(readlink -- "$target") == "$skill" ]]; then continue; fi
+  name=${skill##*/}
+  target="$destination/$name"
+  if [[ -L "$target" ]]; then
+    current=$(readlink -- "$target")
+    [[ "$current" == "$skill" ]] && continue
+    # A link into an earlier pinned selection is ours to refresh.
+    if [[ "$current" != */share/hackathon-skills/"$name" ]]; then
+      printf 'Preserving existing skill: %s\n' "$target" >&2
+      continue
+    fi
+  elif [[ -e "$target" ]]; then
     printf 'Preserving existing skill: %s\n' "$target" >&2
     continue
   fi
-  ln -s -- "$skill" "$target"
+  ln -sfn -- "$skill" "$target"
 done
 printf 'Skills linked in %s. Restart your coding assistant to refresh discovery.\n' "$destination"

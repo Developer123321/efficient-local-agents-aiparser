@@ -59,15 +59,25 @@ need calibration on representative examples.
 [IBM Bob Shell](https://bob.ibm.com/docs/shell) is a coding and shell assistant.
 The [official installation guide](https://bob.ibm.com/docs/shell/getting-started/install-and-setup)
 currently requires Node.js 24 or later, documents the `@ibm/bob` package, and
-supports IBMid/SSO or `BOB_API_KEY` authentication. Use the existing `bobshell.nix`
-integration to build and inspect the project. Bob access does not replace the
+supports IBMid/SSO or `BOB_API_KEY` authentication. Browser login needs a
+browser; IBM documents the API key (scope Inference) for environments without
+one, such as this headless guest. Bob Shell loads a workspace `AGENTS.md` as
+[custom rules](https://bob.ibm.com/docs/shell/configuration/bobshell-custom-rules),
+project [skills](https://bob.ibm.com/docs/shell/features/skills) from
+`.bob/skills` and MCP servers from `.bob/mcp.json` (checked 12 November 2026).
+Use the existing `bobshell.nix` integration to build and inspect the project. Bob access does not replace the
 two competition models or authorize a third runtime model.
 
 For future integration changes, consult the
 [official TypeSafe agent-skill instructions](https://docs.typesafe.ai/agent-skill),
 the [skill source](https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai)
 and the [OpenAPI specification](https://api.typesafe.ai/openapi.json). These are
-reference sources; the runtime need not download skills or documentation.
+reference sources; the runtime need not download skills or documentation. The
+TypeSafe skill is pinned in `flake.lock` and linked for the coding assistant.
+It recommends atomic questions with the decision logic in code, bundling
+questions that share state, and 0.7/0.3 as starting Noul thresholds. The
+harness default of 0.8 and its single Noul gate are uncalibrated; compare both
+on the event's fixtures.
 
 ## Our recommended team plan
 

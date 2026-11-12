@@ -18,6 +18,7 @@ dist/
 *.egg-info/
 vendor/
 .agents/skills/
+.bob/skills/
 .mcp.json
 .bob/mcp.json
 .tabula/state.json

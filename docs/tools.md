@@ -109,11 +109,15 @@ already pinned `coding-agents-nix` tool selection in an existing consumer. That
 is the route for the full managed toolchain. The direct tool inputs avoid adding
 a second assistant deployment. Project Check's package is not added to the
 default closure, which avoids its Semgrep dependency; `just check` remains the
-project's fast gate. The shared input only satisfies tool flake dependencies.
+project's fast gate. It uses the `ruff` on PATH, which the Nix shell and the
+guest provide at the pinned version: the PyPI `ruff` wheel is a generic Linux
+executable that does not start on NixOS without `nix-ld`. The shared input only satisfies tool flake dependencies.
 
-Twelve selected skills link to their canonical catalogs, including
-`ichnora-memory` and `ast-navigation`. Their implementations are not duplicated
-here. `bash scripts/vm-skills` preserves existing files. Skill links alone do
+Thirteen selected skills link to their canonical sources: twelve from the
+owner's catalogs, including `ichnora-memory` and `ast-navigation`, and TypeSafe's
+`typesafe-ai` skill for Jev. Their implementations are not duplicated here.
+`bash scripts/vm-skills` links them into `.bob/skills` when Bob is installed,
+otherwise `.agents/skills`, and preserves files that are not its own links. Skill links alone do
 not establish service readiness; use status commands and actual MCP handshakes.
 
 Bob authentication and terms remain described in

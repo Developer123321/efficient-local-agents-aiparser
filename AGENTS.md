@@ -8,6 +8,8 @@ machine configuration. Keep existing host and Lab VM policy intact.
   explicit VM checks in docs/vm.md. Report checks actually executed and blockers.
 - Use code for control flow, arithmetic, parsing and validation. Keep model
   decisions small and typed. Jev is a native System One provider, never a chat model.
+  Use the linked `typesafe-ai` skill when designing Jev state, questions or
+  thresholds, and keep those constants together in one module.
 - Bob and other coding assistants build the solution; only the two models
   provided by the organizers may make runtime competition decisions.
 - Keep benchmark reference answers out of model input, tool results and memory.

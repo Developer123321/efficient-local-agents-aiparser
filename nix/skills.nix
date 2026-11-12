@@ -2,6 +2,7 @@
   pkgs,
   unix-skills,
   private-skills,
+  typesafe-skills,
 }:
 let
   selected = {
@@ -17,6 +18,7 @@ let
     hypothesis-testing = private-skills + "/skills/code/hypothesis-testing";
     workload-measurement = private-skills + "/skills/agent/workload-measurement";
     python-task-scripts = private-skills + "/skills/code/python-task-scripts";
+    typesafe-ai = typesafe-skills + "/skills/typesafe-ai";
   };
 in
 pkgs.linkFarm "hackathon-skills" (

@@ -139,7 +139,7 @@ def _retry_after(value: str | None) -> float:
     except ValueError:
         try:
             delay = parsedate_to_datetime(value).timestamp() - time.time()
-        except (ValueError, TypeError, OverflowError, OSError):
+        except ValueError, TypeError, OverflowError, OSError:
             return 0.0
     return max(0.0, delay) if math.isfinite(delay) else 0.0
 
@@ -214,7 +214,7 @@ class _HTTPProvider:
                             raise ProviderError("provider_response_too_large")
                     try:
                         payload = json.loads(chunks)
-                    except (ValueError, UnicodeDecodeError):
+                    except ValueError, UnicodeDecodeError:
                         payload = None
                     input_tokens, output_tokens = _usage(payload, self.provider)
                     if not 200 <= response.status_code < 300:
@@ -246,7 +246,7 @@ class _HTTPProvider:
                 error = exc
                 if status == "transport_error":
                     status = "invalid_response"
-            except (ValueError, KeyError, TypeError, IndexError):
+            except ValueError, KeyError, TypeError, IndexError:
                 error_type = ModelOutputError if self.provider == "openai" else ProviderError
                 error = error_type("provider_response_schema_invalid")
                 status = "invalid_response"

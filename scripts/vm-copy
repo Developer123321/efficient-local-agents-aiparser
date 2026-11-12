@@ -17,4 +17,4 @@ fi
 git ls-files -z | tar --null --no-recursion -T - -cf - |
   ssh -p "$port" hackathon@127.0.0.1 \
     'umask 077; mkdir -p "$HOME/workspace/python-vm"; tar -xf - -C "$HOME/workspace/python-vm"'
-printf '%s\n' 'Source copied. In the VM: cd ~/workspace/python-vm && uv sync --frozen && just doctor'
+printf '%s\n' 'Source copied. In the VM: cd ~/workspace/python-vm && uv sync --locked && just doctor'

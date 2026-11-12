@@ -151,7 +151,7 @@ def _identity(pid: int) -> dict[str, Any] | None:
             "command_sha256": hashlib.sha256((proc / "cmdline").read_bytes()).hexdigest(),
             "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
         }
-    except (OSError, IndexError):
+    except OSError, IndexError:
         return None
 
 
@@ -426,7 +426,7 @@ class DevelopmentTools:
                 scope = health.get("scope")
                 result["scope_verified"] = self._scope_matches(manifest, scope)
                 result["model_calls"] = health.get("service", {}).get("model_calls")
-            except (DevtoolsError, KeyError, TypeError):
+            except DevtoolsError, KeyError, TypeError:
                 result["service_unavailable"] = True
         try:
             ast = _run_json(

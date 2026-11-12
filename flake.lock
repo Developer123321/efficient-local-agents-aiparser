@@ -179,6 +179,7 @@
         "private-skills": "private-skills",
         "project-check": "project-check",
         "tabula": "tabula",
+        "typesafe-skills": "typesafe-skills",
         "unix-skills": "unix-skills"
       }
     },
@@ -201,6 +202,23 @@
         "ref": "main",
         "type": "git",
         "url": "https://github.com/timfewi/tabula-repo-nix.git"
+      }
+    },
+    "typesafe-skills": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792791651,
+        "narHash": "sha256-aQ7HheEFLarcil4jYIKn/FUIVOnw1JCoh0dYXZHTJ0E=",
+        "ref": "main",
+        "rev": "302eea662c54bca6730873fe245bec1d69ebc23d",
+        "revCount": 3,
+        "type": "git",
+        "url": "https://github.com/typesafe-ai/skills.git"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/typesafe-ai/skills.git"
       }
     },
     "unix-skills": {

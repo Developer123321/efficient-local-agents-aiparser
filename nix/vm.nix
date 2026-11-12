@@ -1,9 +1,13 @@
 {
+  config,
   lib,
   pkgs,
   hackathonSource,
   ...
 }:
+let
+  wheelLibraries = (import ./tools.nix { inherit pkgs; }).wheelLibraries;
+in
 {
   system.stateVersion = "26.05";
   networking = {
@@ -27,6 +31,9 @@
     ];
     # The caller's HOME/workspace is never mounted into this guest.
     sharedDirectories = lib.mkForce { };
+    # Nothing is shared, so the fixed-size shared memory backend is not needed;
+    # without it `scripts/vm-run --memory` can resize the guest.
+    qemu.enableSharedMemory = false;
     useNixStoreImage = true;
     writableStore = true;
   };
@@ -35,6 +42,8 @@
     openssh = {
       enable = true;
       openFirewall = true;
+      # scripts/vm-run passes one public key per boot; see hackathon-ssh-key.
+      authorizedKeysFiles = [ "/run/hackathon-ssh/%u" ];
       settings = {
         PasswordAuthentication = false;
         KbdInteractiveAuthentication = false;
@@ -62,13 +71,74 @@
     cores = 4;
     trusted-users = [ "root" ];
   };
+
+  # Prebuilt executables from PyPI wheels (ruff) and editor remote servers expect
+  # the generic Linux loader. The guest and these libraries share one Nixpkgs.
+  programs.nix-ld = {
+    enable = true;
+    libraries = wheelLibraries;
+  };
+  environment.sessionVariables.LD_LIBRARY_PATH = lib.makeLibraryPath wheelLibraries;
+
+  systemd.services = {
+    # The key lives on tmpfs: it follows the host's current choice at every boot
+    # and no host file is mounted. A public key is not a secret.
+    hackathon-ssh-key = {
+      description = "Install the SSH public key passed by scripts/vm-run";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "sshd.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ImportCredential = "hackathon.authorized_keys";
+        RuntimeDirectory = "hackathon-ssh";
+      };
+      script = ''
+        key="''${CREDENTIALS_DIRECTORY:-}/hackathon.authorized_keys"
+        if [ -s "$key" ]; then
+          install -m 0644 "$key" /run/hackathon-ssh/hackathon
+        fi
+      '';
+    };
+    # Seeding at boot instead of at the first interactive shell makes the project
+    # available to SSH commands and editor remote sessions as well.
+    hackathon-seed = {
+      description = "Seed the reviewed project source into the workspace once";
+      wantedBy = [ "multi-user.target" ];
+      unitConfig.ConditionPathExists = "!/home/hackathon/workspace/python-vm";
+      path = [ pkgs.git ];
+      serviceConfig = {
+        Type = "oneshot";
+        User = "hackathon";
+      };
+      script = ''
+        project="$HOME/workspace/python-vm"
+        mkdir -p "$HOME/workspace"
+        mkdir "$project"
+        cp -R --no-preserve=mode,ownership /etc/hackathon-source/. "$project/"
+        chmod -R u+w "$project"
+        # Establish the Git filtering boundary before the user adds runtime data.
+        git -C "$project" init -q -b main
+        git -C "$project" remote add origin https://github.com/timfewi/python-vm.git
+        git -C "$project" add -- .
+        # Bob reads project skills from .bob/skills; the links are Git-ignored.
+        if ! HACKATHON_SKILLS_DIR=/run/current-system/sw/share/hackathon-skills \
+          ${pkgs.runtimeShell} "$project/scripts/vm-skills" \
+          "$project/${if config.hackathon.bob.enable then ".bob" else ".agents"}/skills"; then
+          echo "Skill linking failed; run 'bash scripts/vm-skills' in the project." >&2
+        fi
+      '';
+    };
+  };
+
   environment.etc."hackathon-help".text = ''
     Welcome to the efficient local agents workbench.
-    Source is seeded into ~/workspace/python-vm at first login.
-    Set a password: passwd
-    Install an SSH public key in ~/.ssh/authorized_keys (chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys).
+    Source is seeded into ~/workspace/python-vm at first boot.
+    Set a console password: passwd
     Host connection: ssh -p 2222 hackathon@127.0.0.1
-    Run: cd ~/workspace/python-vm; uv sync --frozen; just doctor; just benchmark
+      scripts/vm-run passes your host's public SSH key at every boot.
+    Run: cd ~/workspace/python-vm; uv sync --locked; just doctor; just benchmark
+    Join the team history: gh auth login; git fetch origin; git reset origin/main
     To update source later, use scripts/vm-copy from the host.
     Keep API keys in runtime .env or your existing secret manager, never in Nix.
   '';
@@ -76,16 +146,6 @@
   # runtime credentials, virtual environments, datasets and benchmark traces.
   environment.etc."hackathon-source".source = hackathonSource;
   programs.bash.interactiveShellInit = ''
-    if [ ! -e "$HOME/workspace/python-vm" ]; then
-      mkdir -p "$HOME/workspace"
-      if mkdir "$HOME/workspace/python-vm" 2>/dev/null; then
-        cp -R --no-preserve=mode,ownership /etc/hackathon-source/. "$HOME/workspace/python-vm/"
-        chmod -R u+w "$HOME/workspace/python-vm"
-        # Establish the Git filtering boundary before the user adds runtime data.
-        git -C "$HOME/workspace/python-vm" init -q
-        git -C "$HOME/workspace/python-vm" add -- .
-      fi
-    fi
     if [ ! -e "$HOME/.hackathon-welcome" ]; then
       cat /etc/hackathon-help
       touch "$HOME/.hackathon-welcome"

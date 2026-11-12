@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Boots the VM on a disposable disk with a throwaway SSH key and checks the
+# guest end to end. Needs KVM, a free 127.0.0.1:2222 and PyPI access.
+set -euo pipefail
+
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/hackathon-vm-smoke.XXXXXX")
+qemu=
+cleanup() {
+  if [[ -n "$qemu" ]]; then kill "$qemu" 2>/dev/null || true; wait "$qemu" 2>/dev/null || true; fi
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
+ssh-keygen -q -t ed25519 -N '' -C vm-smoke -f "$work/key"
+# The guest host key is new on every disposable disk, so it cannot be pinned here.
+guest() {
+  ssh -p 2222 -i "$work/key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    hackathon@127.0.0.1 "$@"
+}
+XDG_STATE_HOME=$work/state HACKATHON_VM_SSH_PUBKEY=$work/key.pub \
+  bash "$repo/scripts/vm-run" "$@" --memory 6144 --cpus 3 </dev/null >"$work/console.log" 2>&1 &
+qemu=$!
+for _ in $(seq 150); do
+  if guest true 2>/dev/null; then break; fi
+  if ! kill -0 "$qemu" 2>/dev/null; then tail -n 30 "$work/console.log" >&2; exit 1; fi
+  sleep 2
+done
+guest true || { tail -n 30 "$work/console.log" >&2; printf '%s\n' 'Guest SSH did not come up.' >&2; exit 1; }
+guest 'bash -s' <<'GUEST'
+set -euo pipefail
+echo "python: $(python3 --version), fallback: $(python3.14 --version), uv: $(uv --version)"
+echo "resources: $(nproc) vCPUs, $(awk '/MemTotal/ {printf "%d MiB", $2/1024}' /proc/meminfo)"
+if command -v bob >/dev/null; then echo "bob: $(bob --version 2>&1 | tail -n 1)"; else echo "bob: not in this variant"; fi
+cd ~/workspace/python-vm
+git remote get-url origin
+test -r .bob/skills/typesafe-ai/SKILL.md || test -r .agents/skills/typesafe-ai/SKILL.md
+echo "skills: $(find .bob/skills .agents/skills -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) linked"
+uv sync --locked
+just check
+uv run --locked hacklab doctor >/dev/null
+just benchmark >/dev/null
+# Binary wheels that need libstdc++ and zlib from the guest.
+uv run --locked --with numpy --with pandas --with pymupdf --with duckdb \
+  python -c 'import numpy, pandas, pymupdf, duckdb; print("native wheels: ok")'
+GUEST
+printf '%s\n' 'VM smoke test passed.'

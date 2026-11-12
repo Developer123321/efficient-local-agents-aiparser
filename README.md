@@ -1,6 +1,6 @@
 # python-vm · Efficient Local Agents lab
 
-A reproducible Python 3.12 development environment and bootable NixOS/QEMU VM
+A reproducible Python 3.15 development environment and bootable NixOS/QEMU VM
 for the **14 November 2026 Efficient Local Agents Hackathon at IBM Vienna**.
 The starter harness keeps decisions typed, tools bounded, sources verifiable
 and every model request measurable. It is a starting point to calibrate on the
@@ -18,9 +18,9 @@ uv run --locked hacklab benchmark --config configs/mock.toml --out results/mock.
 uv run --locked hacklab solve --task bench/task.example.json --root bench/data
 ```
 
-With Python 3.12 and `uv` already installed, omit `nix develop`. Python packages
-are locked by `uv.lock`; `uv sync --locked --offline` works after one complete
-successful sync on that machine. No GPU or model download is required.
+With Python 3.15 or 3.14, `uv` and `ruff` already installed, omit `nix develop`.
+Python packages are locked by `uv.lock`; `uv sync --locked --offline` works after
+one complete successful sync on that machine. No GPU or model download is required.
 
 ## Enable development memory and code navigation
 
@@ -45,13 +45,16 @@ for lifecycle, MCP, scope and actual verification.
 ## Boot a separate VM
 
 ```sh
-nix build .#vm
-bash scripts/vm-run
+bash scripts/vm-smoke                # Once per machine: boot a disposable guest and check it
+bash scripts/vm-run                  # Persistent guest with IBM Bob Shell; --no-bob without
+ssh -p 2222 hackathon@127.0.0.1      # vm-run authorizes your host's public SSH key
 ```
 
-See [VM operation](docs/vm.md) for persistence, SSH, resource overrides, project
-transfer and running on your Security Laptop or inside the Lab VM. Running the
-development shell directly inside the existing Lab VM avoids nested virtualization.
+The guest seeds this project into `~/workspace/python-vm` with the selected
+skills linked for Bob. See [VM operation](docs/vm.md) for persistence, SSH,
+`--memory`/`--cpus`, Bob's license and login steps, project transfer and running
+on your Security Laptop or inside the Lab VM. Running the development shell
+directly inside the existing Lab VM avoids nested virtualization.
 
 ## At the hackathon
 
@@ -71,13 +74,16 @@ The generative adapter assumes an OpenAI-compatible `/chat/completions` endpoint
 this is configurable preparation, **not a verified organizer API contract**.
 Jev uses its real native `/v1/systemone` API. Enter actual organizer prices in the
 TOML configuration to estimate cost; without them, live cost remains **unknown**.
-Bob is a separate coding assistant; see [tool integration](docs/tools.md).
+Bob is the coding assistant that builds the agent, not a competition model; at
+runtime only the organizers' small model and Jev decide. Bob's license and
+login are runtime steps described in [VM operation](docs/vm.md#ibm-bob).
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `just check` | Format/lint checks and offline regression tests |
+| `bash scripts/vm-smoke` | Boot a disposable guest and run the checks inside it |
 | `just dev-setup` / `just dev-status` | Prepare and check local development memory, AST and MCP |
 | `just index` / `just dev-down` | Refresh code navigation / stop project memory |
 | `hacklab doctor` | Local readiness and credential-presence checks; no API requests |

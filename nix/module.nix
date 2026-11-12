@@ -1,5 +1,6 @@
 {
   tools,
+  python,
   skills,
   bob,
 }:
@@ -19,13 +20,15 @@
       tools
       ++ lib.optional config.hackathon.skills.enable skills
       ++ lib.optional config.hackathon.bob.enable bob;
+    # A stable path keeps linked skills valid when the system is rebuilt.
+    environment.pathsToLink = lib.optional config.hackathon.skills.enable "/share/hackathon-skills";
     environment.sessionVariables = {
       PYTHONNOUSERSITE = "1";
       UV_PYTHON_DOWNLOADS = "never";
-      UV_PYTHON = "${builtins.head tools}/bin/python3.12";
+      UV_PYTHON = python.interpreter;
     }
     // lib.optionalAttrs config.hackathon.skills.enable {
-      HACKATHON_SKILLS_DIR = "${skills}/share/hackathon-skills";
+      HACKATHON_SKILLS_DIR = "/run/current-system/sw/share/hackathon-skills";
     };
   };
 }

@@ -318,7 +318,7 @@ def run_task(task: Task, root: Path, config: Config, tracker: Any) -> tuple[str,
     except ProviderError as exc:
         answer = Answer(status="error", answer="", confidence=0, reason=str(exc))
         tracker.event(run_id, "provider", {"status": "error"})
-    except (OSError, ValueError, TypeError):
+    except OSError, ValueError, TypeError:
         answer = Answer(
             status="error", answer="", confidence=0, reason="Local task or document setup failed."
         )

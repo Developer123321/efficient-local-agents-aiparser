@@ -2,23 +2,38 @@
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-variant=vm
+state_root=${XDG_STATE_HOME:-${HOME}/.local/state}/efficient-local-agents/vm
+variant=vm-with-bob
 tcg=false
+memory=
+cpus=
+usage() {
+  printf '%s\n' 'Usage: scripts/vm-run [--no-bob] [--memory MiB] [--cpus N] [--tcg]' \
+    '  --no-bob      Start the variant without the unfree IBM Bob Shell package' \
+    '  --memory MiB  Guest RAM (default 8192)' \
+    '  --cpus N      Guest vCPUs (default 4)' \
+    '  --tcg         Slow software emulation when KVM is unavailable' \
+    "State: $state_root" \
+    'SSH: ssh -p 2222 hackathon@127.0.0.1' \
+    '  The first of ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub is authorized at' \
+    '  every boot. Select another public key file with HACKATHON_VM_SSH_PUBKEY.'
+}
+number() {
+  [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { printf '%s needs a positive integer.\n' "$1" >&2; exit 2; }
+}
 while (($#)); do
   case "$1" in
     --bob) variant=vm-with-bob ;;
+    --no-bob) variant=vm ;;
     --tcg) tcg=true ;;
-    -h|--help)
-      printf '%s\n' 'Usage: scripts/vm-run [--bob] [--tcg]' \
-        "State: ${XDG_STATE_HOME:-$HOME/.local/state}/efficient-local-agents/vm" \
-        'SSH: ssh -p 2222 hackathon@127.0.0.1 (install your public key at first console login)'
-      exit 0 ;;
-    *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+    --memory) number "$1" "${2:-}"; memory=$2; shift ;;
+    --cpus) number "$1" "${2:-}"; cpus=$2; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 command -v nix >/dev/null || { printf '%s\n' 'Install Nix with flakes before starting the VM.' >&2; exit 1; }
-state_root=${XDG_STATE_HOME:-${HOME}/.local/state}/efficient-local-agents/vm
 umask 077
 mkdir -p -- "$state_root"
 chmod 700 -- "$state_root"
@@ -29,10 +44,40 @@ if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
   printf '%s\n' 'KVM is unavailable. Use the devShell inside your existing Lab VM, or pass --tcg for slow software emulation.' >&2
   if ! "$tcg"; then exit 1; fi
 fi
+
+pubkey=${HACKATHON_VM_SSH_PUBKEY:-}
+if [[ -z "$pubkey" ]]; then
+  for candidate in "$HOME"/.ssh/id_ed25519.pub "$HOME"/.ssh/id_ecdsa.pub "$HOME"/.ssh/id_rsa.pub; do
+    if [[ -r "$candidate" ]]; then pubkey=$candidate; break; fi
+  done
+fi
+options=${QEMU_OPTS:-}
+# The generated runner writes a multi-gigabyte Nix store image into its working
+# directory at every start. One reused directory beside the disk avoids filling
+# a RAM-backed /tmp and leaving an image behind per boot.
+run_dir=$state_root/run
+mkdir -p -- "$run_dir"
+rm -f -- "$run_dir/authorized_keys"
+if [[ -n "$pubkey" ]]; then
+  # Only a public key line may cross into the guest, never private key material.
+  if [[ ! -r "$pubkey" ]] || ! grep -Eq '^(ssh-|ecdsa-|sk-)[A-Za-z0-9@.-]+ [A-Za-z0-9+/=]+' -- "$pubkey" ||
+    grep -q 'PRIVATE KEY' -- "$pubkey"; then
+    printf 'Not a readable SSH public key file: %s\n' "$pubkey" >&2
+    exit 1
+  fi
+  cp -- "$pubkey" "$run_dir/authorized_keys"
+  # Relative to the runner's working directory, so the path needs no quoting.
+  options+=" -fw_cfg name=opt/io.systemd.credentials/hackathon.authorized_keys,file=authorized_keys"
+  printf 'SSH access for %s: ssh -p 2222 hackathon@127.0.0.1\n' "$pubkey" >&2
+else
+  printf '%s\n' 'No SSH public key found; add one in the guest console or set HACKATHON_VM_SSH_PUBKEY.' >&2
+fi
+# The generated runner places QEMU_OPTS after its own -m/-smp, so these win.
+if [[ -n "$memory" ]]; then options+=" -m $memory"; fi
+if [[ -n "$cpus" ]]; then options+=" -smp $cpus"; fi
+if "$tcg"; then options+=" -accel tcg -cpu max"; fi
+
 runner=$(nix build --no-link --print-out-paths "${repo}#${variant}")
 export NIX_DISK_IMAGE="$state_root/hackathon.qcow2"
-if "$tcg"; then
-  export QEMU_OPTS="${QEMU_OPTS:-} -accel tcg -cpu max"
-fi
-cd -- "$state_root"
+export QEMU_OPTS=$options TMPDIR=$run_dir USE_TMPDIR=1
 exec "$runner/bin/run-hackathon-vm"
