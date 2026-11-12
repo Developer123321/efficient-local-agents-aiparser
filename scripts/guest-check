@@ -4,7 +4,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
-echo "python: $(python3 --version), fallback: $(python3.14 --version), uv: $(uv --version)"
+echo "python: $(python3 --version), also: $(python3.14 --version), $(python3.13 --version), $(python3.11 --version), uv: $(uv --version)"
 echo "resources: $(nproc) vCPUs, $(awk '/MemTotal/ {printf "%d MiB", $2/1024}' /proc/meminfo)"
 if command -v bob >/dev/null; then echo "bob: $(bob --version 2>&1 | tail -n 1)"; else echo "bob: not in this variant"; fi
 
@@ -34,14 +34,20 @@ fi
 wormhole --version >/dev/null
 git remote get-url origin
 test -r .bob/skills/typesafe-ai/SKILL.md || test -r .agents/skills/typesafe-ai/SKILL.md
-echo "skills: $(find .bob/skills .agents/skills -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) linked"
 just ready >/dev/null
-just dev-status >/dev/null
-test -r .bob/mcp.json
-echo "development memory, code index and MCP configuration: ready"
 just check
 just benchmark >/dev/null
-just dev-down >/dev/null
+just practice 7 | grep -F '"accuracy": 1.0' >/dev/null
+echo "rehearsal incident: solved by the playbooks without a model call"
+# The interpreter of the submission image and the oldest supported one.
+for version in 3.13 3.11; do
+  UV_PROJECT_ENVIRONMENT=.venv-$version UV_PYTHON=$version uv run --locked pytest -q | tail -n 1
+done
 # Binary wheels that need libstdc++ and zlib from the guest.
 uv run --locked --with numpy --with pandas --with pymupdf --with duckdb \
   python -c 'import numpy, pandas, pymupdf, duckdb; print("native wheels: ok")'
+# The submission image, built and run without a network. Needs the image
+# registries; set SKIP_CONTAINER_TEST=1 where they are unreachable.
+if [[ -z "${SKIP_CONTAINER_TEST:-}" ]]; then
+  bash scripts/container-test
+fi

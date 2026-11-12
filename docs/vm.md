@@ -13,12 +13,11 @@ tools, credentials and isolated profile state. Clone this project into the
 guest's normal workspace and enter its Python shell:
 
 ```console
-git clone https://github.com/timfewi/python-vm.git
-cd python-vm
+git clone https://github.com/timfewi/hacklab-vm.git
+cd hacklab-vm
 nix develop
-uv sync --locked
-just doctor
-just benchmark
+just ready
+just practice
 ```
 
 This avoids a second guest and does not require nested virtualization. The
@@ -44,20 +43,20 @@ The default guest has 4 vCPUs, 8 GiB RAM and a 40 GiB sparse persistent disk.
 On a smaller laptop start it with, for example, `--memory 6144 --cpus 2`. Keep
 at least 4 GiB RAM for the host.
 
-It provides Python 3.15 (with `python3.14` as a fallback interpreter), uv, Ruff,
-Git/GitHub CLI, Just, ripgrep, fd, jq/yq, SQLite, DuckDB, PDF extraction, OCR
-for English and German, Pandoc, tmux, vim and timing tools. No GPU or local
+It provides Python 3.15, uv, Ruff, Git/GitHub CLI, Just, ripgrep, fd, jq/yq,
+SQLite, DuckDB, PDF extraction, OCR for English and German, Pandoc, tmux, vim
+and timing tools, and rootless Podman with a `docker` alias. No GPU or local
 model weights are required. Binary wheels that load `libstdc++` or `zlib`, such
-as numpy, pandas, pymupdf and duckdb, import without extra setup. If a package
-has no CPython 3.15 wheel yet, run `export UV_PYTHON=3.14` and sync again.
+as numpy, pandas, pymupdf and duckdb, import without extra setup.
 
-Ichnora, AST Index, agent-evidence, agent-tool-meter and Tabula are also included
-as pinned packages. After syncing the Python project, run `just dev-setup` to
-prepare this checkout's memory service, AST snapshot and local MCP clients. The
-same command works in the existing Lab VM after entering this project's shell.
+Three older interpreters are present under their versioned names:
+`python3.13` is what the submission image runs, `python3.11` is the oldest
+version the project supports, and `python3.14` is the escape hatch for a
+package without a CPython 3.15 wheel. `export UV_PYTHON=3.13` and a new sync
+run the project on that interpreter.
 
 The VM includes a read-only snapshot of the reviewed Git-backed project source.
-At first boot a system service copies that snapshot into `~/workspace/python-vm`
+At first boot a system service copies that snapshot into `~/workspace/hacklab-vm`
 only if that directory does not exist. Existing projects are preserved. Ignored
 credentials, traces, datasets and `.venv` are excluded from the source snapshot.
 The fresh copy is a local Git repository with the pristine seed staged and
@@ -74,9 +73,10 @@ before leaving the console unattended; `sudo` needs it. Then:
 
 ```console
 passwd
-cd ~/workspace/python-vm
-just ready          # Dependency sync, development memory, code index, MCP, skills
-just benchmark
+cd ~/workspace/hacklab-vm
+just ready            # Dependency sync, the linked Jev skill, readiness report
+just practice         # A rehearsal incident, solved by code without a model
+just container-test   # Build the submission image and run it without network
 ```
 
 QEMU user-mode NAT lets the guest reach the model APIs. Nothing reaches the
@@ -101,19 +101,47 @@ publish it.
 `bash scripts/vm-smoke` checks a build end to end on the current machine. It
 boots a disposable disk and drives the guest console to run
 `scripts/guest-check` there: no SSH daemon or network listener, the host's
-loopback out of reach, `just ready`, `just check`, the mock benchmark and a
-native-wheel import. It needs KVM and PyPI access, and leaves the real disk
-untouched.
+loopback out of reach, `just ready`, `just check`, the mock benchmark, the
+rehearsal incident, the tests on Python 3.13 and 3.11, a native-wheel import
+and `scripts/container-test`. It needs KVM, PyPI and the container image
+registries, takes about ten minutes, and leaves the real disk untouched.
+`SKIP_CONTAINER_TEST=1 bash scripts/vm-smoke` leaves the image build out.
 
-## On a NixOS host: `python-vm`
+## Containers
+
+The agent is evaluated in a container without internet access, so the image is
+part of what has to work. `scripts/container-test` (`just container-test`)
+builds the [Dockerfile](../Dockerfile) and then, with no network at all:
+
+1. generates a rehearsal incident and solves it with the playbooks;
+2. starts a stand-in model endpoint and runs the agent against it in the same
+   network namespace, which has a loopback interface and nothing else;
+3. checks that the agent's namespace cannot reach the internet;
+4. checks that the agent runs as an unprivileged user that cannot write to
+   its own code.
+
+It uses `docker` when present and `podman` otherwise; `CONTAINER_ENGINE`
+selects one explicitly. The guest has rootless Podman: no daemon, and no
+membership in a root-equivalent group. On a laptop with Docker Desktop the
+same script runs unchanged. Only the build needs the registries and PyPI.
+
+The image installs exactly `uv.lock` on `python:3.13-slim`, contains the
+`hacklab` package and `configs/`, and writes its receipts under `/tmp`. Its
+`CMD` is a placeholder: set it to the organizers' run contract at the opening
+(see the comment in the Dockerfile), and add the starter kit's files and
+dependencies to the build. Keys never go into the image; they arrive as
+environment variables at run time. Keep `.env` out of the build context:
+`.dockerignore` admits only the files the image needs.
+
+## On a NixOS host: `hacklab-vm`
 
 A NixOS machine can carry the guest as an on-demand service instead of running
 `scripts/vm-run` from a checkout. Add this repository as a flake input, then:
 
 ```nix
 {
-  imports = [ inputs.python-vm.nixosModules.host ];
-  services.python-vm = {
+  imports = [ inputs.hacklab-vm.nixosModules.host ];
+  services.hacklab-vm = {
     enable = true;
     operatorName = "alice";     # Existing account that owns and runs the VM
     # memoryMiB = 8192; vcpu = 4; bob.enable = true; stateDirectory = null;
@@ -122,13 +150,13 @@ A NixOS machine can carry the guest as an on-demand service instead of running
 ```
 
 The module installs a user service that is never started automatically and the
-`python-vm` command for that account:
+`hacklab-vm` command for that account:
 
 | Command | Effect |
 | --- | --- |
-| `python-vm start` / `stop` / `restart` | Control the VM; `stop` asks the guest to power off cleanly |
-| `python-vm view` | Attach this terminal to the guest console; Ctrl-] detaches and the session keeps running |
-| `python-vm status` / `logs` | Service state and the guest's boot console |
+| `hacklab-vm start` / `stop` / `restart` | Control the VM; `stop` asks the guest to power off cleanly |
+| `hacklab-vm view` | Attach this terminal to the guest console; Ctrl-] detaches and the session keeps running |
+| `hacklab-vm status` / `logs` | Service state and the guest's boot console |
 
 Without `follows`, the guest keeps the package set this repository tests. A
 host that makes the input follow its own Nixpkgs gets a different guest, for
@@ -136,19 +164,19 @@ example another Python patch release. Boot-test that one from a checkout:
 
 ```console
 runner=$(nix build --no-link --print-out-paths \
-  'git+file:///path/to/host#nixosConfigurations.NAME.config.services.python-vm.runner')
+  'git+file:///path/to/host#nixosConfigurations.NAME.config.services.hacklab-vm.runner')
 HACKATHON_VM_RUNNER=$runner bash scripts/vm-smoke
 ```
 
 No sudo is involved: QEMU runs as the operator with user-mode networking. Disk,
 the per-boot store image and two private control sockets live in
-`~/.local/state/python-vm` unless `stateDirectory` names another path; keep it
+`~/.local/state/hacklab-vm` unless `stateDirectory` names another path; keep it
 on persistent storage. The service ends with the operator's login session.
 
 The host gains no network listener at all. `view` uses a Unix socket that only
 the operator can open, so reaching the guest from another machine means logging
 in to the host first, for example over the host's own Tailscale SSH, and
-running `python-vm view` there. The guest is not a Tailnet node.
+running `hacklab-vm view` there. The guest is not a Tailnet node.
 
 ## KVM and nested guests
 
@@ -183,12 +211,11 @@ guest before the event; the guest disk keeps the result:
    environments applies: create an API key with scope Inference in the Bob web
    portal and export it as `BOB_API_KEY`, for example in the guest's
    `~/.bashrc`. Browser login from this headless guest is untested.
-3. Start `bob chat` in `~/workspace/python-vm` and ask it to list its skills.
+3. Start `bob chat` in `~/workspace/hacklab-vm` and ask it to list its skills.
 
-In that directory Bob loads `AGENTS.md` as workspace rules, reads the project
-skills in `.bob/skills` and, after `just dev-setup`, the MCP servers in
-`.bob/mcp.json`. Bob asks before activating a skill unless you allow the
-`skill` permission in its own settings.
+In that directory Bob loads `AGENTS.md` as workspace rules and reads the
+project skills in `.bob/skills`. Bob asks before activating a skill unless you
+allow the `skill` permission in its own settings.
 
 Bob is a coding assistant for building the solution. It is not silently used as
 a third competition model. IBM account authentication, event credits and terms
@@ -196,15 +223,13 @@ remain runtime steps; no key, consent record or IBM payload is committed here.
 Consult the existing [`bobshell.nix` instructions](https://github.com/timfewi/bobshell.nix#license-and-authentication-at-runtime).
 Do not upload Bob-containing closures or VM images to a public binary cache.
 
-## Your tools and skills
+## The linked skill and the NixOS module
 
-`nix/skills.nix` selects twelve skills directly from the pinned
-`unix-agent-skills` and `private-skills-catalog` sources, plus TypeSafe's own
-`typesafe-ai` skill for building against Jev. It creates immutable links,
-without copying or forking their instructions. `HACKATHON_SKILLS_DIR` points to
-the selection. The dedicated guest links it into the seeded project at first
-boot: `.bob/skills` with Bob, `.agents/skills` without. Elsewhere, or after a
-pin update:
+`nix/skills.nix` links one skill from its pinned source: TypeSafe's own
+`typesafe-ai` skill for building against Jev. Its instructions are not copied
+or forked. `HACKATHON_SKILLS_DIR` points to it. The dedicated guest links it
+into the seeded project at first boot: `.bob/skills` with Bob,
+`.agents/skills` without. Elsewhere, or after a pin update:
 
 ```console
 bash scripts/vm-skills
@@ -214,51 +239,30 @@ The script chooses `.bob/skills` when `bob` is installed and `.agents/skills`
 otherwise; pass another skill-discovery directory as the first argument when
 your assistant documents a different layout. It refreshes its own links and
 preserves every other file. Use one location: Bob 2.1.0 scans both and reports
-a skill found twice as shadowed. Restart the assistant after linking. Merely
-exposing a directory does not prove every client has loaded it. Skills help
-the development assistant; the competition harness uses its own short, bounded
-runtime prompts.
+a skill found twice as shadowed. Restart the assistant after linking. Project
+conventions for every coding assistant are in [AGENTS.md](../AGENTS.md);
+`CLAUDE.md` imports the same file. The competition harness uses its own short
+run-time prompts and loads no skill.
 
 For an existing NixOS guest, the optional module installs this workbench without
 creating another VM:
 
 ```nix
 {
-  imports = [ inputs.python-vm.nixosModules.default ];
+  imports = [ inputs.hacklab-vm.nixosModules.default ];
   hackathon.enable = true;
   hackathon.bob.enable = false;
 }
 ```
 
-The module does not replace the managed `coding-agents-nix` composition or copy
-its credentials. Keep that existing provider as the owner of Codex, OMP,
-Claude Code, MCP configuration and security-tool selections.
-
-An existing consumer flake can combine the Python shell with its **already
-pinned** optimized Coding Agents tools. For example, Nixlab's provider is
-`inputs.security-agents.inputs.coding-agents`:
-
-```nix
-devShells.x86_64-linux.hackathon =
-  import (inputs.python-vm + "/nix/coding-tools-shell.nix") {
-    workbench = inputs.python-vm;
-    coding-agents = inputs.security-agents.inputs.coding-agents;
-  };
-```
-
-This reuses the provider's `lib.x86_64-linux.toolPackages` selection, including
-its configured Project Check, Tabula, evidence and tool measurement tools. It
-does not create another agent deployment. Existing managed agent launchers
-remain available from the Lab VM's system PATH. This project prepares its own
-scoped Ichnora and AST state through `just dev-setup`; existing managed services
-keep their own configuration. Scopeglass and secured Research still need their
-existing explicit service and host bindings. This optional consumer composition
-must be evaluated against that consumer's retained pins before use.
+It adds the tool list of `nix/tools.nix` and the skill link. It does not
+configure a container engine, any coding assistant or credentials; those stay
+with the machine's own configuration.
 
 ## Reproducibility and verification
 
-`flake.lock` fixes Nixpkgs, Bob, the development tools and both skill catalogs. `uv.lock`
-fixes the Python dependency resolution. Enter the shell before syncing to use
+`flake.lock` fixes Nixpkgs, the Bob packaging and the TypeSafe skill. `uv.lock`
+fixes the Python dependency resolution, and the Dockerfile installs from it. Enter the shell before syncing to use
 the Nix-provided Python interpreter. Download dependencies and run the demo on
 the target machine before travelling; the first build and first `uv sync` need
 Internet access, as do the event's model APIs.

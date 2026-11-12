@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Boots the VM on a disposable disk and checks the guest end to end by driving
-# its console, the only way into the guest. Needs KVM and PyPI access.
+# its console, the only way into the guest. Needs KVM, PyPI and the container
+# image registries; SKIP_CONTAINER_TEST=1 leaves the image build out.
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -36,8 +37,9 @@ expect() {
 }
 expect 'hackathon@hackathon:[^ ]*\]\$' 300
 # One short line: the checks themselves are part of the seeded project.
-printf '%s\n' "echo SMOKE_BEGIN; HOST_PROBE_PORT=$probe bash ~/workspace/python-vm/scripts/guest-check; echo \"SMOKE_EXIT=\$?\"" >&3
-expect 'SMOKE_EXIT=[0-9]+' 600
+printf '%s\n' "echo SMOKE_BEGIN; HOST_PROBE_PORT=$probe SKIP_CONTAINER_TEST=${SKIP_CONTAINER_TEST:-} bash ~/workspace/hacklab-vm/scripts/guest-check; echo \"SMOKE_EXIT=\$?\"" >&3
+# Includes three dependency syncs and the container image build.
+expect 'SMOKE_EXIT=[0-9]+' 1800
 # Drop terminal control sequences, then show what the guest printed.
 tr -d '\r' <"$log" | sed -E 's/\x1b\][^\x07\x1b]*(\x07|\x1b\\)//g; s/\x1b\[[0-9;?]*[A-Za-z]//g' |
   sed -n '/SMOKE_BEGIN$/,/SMOKE_EXIT=[0-9]/p' | sed '1d'

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Builds the agent image and proves it works the way the evaluation runs it:
+# without any network. A stand-in model shares the agent's network namespace,
+# which has a loopback interface and nothing else. Needs Docker or Podman and,
+# for the build only, access to the image registries and PyPI.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+
+engine=${CONTAINER_ENGINE:-}
+if [[ -z "$engine" ]]; then
+  engine=$(command -v docker || command -v podman || true)
+fi
+[[ -n "$engine" ]] || { echo 'Install Docker or Podman, or set CONTAINER_ENGINE.' >&2; exit 1; }
+image=${HACKLAB_IMAGE:-hacklab-agent:test}
+model=hacklab-model-$$
+volume=hacklab-work-$$
+cleanup() {
+  "$engine" rm -f "$model" >/dev/null 2>&1 || true
+  "$engine" volume rm -f "$volume" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+"$engine" build -t "$image" .
+"$engine" volume create "$volume" >/dev/null
+offline=(--rm --network none -v "$volume:/work")
+# Runs a shell script inside the image; the remaining arguments go to `run`.
+inside() {
+  local script=$1
+  shift
+  "$engine" run "$@" --entrypoint sh "$image" -c "$script"
+}
+
+# 1. Offline and without a model: generate a rehearsal incident, solve it by code.
+"$engine" run "${offline[@]}" "$image" practice --seed 1 --out /work/scenario --agents 20 --events 300 >/dev/null
+"$engine" run "${offline[@]}" "$image" benchmark --config configs/practice.toml \
+  --dataset /work/scenario/cases.jsonl --root /work/scenario/docs --out /work/report.json |
+  tee /dev/stderr | grep -q '"accuracy": 1.0'
+echo 'offline playbooks: 9 of 9 rehearsal tasks, no model call'
+
+# 2. The model path: a stand-in endpoint on the shared loopback interface.
+"$engine" run -d --name "$model" --network none "$image" mock-server --port 8080 >/dev/null
+shared=(--rm --network "container:$model" -v "$volume:/work")
+"$engine" run "${shared[@]}" \
+  -e SMALL_MODEL_BASE_URL=http://127.0.0.1:8080/v1 -e SMALL_MODEL_NAME=mock-small \
+  -e SMALL_MODEL_API_KEY=synthetic "$image" submit --config configs/baseline.toml \
+  --input /work/scenario/tasks.jsonl --output /work/answers.jsonl --root /work/scenario/docs \
+  --workers 3 >/dev/null
+# shellcheck disable=SC2016  # expanded by the shell inside the container
+inside 'test "$(wc -l < /work/answers.jsonl)" -eq 9 &&
+  ! grep -v "\"status\": \"abstain\"" /work/answers.jsonl' "${offline[@]}"
+echo 'model path: 9 answers written through the stand-in endpoint'
+
+# 3. The agent's network namespace must not reach the internet.
+probe='python -c "import socket; socket.create_connection((\"1.1.1.1\", 443), 3)" 2>/dev/null'
+if inside "$probe" "${shared[@]}"; then
+  echo 'The agent container reached the internet.' >&2
+  exit 1
+fi
+echo 'egress: unreachable from the agent container'
+
+# 4. The agent runs unprivileged and cannot change its own code.
+# shellcheck disable=SC2016
+inside 'test "$(id -u)" -eq 10001 && ! touch /app/x 2>/dev/null' "${offline[@]}"
+echo "image: $("$engine" image inspect --format '{{.Size}}' "$image" | awk '{printf "%d MiB", $1/1048576}'), runs as uid 10001"
+echo 'Container test passed.'

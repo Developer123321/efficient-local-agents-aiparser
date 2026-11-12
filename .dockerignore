@@ -1,0 +1,8 @@
+# Only what the image needs enters the build context: no keys, state or results.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src
+!configs
+**/__pycache__

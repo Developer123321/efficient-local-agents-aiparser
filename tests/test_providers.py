@@ -1,16 +1,20 @@
 import json
+import stat
 
 import httpx
 import pytest
 
-from hacklab.config import JevConfig, Limits, ModelConfig
+from hacklab.cache import ResponseCache
+from hacklab.config import Config, DevBudget, JevConfig, Limits, ModelConfig
 from hacklab.providers import (
     Budget,
     BudgetExceeded,
+    DevSpend,
     JevProvider,
     ModelOutputError,
     ProviderError,
     SmallModelProvider,
+    make_providers,
 )
 from hacklab.tracking import Tracker
 
@@ -417,3 +421,258 @@ def test_endpoint_specific_token_parameter_and_omitted_temperature(receipt):
     default, _ = small(receipt, handler)
     default.complete([{"role": "user", "content": "x"}], {})
     assert bodies[1]["max_tokens"] == Limits().max_output_tokens and bodies[1]["temperature"] == 0
+
+
+def test_gateway_specific_auth_and_request_fields_come_from_configuration(receipt):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=completion())
+
+    provider, _ = small(
+        receipt,
+        handler,
+        auth_header="api-key",
+        auth_scheme="",
+        extra_body={
+            "chat_template_kwargs": {"enable_thinking": False},
+            "seed": 7,
+            "model": "must-not-override",
+        },
+    )
+    provider.complete([{"role": "user", "content": "JSON"}], {})
+    body = json.loads(seen[0].content)
+    assert seen[0].headers["api-key"] == "synthetic-test-key"
+    assert "authorization" not in seen[0].headers
+    assert body["chat_template_kwargs"] == {"enable_thinking": False} and body["seed"] == 7
+    assert body["model"] == "event-small-model"
+
+
+def test_reply_spent_on_hidden_reasoning_is_named_and_token_details_are_kept(receipt):
+    payload = {
+        "choices": [
+            {"message": {"content": "", "reasoning_content": "thinking…"}, "finish_reason": "stop"}
+        ],
+        "usage": {
+            "prompt_tokens": 900,
+            "completion_tokens": 400,
+            "prompt_tokens_details": {"cached_tokens": 800},
+            "completion_tokens_details": {"reasoning_tokens": 390},
+        },
+    }
+    provider, _ = small(receipt, lambda request: httpx.Response(200, json=payload))
+    with pytest.raises(ModelOutputError, match="^model_returned_reasoning_only$"):
+        provider.complete([], {})
+    call = receipt[0].calls(receipt[1])[0]
+    assert call["metadata"]["cached_tokens"] == 800
+    assert call["metadata"]["reasoning_tokens"] == 390
+    parts = completion()
+    parts["choices"][0]["message"]["content"] = [{"type": "text", "text": '{"action":"final"}'}]
+    provider, _ = small(receipt, lambda request: httpx.Response(200, json=parts))
+    assert provider.complete([], {}) == {"action": "final"}
+
+
+def cached(receipt, tmp_path, handler, mode="readwrite", salt="", allowance=100, **config):
+    tracker, run_id = receipt
+    limits = Limits()
+    return SmallModelProvider(
+        ModelConfig(
+            provider="openai",
+            base_url="http://127.0.0.1:1234/v1",
+            model="event-small-model",
+            input_usd_per_million=1,
+            output_usd_per_million=2,
+            **config,
+        ),
+        limits,
+        Budget(limits),
+        tracker,
+        run_id,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        cache=ResponseCache(tmp_path / "private" / "cache.sqlite", mode),
+        cache_salt=salt,
+        spend=DevSpend(DevBudget(max_calls=allowance), tracker),
+    )
+
+
+def test_cache_replays_identical_requests_without_spending(receipt, tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=completion({"action": "final", "n": len(requests)}))
+
+    ask = [{"role": "user", "content": "same question"}]
+    first = cached(receipt, tmp_path, handler).complete(ask, {})
+    again = cached(receipt, tmp_path, handler).complete(ask, {})
+    assert first == again == {"action": "final", "n": 1} and len(requests) == 1
+    live, replay = receipt[0].calls(receipt[1])
+    assert live["status"] == "ok" and replay["status"] == "cache_hit"
+    assert replay["metadata"]["cache_hit"] is True and replay["input_tokens"] == 20
+    summary = receipt[0].summary(receipt[1])
+    # The replay keeps its measured usage, so per-task cost stays what a live run costs.
+    assert summary["calls"] == 2 and summary["cache_hits"] == 1
+    assert summary["cost_usd"] == pytest.approx(2 * 0.00004)
+    # Only the live request counts against the team's allowance.
+    assert receipt[0].spend() == {
+        "calls": 1,
+        "tokens": 30,
+        "usd": pytest.approx(0.00004),
+        "unknown_cost_calls": 0,
+    }
+    # A different prompt, model setting or repetition is a different request.
+    cached(receipt, tmp_path, handler).complete([{"role": "user", "content": "other"}], {})
+    cached(receipt, tmp_path, handler, salt="1").complete(ask, {})
+    cached(receipt, tmp_path, handler, temperature=0.5).complete(ask, {})
+    assert len(requests) == 4
+    mode = stat.S_IMODE((tmp_path / "private" / "cache.sqlite").stat().st_mode)
+    assert mode == 0o600
+
+
+def test_replay_mode_never_sends_and_a_reply_needing_repair_replays_as_such(receipt, tmp_path):
+    def invalid(request):
+        payload = completion()
+        payload["choices"][0]["message"]["content"] = "not json at all"
+        return httpx.Response(200, json=payload)
+
+    ask = [{"role": "user", "content": "q"}]
+    with pytest.raises(ModelOutputError):
+        cached(receipt, tmp_path, invalid).complete(ask, {})
+
+    def offline(request):
+        raise AssertionError("replay mode must not reach the network")
+
+    with pytest.raises(ModelOutputError, match="model_content_must_be_json_text"):
+        cached(receipt, tmp_path, offline, mode="replay").complete(ask, {})
+    with pytest.raises(ProviderError, match="^cache_miss_in_replay_mode$"):
+        cached(receipt, tmp_path, offline, mode="replay").complete([], {})
+    cache = ResponseCache(tmp_path / "private" / "cache.sqlite", "readwrite")
+    assert cache.stats()["entries"] == 1 and cache.clear() == 1 and cache.stats()["entries"] == 0
+    with pytest.raises(ValueError):
+        ResponseCache(tmp_path / "private" / "cache.sqlite", "off")
+
+
+def test_failed_replies_are_not_cached(receipt, tmp_path):
+    seen = []
+
+    def handler(request):
+        seen.append(1)
+        return httpx.Response(401, json={"error": "denied"})
+
+    for _ in range(2):
+        with pytest.raises(ProviderError, match="provider_http_401"):
+            cached(receipt, tmp_path, handler).complete([], {})
+    assert len(seen) == 2
+
+
+def test_development_allowance_stops_live_requests_across_runs(receipt, tmp_path):
+    tracker, run_id = receipt
+    seen = []
+
+    def handler(request):
+        seen.append(1)
+        return httpx.Response(200, json=completion())
+
+    def ask(text):
+        provider = cached(receipt, tmp_path, handler, allowance=3)
+        return provider.complete([{"role": "user", "content": text}], {})
+
+    for index in range(3):
+        ask(str(index))
+    with pytest.raises(BudgetExceeded, match="^development_budget_exhausted$"):
+        ask("new")
+    assert len(seen) == 3
+    # What was already paid for still replays.
+    assert ask("0") == {"action": "final"}
+    spend = DevSpend(DevBudget(max_tokens=10_000, max_usd=0.00015), tracker)
+    spend.check()
+    spend.add(20, 10, 0.00004)
+    with pytest.raises(BudgetExceeded):
+        spend.check()
+
+
+def test_make_providers_builds_cache_and_allowance_from_configuration(receipt, tmp_path):
+    tracker, run_id = receipt
+    config = Config.model_validate(
+        {
+            "model": {"provider": "openai", "base_url": "http://localhost/v1", "model": "m"},
+            "jev": {"enabled": True},
+            "cache": {"mode": "replay", "path": str(tmp_path / "c" / "cache.sqlite")},
+            "budget": {"max_calls": 5},
+        }
+    )
+    small_model, jev = make_providers(config, Budget(config.limits), tracker, run_id, "3")
+    try:
+        assert small_model.cache is jev.cache and small_model.cache.mode == "replay"
+        assert small_model.cache_salt == "3" and small_model.spend.budget.max_calls == 5
+    finally:
+        small_model.close()
+        jev.close()
+    plain = Config.model_validate(
+        {"model": {"provider": "openai", "base_url": "http://localhost/v1", "model": "m"}}
+    )
+    only, none = make_providers(plain, Budget(plain.limits), tracker, run_id)
+    only.close()
+    assert only.cache is None and only.spend is None and none is None
+
+
+def test_jev_choice_returns_option_and_confidence(receipt):
+    tracker, run_id = receipt
+    limits = Limits()
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        answer = {
+            "type": "choice",
+            "choice": "decode",
+            "confidence": 0.7,
+            "probabilities": {"decode": 0.8, "timeline": 0.2},
+        }
+        return httpx.Response(
+            200,
+            json={
+                "model": "jev-1.14.0",
+                "answers": {"choice": answer},
+                "usage": {"input_tokens": 40, "output_tokens": 2},
+            },
+        )
+
+    jev = JevProvider(
+        JevConfig(enabled=True),
+        limits,
+        Budget(limits),
+        tracker,
+        run_id,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    criteria = {"decode": "Asks what a payload contains", "timeline": "Asks when or in what order"}
+    assert jev.choose(
+        {"task": "Decode channel ops-5"}, "Which kind of task is `task`?", criteria
+    ) == (
+        "decode",
+        0.7,
+    )
+    assert seen[0]["questions"]["choice"] == {
+        "type": "choice",
+        "instructions": "Which kind of task is `task`?",
+        "criteria": criteria,
+    }
+    with pytest.raises(ProviderError, match="jev_choice_requires"):
+        jev.choose({}, "Which?", {"only": "one"})
+
+    def wrong(request):
+        answer = {"type": "choice", "choice": "invented", "confidence": 0.9, "probabilities": {}}
+        return httpx.Response(
+            200,
+            json={
+                "model": "j",
+                "answers": {"choice": answer},
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    jev.client = httpx.Client(transport=httpx.MockTransport(wrong))
+    with pytest.raises(ProviderError, match="^jev_choice_invalid$"):
+        jev.choose({}, "Which?", criteria)

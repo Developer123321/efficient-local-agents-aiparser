@@ -1,4 +1,4 @@
-# Host side of the workbench VM: an on-demand user service and its `python-vm`
+# Host side of the workbench VM: an on-demand user service and its `hacklab-vm`
 # command. The guest keeps its own pinned package set; nothing of the host's
 # home, network configuration or package policy changes.
 { self }:
@@ -9,12 +9,12 @@
   ...
 }:
 let
-  cfg = config.services.python-vm;
+  cfg = config.services.hacklab-vm;
   system = "x86_64-linux";
   # systemd expands %S to the user's state directory when no path is configured.
-  unitState = if cfg.stateDirectory == null then "%S/python-vm" else cfg.stateDirectory;
+  unitState = if cfg.stateDirectory == null then "%S/hacklab-vm" else cfg.stateDirectory;
   start = pkgs.writeShellApplication {
-    name = "python-vm-start";
+    name = "hacklab-vm-start";
     runtimeInputs = [
       pkgs.bash
       pkgs.coreutils
@@ -34,7 +34,7 @@ let
     '';
   };
   stop = pkgs.writeShellApplication {
-    name = "python-vm-stop";
+    name = "hacklab-vm-stop";
     runtimeInputs = [
       pkgs.coreutils
       pkgs.socat
@@ -57,7 +57,7 @@ let
     '';
   };
   command = pkgs.writeShellApplication {
-    name = "python-vm";
+    name = "hacklab-vm";
     runtimeInputs = [
       pkgs.coreutils
       pkgs.socat
@@ -68,12 +68,12 @@ let
         lib.escapeShellArg (if cfg.stateDirectory == null then "" else cfg.stateDirectory)
       }
     ''
-    + builtins.readFile ../scripts/python-vm.sh;
+    + builtins.readFile ../scripts/hacklab-vm.sh;
   };
 in
 {
-  options.services.python-vm = {
-    enable = lib.mkEnableOption "the on-demand Python workbench VM and its python-vm command";
+  options.services.hacklab-vm = {
+    enable = lib.mkEnableOption "the on-demand hacklab workbench VM and its hacklab-vm command";
     operatorName = lib.mkOption {
       type = lib.types.strMatching "[a-z_][a-z0-9_-]*";
       description = "Existing host account that owns and runs the VM.";
@@ -81,7 +81,7 @@ in
     stateDirectory = lib.mkOption {
       type = lib.types.nullOr (lib.types.strMatching "/[^%[:space:]]*");
       default = null;
-      example = "/home/alice/.local/state/python-vm";
+      example = "/home/alice/.local/state/hacklab-vm";
       description = ''
         Directory for the guest disk, the per-boot store image and control sockets.
         Null uses the operator's XDG state directory. Keep it on persistent
@@ -118,19 +118,19 @@ in
     assertions = [
       {
         assertion = pkgs.stdenv.hostPlatform.system == system;
-        message = "python-vm currently supports x86_64-linux only.";
+        message = "hacklab-vm currently supports x86_64-linux only.";
       }
       {
         assertion =
           builtins.hasAttr cfg.operatorName config.users.users
           && config.users.users.${cfg.operatorName}.isNormalUser;
-        message = "services.python-vm.operatorName must identify an existing normal host user.";
+        message = "services.hacklab-vm.operatorName must identify an existing normal host user.";
       }
     ];
     environment.systemPackages = [ command ];
-    # No wantedBy: the VM runs only after `python-vm start`.
-    systemd.user.services.python-vm = {
-      description = "Python workbench VM";
+    # No wantedBy: the VM runs only after `hacklab-vm start`.
+    systemd.user.services.hacklab-vm = {
+      description = "Hacklab workbench VM";
       unitConfig.ConditionUser = cfg.operatorName;
       serviceConfig = {
         ExecStart = "${lib.getExe start} ${unitState}";

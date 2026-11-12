@@ -12,7 +12,7 @@
     skills.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Expose a focused selection from the user's pinned skill catalogs.";
+      description = "Expose TypeSafe's pinned skill for building against Jev.";
     };
   };
   config = lib.mkIf config.hackathon.enable {

@@ -1,0 +1,13 @@
+# The rehearsal scenario solved by code alone: `hacklab practice` writes the
+# data, the registered playbooks answer it, no model is called. It shows what
+# deterministic solvers are worth; it is not a model measurement.
+[model]
+provider = "mock"
+
+[agent]
+playbooks = "hacklab.practice:playbooks"
+
+[guard]
+allowed_actions = ["quarantine_agent", "revoke_token", "takedown_dataset"]
+protected_targets = ["hub-scanner"]
+max_actions = 2000

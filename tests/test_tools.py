@@ -105,7 +105,7 @@ def test_bad_args_and_unknown_tools_are_structured(registry):
     assert "error" in registry.execute("read", {"document": "policy.md", "start": 0})
     assert "error" in registry.execute("search", {"query": "spend", "limit": True})
     assert "error" in registry.execute("calculate", {"expression": "1+1", "unexpected": 1})
-    json.dumps(registry.schemas())
+    json.dumps(registry.inventory())
 
 
 def test_read_bounded_quotes_and_search_snippet(tmp_path):
@@ -298,3 +298,81 @@ def test_tab_separated_html_and_email_documents_are_readable(tmp_path):
     assert "The approved budget is 80 euros." in mail
     found = registry.execute("search", {"query": "approved budget"})["results"][0]
     assert found["document"] == "mail.eml"
+
+
+def test_logs_as_jsonl_and_json_arrays_load_as_rows_with_columns(tmp_path):
+    (tmp_path / "audit.jsonl").write_text(
+        '{"ts":"t1","actor":"a1","detail":{"ip":"10.0.0.1","tags":["x","y"]}}\n'
+        "\n"
+        "this line is damaged\n"
+        '{"ts":"t2","actor":"a2","extra":true}\n'
+        "[1, 2]\n"
+    )
+    (tmp_path / "export.json").write_text(
+        json.dumps({"generated": "now", "events": [{"id": 1, "kind": "login"}, {"id": 2}]})
+    )
+    (tmp_path / "config.json").write_text('{\n  "retention_days": 30\n}\n')
+    (tmp_path / "service.log").write_text("Nov 14 01:00:00 hub sshd[1]: accepted\n")
+    registry = ToolRegistry(tmp_path)
+    inventory = {entry["document"]: entry for entry in registry.inventory()}
+    assert inventory["audit.jsonl"] == {
+        "document": "audit.jsonl",
+        "units": 4,
+        "columns": ["ts", "actor", "detail.ip", "detail.tags", "extra"],
+    }
+    assert inventory["export.json"]["columns"] == ["id", "kind"]
+    assert "columns" not in inventory["config.json"] and inventory["service.log"]["units"] == 1
+    rows = registry.execute(
+        "table", {"document": "audit.jsonl", "where": {"detail.ip": "10.0.0.1"}}
+    )
+    assert rows["matched_rows"] == 1 and rows["rows"][0]["locator"] == "line:1"
+    assert rows["rows"][0]["values"]["detail.tags"] == '["x","y"]'
+    # The damaged line is no table row, yet stays readable and citable as text.
+    read = registry.execute("read", {"document": "audit.jsonl"})
+    assert [row["locator"] for row in read["results"]] == ["line:1", "line:3", "line:4", "line:5"]
+    events = registry.execute("table", {"document": "export.json", "where": {"id__gte": 2}})
+    assert events["rows"][0]["locator"] == "events:2"
+    assert "error" in registry.execute("table", {"document": "config.json"})
+    assert "error" in registry.execute("table", {"document": "service.log"})
+    (tmp_path / "broken.json").write_text("{not json")
+    assert "error" in registry.execute("read", {"document": "broken.json"})
+
+
+def test_group_and_distinct_report_counts_with_a_citable_first_row(tmp_path):
+    (tmp_path / "audit.csv").write_text(
+        "actor,action\na1,login\na2,login\na1,read_secret\na1,login\n,login\n"
+    )
+    registry = ToolRegistry(tmp_path)
+    grouped = registry.execute(
+        "table", {"document": "audit.csv", "operation": "group", "column": "actor", "limit": 2}
+    )
+    assert [(group["value"], group["count"]) for group in grouped["groups"]] == [("a1", 3), ("", 1)]
+    assert grouped["distinct_values"] == 3 and grouped["truncated"] is True
+    assert grouped["groups"][0]["locator"] == "row:2"
+    filtered = registry.execute(
+        "table",
+        {
+            "document": "audit.csv",
+            "operation": "distinct",
+            "column": "action",
+            "where": {"actor": "a1"},
+        },
+    )
+    assert [group["value"] for group in filtered["groups"]] == ["login", "read_secret"]
+    citation = Citation.model_validate(
+        {key: filtered["groups"][1][key] for key in ("document", "locator", "quote")}
+    )
+    assert registry.verify_citations([citation]) == []
+    assert "error" in registry.execute("table", {"document": "audit.csv", "operation": "group"})
+
+
+def test_search_index_is_reused_until_a_document_changes(tmp_path):
+    (tmp_path / "a.txt").write_text("the staged payload ran\nnothing else\n")
+    registry = ToolRegistry(tmp_path)
+    assert registry.execute("search", {"query": "payload"})["matched_units"] == 1
+    index = registry._index
+    assert registry.execute("search", {"query": "nothing"})["results"][0]["locator"] == "line:2"
+    assert registry._index is index
+    (tmp_path / "a.txt").write_text("the staged payload ran\npayload again\n")
+    assert registry.execute("search", {"query": "payload"})["matched_units"] == 2
+    assert registry._index is not index

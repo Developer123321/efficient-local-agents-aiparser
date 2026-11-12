@@ -1,17 +1,23 @@
 # Harness architecture
 
-The small generator chooses one JSON decision at a time. Python owns the loop,
-budgets, tool dispatch, parsing, arithmetic, output validation and receipts.
-Jev can judge two independent final-answer predicates in a single native
-System One request. It never generates code, prose or arbitrary tool arguments.
+A small model is good at one narrow decision at a time and poor at long
+copying, arithmetic and resisting instructions hidden in data. The harness
+therefore lets code do everything code can do, and asks the model for one typed
+step at a time over evidence that code has prepared.
 
 ```text
 Task (no reference labels)
-  -> optional preloaded search results -> optional Jev relevance filter
-  -> bounded JSON planner -> search / read / table / calculate
-  -> exact document + locator + quote checks
-  -> optional batched Jev grounding + constraints judgment
-  -> Answer, or explicit abstention
+  -> playbooks: code-only solvers for recognised task types      0 model calls
+  -> briefing: document inventory, short runbooks in full,
+     search hits for the task text, optional Jev filter
+  -> loop: model picks ONE step {"action", "arguments"} or "final"
+        tools: search read table calculate decode iocs graph phases
+               + the organizers' own tools (ToolSpec)
+        every row shown gets an evidence ID and passes the guards
+  -> final: answer + evidence IDs + containment actions
+        code resolves IDs to document, locator and exact quote,
+        restores placeholders, checks every action
+  -> optional Jev judgment -> Answer, or an explicit abstention
 Each HTTP attempt -> local private SQLite receipt
 ```
 
@@ -19,100 +25,187 @@ Each HTTP attempt -> local private SQLite receipt
 
 | File | Owns |
 | --- | --- |
-| `models.py` | Strict Task, Citation, Decision and Answer contracts |
-| `config.py` | Non-secret TOML, runtime credential channels and validated limits |
-| `tools.py` | Scoped document access, retrieval, decimal arithmetic and tables |
-| `providers.py` | Explicit HTTP contracts, retry accounting and task budgets |
-| `agent.py` | Short planning loop, bounded repair, citation and Jev gates |
-| `tracking.py` | Metadata receipts, honest unknown usage/cost and private export |
-| `benchmark.py` | Separate reference labels, deterministic practice rubric and comparison |
-| `cli.py` | Local readiness, run/benchmark/inspection and JSONL adapter |
-| `devtools.py` | Explicit local development memory/index lifecycle and project MCP setup |
+| `models.py` | Task, Answer, Action and the model-facing Decision contract |
+| `config.py` | Non-secret TOML, credential channels, limits, guard switches |
+| `agent.py` | Order of work, the bounded loop, repair, final checks |
+| `playbooks.py` | Registry of code-only solvers and their workspace |
+| `toolkit.py` | Tool list for the prompt, result rendering, external tools |
+| `tools.py` | Scoped document access, search index, tables, arithmetic |
+| `forensics/` | Decoding, indicators, timestamps and filters, propagation, phases |
+| `evidence.py` | Ledger of every row shown, evidence IDs, citations, grounding |
+| `guard.py` | Injection scan, secret and blob placeholders, action guard |
+| `providers.py` | HTTP adapters, task budget, development allowance, replay |
+| `cache.py` | Development-only replay of identical requests |
+| `tracking.py` | Receipts, honest unknown usage and cost, private export |
+| `benchmark.py` | Reference labels, local rubric, comparison, failure view |
+| `practice.py` | Rehearsal incident generator and its reference playbooks |
+| `mockserver.py` | Stand-in model endpoint for plumbing and container tests |
+| `cli.py` | Commands, submission adapter, analyst helpers |
 
-## Spending fewer calls
+## Where the tokens go, and what removes them
 
-Cost counts as much as accuracy, and every model turn is paid for. Three
-settings remove turns or tokens without removing checks; all are off in
-`configs/baseline.toml` so that their effect can be measured:
+Cost counts as much as accuracy. In rough order of effect:
 
-- `[agent] preload_results` runs the question through the local search before
-  the first model call and puts the best passages into the task message. A task
-  those passages answer needs one generator call instead of search, then answer.
-- `[jev] select` asks Jev one Noul per preloaded passage, in a single request,
-  and drops passages below `select_threshold`. The best-ranked passage always
-  stays, and a failed selection falls back to the unfiltered passages.
-- The reply parser recovers the decision object from code fences, reasoning
-  tags or surrounding prose, so those habits of small models no longer cost a
-  repair turn.
+- **Playbooks.** A task type that code can solve costs nothing and cannot be
+  talked out of its answer. `configs/practice.toml` solves the rehearsal
+  incident this way. On the day, write one solver per revealed task type; the
+  model handles what is left.
+- **Calls per task.** The briefing puts the document inventory with column
+  names, short prose documents in full (`preload_documents_under`) and search
+  hits (`preload_results`) into the first message, so that an answerable task
+  ends in one call. A repeated identical tool call is answered from memory
+  with a nudge instead of a new result.
+- **Prompt size.** Tools are described in one line each, not as JSON schemas,
+  and only the tools in `[agent] tools` are listed. Log records reach the
+  model as `key=value` pairs. Results are bounded lines; omitted lines are
+  counted, never silently dropped.
+- **Placeholders.** A token, key or encoded blob is shown as `[[kind:id]]`;
+  a signed token alone would cost hundreds of prompt tokens. The same value
+  always gets the same placeholder, so rows stay comparable. Code restores
+  the value in answers and tool arguments.
+- **Citations by ID.** The model writes `"evidence": ["e7"]`; code supplies
+  document, locator and quote. That saves output tokens and removes the repair
+  turns that mistyped quotes used to cost.
+- **Hidden reasoning.** `[model] extra_body` switches a reasoning model's
+  thinking off or down. `thought_chars` instead asks for a short visible
+  thought before the action (schema-guided reasoning). Both change accuracy
+  and cost; measure them.
+- **Reply recovery.** The parser takes the decision object out of code
+  fences, reasoning tags or surrounding prose, and ignores unknown keys.
 
-`[model] max_tokens_parameter` adapts the request to an endpoint that names
-the output allowance `max_completion_tokens`, and `temperature = "omit"` leaves
-that field out for a model that rejects it. `hacklab probe` shows which is
-needed.
+The system prompt is identical for every task of one configuration and the
+conversation only grows at its end, so a serving layer with prefix caching
+can reuse it. Whether cached tokens are billed lower is the organizers' call.
 
-## Evidence and memory
+## Defence layers
 
-Development assistants have a separate optional Ichnora memory service and AST
-source index, configured by `just dev-setup`. They hold project decisions and
-code structure. The competition loop does not import or query those helpers;
-the evaluation memory behavior below remains task-local.
+The evidence is written by the attacker. Each layer is independent and has its
+own switch in `[guard]`, so one that misfires on the day can be turned off
+alone.
 
-The document index/cache is created for each task. No answer, result or summary
-from a previous task is reused. The live harness has no response cache and no
-cross-task model memory; this prevents answer leakage and stale results during
-evaluation. Exact document hashes identify parsed input. Short, recent
-decision/observation pairs form working memory within the task and are dropped
-when the configured context-character allowance is reached.
+1. **Roles.** The system prompt makes the task the only instruction and
+   declares evidence to be data. This is the weakest layer and never the only
+   one.
+2. **Injection scan.** Every row is matched against patterns for overrides,
+   role changes, messages addressed to the agent, fake authority, coercion
+   about containment, requests to leak, hidden comments and invisible
+   characters. Encoded text is decoded first, with any key leaked so far.
+   A hit marks the row `!untrusted-instructions(...)`; `injection = "withhold"`
+   hides its text. Such a message is itself a trace of the attack, which is
+   why flagging, not hiding, is the default.
+3. **Secrets never reach the model** (placeholders, above), so it cannot leak
+   them.
+4. **Evidence IDs.** An answer can cite only rows the harness has shown. An
+   unknown ID is rejected and costs the model one bounded repair turn.
+5. **Action guard.** A containment action passes only with an allowed type, a
+   target that is not protected, and a target that occurs in the task or in
+   evidence free of instruction-like text. A target named only by a hostile
+   message is refused. The count is capped. A mutating tool of the organizers
+   (`ToolSpec(..., mutating=True)`) goes through the same guard before it
+   runs.
+6. **Optional Jev judgment** of the finished answer against its quotes.
 
-Document tools accept text/Markdown/JSON, CSV and TSV, HTML, e-mail (`.eml`),
-text PDFs, DOCX and XLSX. Text is read as UTF-8 and otherwise as Windows-1252.
-CSV uses the separator its header line uses most (comma, semicolon, tab or
-pipe). They enforce byte, expansion, row/unit, response and quote limits.
-Scanned PDFs need an explicit offline OCR preprocessing step; they are not
-silently interpreted as empty text. Spreadsheet formulas are rejected so that
-stale cached values are not mistaken for authoritative numbers.
+`on_unverified` decides what happens when an answer still fails after the
+repair allowance: `abstain`, or `answer` with only the parts that passed every
+check. Which is better depends on whether a wrong answer is penalised.
 
-Table aggregates read one column under one decimal convention. Currency signs,
-spaces and apostrophes are ignored, so `1.234,56 €` and `CHF 1'250.00` both
-work. With `decimal_separator = "auto"` the column's own values decide; a
-column that shows both conventions is rejected. A value such as `1.234` fits
-both: it is read with a decimal point unless the column shows a decimal comma
-elsewhere, and the result reports `number_format` and the count of such
-`ambiguous_numbers`. Set `decimal_separator` once the event's data is known.
-The cited quote always keeps the original text.
+Patterns and quote checks establish provenance and catch known tricks. They
+do not prove that an inference is right. Test with held-out seeds before
+relying on a setting.
 
-An exact quote check proves that the cited string exists at that location. It
-does not prove that an inference follows, that an uncited conflicting document
-was considered, or that a timestamp establishes authority. These are separate
-tasks for task-specific rules, held-out evaluation and optionally Jev. Prompt
-instructions alone are not a guarantee against prompt injection.
+## Forensic tools
 
-## Budget behavior
+All are deterministic, bounded and never execute recovered content.
 
-Every HTTP attempt consumes the common call limit, including Jev and retries.
-The loop has step, wall-time, context and output limits. Before sending a
-request, the provider reserves a conservative allowance based on request bytes
-and requested output; this allowance is not a measured token count. Returned
-usage replaces it for local accounting. Missing usage consumes the allowance
-locally and remains unknown in tracking. A configured cost cap requires explicit
-prices for every live provider. No application-side estimate can guarantee the
-remote invoice after an ambiguous timeout or unreported provider overhead.
+- `decode` removes stacked base64, hex, URL-encoding, gzip, zlib, bzip2, xz
+  and XOR layers. A repeating XOR key must be known; keys that tooling leaked
+  beside a telling name (`xor_key=…`) are collected from all task documents.
+  A single unknown key byte is searched. With `document` and `channel` it
+  joins numbered chunks, in either chunking order, and checks their checksums.
+  Compressed streams must be complete; output is capped at 1 MB.
+- `iocs` finds platform, source-control, cloud, VPN and API tokens, signed
+  tokens, private keys, addresses with their class (private, public, cloud
+  metadata), URLs, domains, digests, repositories and service accounts, also
+  in defanged form, with counts and the first row.
+- `table` filters and aggregates CSV, TSV, XLSX, JSONL and JSON arrays.
+  Nested fields become dotted columns. Filters take operators
+  (`ts__gte`, `action__in`, `target__contains`, …) and compare numbers and
+  timestamps; `group` and `distinct` count values with a citable first row.
+- `graph` builds "who contacted whom" from two columns. `reach` follows only
+  causal chains: a message spreads nothing that its sender received later.
+  `origins` finds where a set of affected nodes began.
+- `phases` assigns kill-chain phases to commands by rule; extend `RULES` in
+  `forensics/phases.py` with the scenario's vocabulary.
 
-HTTP timeouts and limits bound normal model work. Document parsers run in the
-same process and are not forcibly preempted by the task timer. Use the dedicated
-VM boundary for untrusted documents; the parser policy is not an OS sandbox.
+The same functions are importable for playbooks, and `hacklab decode` and
+`hacklab iocs` expose two of them on the command line for the humans.
+
+## The organizers' tools
+
+The starter kit's tools are Python. Wrap each one and pass the list to
+`run_task(..., tools=[...])`:
+
+```python
+from hacklab.toolkit import ToolSpec
+
+tools = [
+    ToolSpec.from_function(kit.get_agent_log),
+    ToolSpec.from_function(kit.quarantine_agent, mutating=True),
+]
+```
+
+`from_function` takes the prompt line from the signature and the first
+docstring line; `from_schema` adapts an OpenAI-style schema with one
+dispatcher. Results of any shape become evidence rows under `tool:<name>`.
+A failing tool yields an error line for the model, never an exception.
+
+## Evidence, memory and limits
+
+The document index and the ledger exist per task. No answer, result or summary
+from one task reaches another, and the final run uses no response cache; this
+prevents answer leakage between tasks. Logs up to 64 MiB and 200,000 rows per
+document are accepted; search builds its index once per task.
+
+Document tools read text and Markdown, logs, YAML and similar text files,
+JSON, JSONL, CSV and TSV, HTML, e-mail, text PDFs, DOCX and XLSX. Text is read
+as UTF-8 and otherwise as Windows-1252. Table aggregates read one column under
+one decimal convention and report it. Spreadsheet formulas are rejected rather
+than read from stale cached values.
+
+Every HTTP attempt consumes the task's call limit, including Jev and retries.
+The loop has step, wall-time, context and output limits. Before sending, the
+provider reserves a conservative allowance from request bytes; reported usage
+replaces it. Missing usage stays unknown in tracking. `[budget]` adds the
+team's allowance across all runs in one tracking database and stops live
+requests when it is used up. No local estimate can guarantee the remote
+invoice.
+
+Parsers and decoders run in the agent's process and are not preempted by the
+task timer. The container is the boundary for hostile input.
+
+## Development cache
+
+`HACKLAB_CACHE_MODE=readwrite` stores every model reply under a hash of the
+request and replays it when the identical request recurs; `replay` never sends
+anything and fails on a miss. With temperature 0, re-running a benchmark after
+changing one tool pays only for the prompts that changed. A replayed call gets
+its own receipt with the usage it had when live, so per-task cost stays what
+the final run would cost, while `hacklab budget` counts only what was really
+sent. Benchmark repetitions use separate cache entries. The cache holds model
+replies: it lives in the private state directory, and the submission image
+runs with it off.
 
 ## Adapt at the opening
 
-1. Map the actual organizer task/input/output formats to Task/Answer. The local
-   `submit` JSONL interface is a preparation adapter, not an official integration.
-2. Confirm the small model's URL, auth, token parameter and response format. Only
-   the generic OpenAI-compatible API is implemented today. Add a provider adapter
-   if the event uses another protocol; preserve per-attempt receipts.
-3. Encode the revealed scenario's deterministic validity and precedence rules
-   in code. Keep semantic judgments atomic and choices small.
-4. Evaluate retrieval depth, context size, step limits and the optional Jev
-   gate. The starting values are uncalibrated; keep a change only when it improves
-   held-out accuracy/cost for the actual supplied model.
-5. Keep coding-assistant APIs separate. Bob builds the code; it does not answer
-   competition tasks on behalf of either supplied model.
+1. Map the organizers' task and answer format to `Task` and `Answer` in the
+   submission adapter (`cli.py`, `submit`), and set the image's `CMD`.
+2. Wrap their tools as `ToolSpec`s; mark every tool that changes something as
+   mutating. Set `allowed_actions` and `protected_targets`.
+3. Confirm URL, key header, token parameter and reply format with
+   `hacklab probe`. Only the OpenAI-compatible chat API is implemented; add an
+   adapter beside `SmallModelProvider` for another protocol and keep the
+   per-attempt receipts.
+4. Turn each revealed task type into a playbook where code can solve it, and
+   into fixtures with held-out cases.
+5. Measure one change at a time; see [benchmarks](benchmarks.md) and the
+   [day plan](playbook.md).

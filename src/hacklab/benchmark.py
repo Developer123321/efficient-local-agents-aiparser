@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import re
 import statistics
 import time
 from pathlib import Path
@@ -11,16 +12,21 @@ from typing import Literal
 from pydantic import Field
 
 from hacklab.config import Config
-from hacklab.models import Answer, StrictModel, Task
+from hacklab.models import Action, Answer, StrictModel, Task
 from hacklab.tools import ToolRegistry
 
 
 class Expected(StrictModel):
     status: Literal["ok", "abstain", "error"] = "ok"
     exact_answer: str | None = None
+    # A list answer in any order and with any separator: every item, nothing else.
+    answer_set: list[str] | None = None
     contains: list[str] = Field(default_factory=list)
     excludes: list[str] = Field(default_factory=list)
     citation_documents: list[str] = Field(default_factory=list)
+    # Containment: exactly these (type, target) pairs. A missing step and a
+    # wrong target both fail; precision and recall are reported beside the score.
+    actions: list[Action] | None = None
 
 
 class Case(StrictModel):
@@ -43,21 +49,46 @@ def load_cases(path: Path) -> list[Case]:
     return cases
 
 
+def _items(text: str) -> set[str]:
+    """The entries of a list answer, however the model punctuated it."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    parts = parsed if isinstance(parsed, list) else re.split(r"[,;\n]|\band\b", text)
+    cleaned = (str(part).strip().strip("\"'`[]()*- .").casefold() for part in parts)
+    return {part for part in cleaned if part}
+
+
 def score_answer(answer: Answer, expected: Expected, tools: ToolRegistry) -> dict:
     """All declared conditions must hold. No LLM judge and no invented official score."""
     normalized = " ".join(answer.answer.casefold().split())
     conditions = {"status": answer.status == expected.status}
+    detail: dict[str, float] = {}
     if expected.exact_answer is not None:
         conditions["exact_answer"] = normalized == " ".join(
             expected.exact_answer.casefold().split()
         )
+    if expected.answer_set is not None:
+        conditions["answer_set"] = _items(answer.answer) == {
+            item.casefold() for item in expected.answer_set
+        }
+    if expected.actions is not None:
+        wanted = {(action.type.casefold(), action.target) for action in expected.actions}
+        given = {(action.type.casefold(), action.target) for action in answer.actions}
+        conditions["actions"] = given == wanted
+        detail["action_precision"] = len(given & wanted) / len(given) if given else 0.0
+        detail["action_recall"] = len(given & wanted) / len(wanted) if wanted else 1.0
     conditions["contains"] = all(s.casefold() in normalized for s in expected.contains)
     conditions["excludes"] = all(s.casefold() not in normalized for s in expected.excludes)
     conditions["required_documents"] = set(expected.citation_documents) <= {
         c.document for c in answer.citations
     }
-    conditions["grounded_quotes"] = not tools.verify_citations(answer.citations)
-    return {"score": float(all(conditions.values())), "checks": conditions}
+    # Rows from an external tool are grounded by the agent's ledger, not on disk.
+    conditions["grounded_quotes"] = not tools.verify_citations(
+        [c for c in answer.citations if not c.document.startswith("tool:")]
+    )
+    return {"score": float(all(conditions.values())), "checks": conditions, **detail}
 
 
 def dataset_digest(path: Path, root: Path, cases: list[Case]) -> str:
@@ -91,7 +122,10 @@ def benchmark(dataset: Path, root: Path, config: Config, tracker, repeat: int = 
         for case in cases:
             started = time.monotonic()
             # The runner receives ONLY Task, never Case, Expected, category or reference labels.
-            run_id, answer = run_task(case.task, root, config, tracker)
+            # Repetitions measure variance, so each gets its own cache entries.
+            run_id, answer = run_task(
+                case.task, root, config, tracker, cache_salt=str(repetition) if repetition else ""
+            )
             scored = score_answer(answer, case.expected, ToolRegistry(root, case.task.documents))
             tracker.finish_run(run_id, answer.status, answer.model_dump(), scored["score"])
             records.append(
@@ -122,6 +156,8 @@ def benchmark(dataset: Path, root: Path, config: Config, tracker, repeat: int = 
         "cost_usd": None if None in costs else sum(costs),
         "unknown_cost_calls": sum(r["usage"]["unknown_cost_calls"] for r in records),
         "calls": sum(r["usage"]["calls"] for r in records),
+        # Replayed from the development cache: measured once, not paid again.
+        "cache_hits": sum(r["usage"]["cache_hits"] for r in records),
         # Tokens stay comparable while the event's prices are still unknown.
         "known_input_tokens": sum(r["usage"]["known_input_tokens"] for r in records),
         "known_output_tokens": sum(r["usage"]["known_output_tokens"] for r in records),
@@ -157,4 +193,32 @@ def compare(left: dict, right: dict) -> dict:
             else None
         ),
         "note": "No combined official score: organizer normalization is not yet known.",
+    }
+
+
+def failures(report: dict) -> dict:
+    """Where a run lost points: per category, which check failed for which task.
+
+    A failed `required_documents` or `grounded_quotes` points at retrieval, a
+    failed answer check with sources present at the model or a rule, and a
+    status mismatch at the abstention policy or a provider error.
+    """
+    grouped: dict[str, dict] = {}
+    for record in report["records"]:
+        entry = grouped.setdefault(
+            record["category"], {"tasks": 0, "failed": 0, "checks": {}, "statuses": {}}
+        )
+        entry["tasks"] += 1
+        if record["score"] >= 1:
+            continue
+        entry["failed"] += 1
+        entry["statuses"][record["status"]] = entry["statuses"].get(record["status"], 0) + 1
+        for check, passed in record["checks"].items():
+            if not passed:
+                entry["checks"].setdefault(check, []).append(record["task_id"])
+    return {
+        "tasks": report["tasks"],
+        "failed": sum(entry["failed"] for entry in grouped.values()),
+        "calls_per_task": report["calls"] / report["tasks"],
+        "by_category": dict(sorted(grouped.items())),
     }

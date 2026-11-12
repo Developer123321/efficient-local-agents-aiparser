@@ -3,11 +3,13 @@
 import os
 import tomllib
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
 from hacklab.models import StrictModel
+
+DEFAULT_TOOLS = ["search", "read", "table", "calculate", "decode", "iocs", "graph"]
 
 
 class ModelConfig(StrictModel):
@@ -15,11 +17,19 @@ class ModelConfig(StrictModel):
     base_url: str = ""
     model: str = ""
     api_key_env: str = "SMALL_MODEL_API_KEY"
+    # Gateways differ in the header that carries the key; an empty scheme sends
+    # the bare key, for example with auth_header = "api-key".
+    auth_header: str = Field(default="Authorization", pattern=r"^[A-Za-z0-9-]{1,64}$")
+    auth_scheme: str = Field(default="Bearer", pattern=r"^[A-Za-z0-9-]{0,32}$")
     response_format: Literal["json_schema", "json_object", "none"] = "json_object"
     # Endpoints differ in how the output allowance is named and whether they
     # accept a temperature at all; "omit" leaves the field out of the request.
     max_tokens_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
     temperature: Annotated[float, Field(ge=0, le=2)] | Literal["omit"] = 0.0
+    # Merged into every request body. This is where a reasoning model's
+    # thinking is switched off, for example
+    # extra_body = { chat_template_kwargs = { enable_thinking = false } }.
+    extra_body: dict[str, Any] = Field(default_factory=dict)
     input_usd_per_million: float | None = Field(default=None, ge=0)
     output_usd_per_million: float | None = Field(default=None, ge=0)
 
@@ -54,28 +64,81 @@ class AgentConfig(StrictModel):
     # Search results for the question placed in the first prompt, so that an
     # answerable task needs one generator call instead of a search turn first.
     preload_results: int = Field(default=0, ge=0, le=20)
+    # One line per task document (size and column names) in the first prompt:
+    # the model can then query a table without a discovery turn.
+    inventory: bool = True
+    # Short prose documents, such as a runbook or policy, are shown in full in
+    # the first prompt when they have at most this many lines. 0 switches it off.
+    preload_documents_under: int = Field(default=0, ge=0, le=200)
+    # Every listed tool costs prompt tokens on every call; list only what the
+    # scenario needs. Tools registered by code are always offered.
+    tools: list[str] = Field(default_factory=lambda: list(DEFAULT_TOOLS), max_length=20)
+    # Above zero, the model writes a short "thought" before its action
+    # (schema-guided reasoning). It costs output tokens; measure before keeping.
+    thought_chars: int = Field(default=0, ge=0, le=2000)
+    # What happens to an answer whose evidence or actions still fail validation
+    # after the repair allowance: abstain, or return what is verifiable.
+    on_unverified: Literal["abstain", "answer"] = "abstain"
+    # "package.module:attribute" of a hacklab.playbooks.Playbooks instance:
+    # deterministic solvers that answer a recognised task without a model call.
+    playbooks: str = Field(default="", pattern=r"^([A-Za-z_][\w.]*:[A-Za-z_]\w*)?$")
     # How table aggregates read numbers such as 1.234,56: "auto" infers the
     # convention per column and reports it; set it once the data is known.
     decimal_separator: Literal["auto", "point", "comma"] = "auto"
+
+
+class GuardConfig(StrictModel):
+    """Independent layers; each can be switched off alone if it misfires on the day."""
+
+    # Instruction-like text inside evidence: "flag" marks the row, "withhold"
+    # replaces its text. The row and its flag stay citable either way.
+    injection: Literal["off", "flag", "withhold"] = "flag"
+    # Tokens, keys and long encoded blobs are shown as short [[kind:id]]
+    # placeholders. Answers and tool arguments are expanded back by code.
+    compact_secrets: bool = True
+    # Show what an encoded blob decodes to next to its placeholder.
+    decode_previews: bool = True
+    # Containment actions: accepted types (empty accepts any type) and targets
+    # that must never be acted on. A target must occur in evidence or the task.
+    allowed_actions: list[str] = Field(default_factory=list, max_length=100)
+    protected_targets: list[str] = Field(default_factory=list, max_length=200)
+    require_grounded_targets: bool = True
+    # A brake against runaway containment; raise it for a large incident.
+    max_actions: int = Field(default=20, ge=0, le=2000)
+
+
+class CacheConfig(StrictModel):
+    """Development only: replays identical requests instead of paying again."""
+
+    mode: Literal["off", "readwrite", "replay"] = "off"
+    path: str = ".state/cache.sqlite"
+
+
+class DevBudget(StrictModel):
+    """The team's allowance across all runs in one tracking database; unset means unlimited."""
+
+    max_calls: int | None = Field(default=None, ge=1)
+    max_tokens: int | None = Field(default=None, ge=1)
+    max_usd: float | None = Field(default=None, gt=0)
 
 
 class Config(StrictModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     jev: JevConfig = Field(default_factory=JevConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    guard: GuardConfig = Field(default_factory=GuardConfig)
     limits: Limits = Field(default_factory=Limits)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
+    budget: DevBudget = Field(default_factory=DevBudget)
 
     @model_validator(mode="after")
     def priced_budget(self):
-        if self.limits.max_cost_usd is not None:
-            providers = [self.model] + ([self.jev] if self.jev.enabled else [])
-            if self.model.provider != "mock" and any(
-                p.input_usd_per_million is None or p.output_usd_per_million is None
-                for p in providers
-            ):
-                raise ValueError(
-                    "A cost budget requires explicit prices for every enabled provider"
-                )
+        providers = [self.model] + ([self.jev] if self.jev.enabled else [])
+        unpriced = self.model.provider != "mock" and any(
+            p.input_usd_per_million is None or p.output_usd_per_million is None for p in providers
+        )
+        if unpriced and (self.limits.max_cost_usd is not None or self.budget.max_usd is not None):
+            raise ValueError("A cost budget requires explicit prices for every enabled provider")
         return self
 
 
@@ -85,6 +148,8 @@ def load_config(path: Path | None = None) -> Config:
     for env, key in [("SMALL_MODEL_BASE_URL", "base_url"), ("SMALL_MODEL_NAME", "model")]:
         if os.environ.get(env):
             model[key] = os.environ[env]
+    if os.environ.get("HACKLAB_CACHE_MODE"):
+        data.setdefault("cache", {})["mode"] = os.environ["HACKLAB_CACHE_MODE"]
     return Config.model_validate(data)
 
 

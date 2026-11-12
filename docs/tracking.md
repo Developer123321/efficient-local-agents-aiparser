@@ -14,9 +14,22 @@ uses an allowlist, and provider URLs retain only their origin.
 
 Every actual model request, including retries and failed attempts, needs its own
 `record_call`. The record includes provider/model, latency, status, reported
-input/output tokens and configured prices. Jev and the small generative model
-are accounted separately. Mock calls are explicitly nonbillable and remain
-distinguishable from live calls.
+input/output tokens and configured prices, and, where the endpoint reports
+them, cached prompt tokens and hidden reasoning tokens. Jev and the small
+generative model are accounted separately. Mock calls are explicitly
+nonbillable and remain distinguishable from live calls.
+
+A reply served from the development cache gets its own record with status
+`cache_hit` and the usage the request had when it was live. Summaries
+therefore show what a run costs without a cache (`calls`, tokens, `cost_usd`)
+and how much of it was replayed (`cache_hits`). `hacklab budget` and
+`Tracker.spend()` count only requests that were really sent, across the whole
+database, and compare them with `[budget]`. They cover this database only:
+requests from a teammate's laptop are not in it, so split the team's allowance
+between laptops or ask the organizers' platform for the total.
+
+A run that a playbook answered has no call records at all and an event
+`playbook`.
 
 `cost_usd` is an estimate from reported usage and configured prices, never an
 invoice. Without both token counts and both prices, the call cost is `null`.

@@ -7,60 +7,20 @@
       url = "git+https://github.com/timfewi/bobshell.nix.git?ref=main";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    unix-skills = {
-      url = "git+https://github.com/timfewi/unix-agent-skills.git?ref=main";
-      flake = false;
-    };
-    private-skills = {
-      url = "git+https://github.com/timfewi/private-skills-catalog.git?ref=main";
-      flake = false;
-    };
     # TypeSafe's own MIT-licensed guidance for building against Jev. Reviewed
     # at the locked revision: instructions only, no scripts.
     typesafe-skills = {
       url = "git+https://github.com/typesafe-ai/skills.git?ref=main";
       flake = false;
     };
-    # Only the local developer tools are composed here, not another assistant
-    # deployment or its browser/model/service configuration.
-    project-check = {
-      url = "git+https://github.com/timfewi/project-check-nix.git?ref=main";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    ichnora = {
-      url = "git+https://github.com/timfewi/ichnora.git?ref=main";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.project-check.follows = "project-check";
-    };
-    ast-index = {
-      url = "git+https://github.com/timfewi/ast-index-nix.git?ref=main";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    agent-evidence = {
-      url = "git+https://github.com/timfewi/agent-evidence-nix.git?ref=main";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.project-check.follows = "project-check";
-    };
-    agent-tool-meter = {
-      url = "git+https://github.com/timfewi/agent-tool-meter-nix.git?ref=main";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.project-check.follows = "project-check";
-    };
-    tabula = {
-      url = "git+https://github.com/timfewi/tabula-repo-nix.git?ref=main";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
-    inputs@{
+    {
       self,
       nixpkgs,
       bobshell,
-      unix-skills,
-      private-skills,
       typesafe-skills,
-      ...
     }:
     let
       system = "x86_64-linux";
@@ -70,16 +30,8 @@
       };
       workbench = import ./nix/tools.nix { inherit pkgs; };
       inherit (workbench) python;
-      devTools = import ./nix/dev-tools.nix { inherit inputs system; };
-      tools = workbench.packages ++ builtins.attrValues devTools;
-      skills = import ./nix/skills.nix {
-        inherit
-          pkgs
-          unix-skills
-          private-skills
-          typesafe-skills
-          ;
-      };
+      tools = workbench.packages;
+      skills = import ./nix/skills.nix { inherit pkgs typesafe-skills; };
       bob = bobshell.packages.${system}.bobshell;
       mkShell =
         withBob:
@@ -92,7 +44,7 @@
             export PYTHONNOUSERSITE=1
             # Lets binary wheels (numpy, pandas, pymupdf, duckdb) find libstdc++ and zlib.
             export LD_LIBRARY_PATH=${nixpkgs.lib.makeLibraryPath workbench.wheelLibraries}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-            printf '%s\n' 'Python ${python.pythonVersion} workbench ready. Run: uv sync --locked; just doctor; just benchmark'
+            printf '%s\n' 'Python ${python.pythonVersion} workbench ready. Run: just ready; just practice'
           '';
         };
       mkVM =
@@ -117,7 +69,7 @@
         modules = [
           self.nixosModules.host
           {
-            services.python-vm = {
+            services.hacklab-vm = {
               enable = true;
               operatorName = "alice";
             };
@@ -137,17 +89,13 @@
         default = mkShell false;
         with-bob = mkShell true;
       };
-      packages.${system} = devTools // {
+      packages.${system} = {
         default = vm.config.system.build.vm;
         vm = vm.config.system.build.vm;
         vm-with-bob = vmWithBob.config.system.build.vm;
         tools = pkgs.buildEnv {
           name = "hackathon-tools";
           paths = tools;
-        };
-        dev-tools = pkgs.buildEnv {
-          name = "hackathon-dev-tools";
-          paths = builtins.attrValues devTools;
         };
         inherit skills;
       };
@@ -188,24 +136,27 @@
           test '${toString vm.config.hackathon.bob.enable}' = ""
           test '${vm.config.environment.sessionVariables.UV_PYTHON}' = '${python}/bin/python3.15'
           test '${toString vm.config.programs.nix-ld.enable}' = 1
+          # Rootless containers for testing the submission image; no daemon, no root group.
+          test '${toString vm.config.virtualisation.podman.enable}' = 1
+          test '${toString vm.config.virtualisation.docker.enable}' = ""
           touch "$out"
         '';
         host-contract =
           let
-            unit = hostFixture.config.systemd.user.units."python-vm.service".unit + "/python-vm.service";
+            unit = hostFixture.config.systemd.user.units."hacklab-vm.service".unit + "/hacklab-vm.service";
             command = nixpkgs.lib.findFirst (
-              package: nixpkgs.lib.getName package == "python-vm"
+              package: nixpkgs.lib.getName package == "hacklab-vm"
             ) null hostFixture.config.environment.systemPackages;
           in
-          pkgs.runCommand "python-vm-host-contract" { } ''
+          pkgs.runCommand "hacklab-vm-host-contract" { } ''
               grep -F 'ConditionUser=alice' ${unit}
-              grep -F '%S/python-vm' ${unit}
+              grep -F '%S/hacklab-vm' ${unit}
               grep -F 'ExecStop=' ${unit}
               # Off by default: nothing may pull the VM into a session start.
               ! grep -F 'WantedBy=' ${unit}
-              test -x ${command}/bin/python-vm
-              (${command}/bin/python-vm bogus 2>&1 || true) | grep -F 'Usage: python-vm'
-            ! grep -F ssh ${command}/bin/python-vm
+              test -x ${command}/bin/hacklab-vm
+              (${command}/bin/hacklab-vm bogus 2>&1 || true) | grep -F 'Usage: hacklab-vm'
+            ! grep -F ssh ${command}/bin/hacklab-vm
               touch "$out"
           '';
       };

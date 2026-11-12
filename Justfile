@@ -5,11 +5,11 @@ setup:
     uv sync --locked
 
 fmt:
-    ruff format src tests scripts
-    ruff check --fix src tests scripts
+    ruff format src tests
+    ruff check --fix src tests
 
 fmt-check:
-    ruff format --check src tests scripts
+    ruff format --check src tests
 
 check:
     bash scripts/check
@@ -17,35 +17,43 @@ check:
 test:
     uv run --locked pytest -q
 
-start:
-    uv run --locked hacklab doctor
-
 doctor:
     uv run --locked hacklab doctor
 
-dev-setup:
-    uv run --locked hacklab-dev setup
+# One step after the first boot or clone: dependencies, linked skill, readiness.
+ready: setup
     if [ -n "${HACKATHON_SKILLS_DIR:-}" ]; then bash scripts/vm-skills; fi
+    uv run --locked hacklab doctor
 
-# One step after the first boot or clone: dependencies, memory, index, MCP, skills.
-ready: setup dev-setup doctor
-
-dev-status:
-    uv run --locked hacklab-dev status
-
-dev-down:
-    uv run --locked hacklab-dev down
-
-dev-check:
-    uv run --locked python scripts/smoke-dev-tools.py
-
-index:
-    uv run --locked hacklab-dev index
-
+# Offline plumbing over the eight small document fixtures.
 bench:
     uv run --locked hacklab benchmark --config configs/mock.toml --out results/mock.json
 
 benchmark: bench
+
+# Rehearsal incident for one seed, solved by the code-only playbooks: no model call.
+practice seed="7":
+    rm -rf data/practice-{{seed}}
+    uv run --locked hacklab practice --seed {{seed}} --out data/practice-{{seed}}
+    uv run --locked hacklab benchmark --config configs/practice.toml \
+      --dataset data/practice-{{seed}}/cases.jsonl --root data/practice-{{seed}}/docs \
+      --out results/practice-{{seed}}.json
+
+# The same rehearsal against the configured model. Costs requests; replays what it can.
+practice-live seed="7" config="configs/live.toml":
+    test -d data/practice-{{seed}} || uv run --locked hacklab practice --seed {{seed}} --out data/practice-{{seed}}
+    HACKLAB_CACHE_MODE=readwrite uv run --locked hacklab benchmark --config {{config}} \
+      --dataset data/practice-{{seed}}/cases.jsonl --root data/practice-{{seed}}/docs \
+      --out results/practice-{{seed}}-live.json
+    uv run --locked hacklab failures results/practice-{{seed}}-live.json
+
+# What the team's request allowance has paid for so far.
+budget config="configs/live.toml":
+    uv run --locked hacklab budget --config {{config}}
+
+# Build the submission image and run it without any network.
+container-test:
+    bash scripts/container-test
 
 build:
     uv build

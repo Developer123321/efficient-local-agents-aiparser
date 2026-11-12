@@ -38,6 +38,8 @@ _NUMBER_KEYS = {
     "max_calls",
     "repaired",
     "citation_count",
+    "cached_tokens",
+    "reasoning_tokens",
 }
 _BOOL_KEYS = {"cache_hit", "cached", "usage_complete", "truncated", "verified", "dirty"}
 _LABEL_KEYS = {"status", "action", "tool", "error_type", "reason_code", "provider", "model"}
@@ -57,6 +59,13 @@ def _label(value: Any, fallback: str = "redacted") -> str:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _cache_hit(row: Any) -> bool:
+    """Whether a call row, stored or already decoded, was replayed from the cache."""
+    keys = row.keys()
+    metadata = row["metadata"] if "metadata" in keys else json.loads(row["metadata_json"])
+    return bool(metadata.get("cache_hit"))
 
 
 def _safe_event(data: dict) -> dict:
@@ -148,13 +157,40 @@ def _safe_config(config: dict) -> dict:
             except ValueError:
                 pass
         safe[section] = output
-    agent = config.get("agent", {})
-    if isinstance(agent, dict):
-        safe["agent"] = {
-            key: value if type(value) is int else _label(value)
-            for key, value in agent.items()
-            if key in {"preload_results", "decimal_separator"} and type(value) in (int, str)
-        }
+    selections = {
+        "agent": {
+            "preload_results",
+            "decimal_separator",
+            "inventory",
+            "preload_documents_under",
+            "thought_chars",
+            "on_unverified",
+            "playbooks",
+            "tools",
+        },
+        "guard": {
+            "injection",
+            "compact_secrets",
+            "decode_previews",
+            "require_grounded_targets",
+            "max_actions",
+        },
+        "cache": {"mode"},
+    }
+    for section, allowed in selections.items():
+        values = config.get(section, {})
+        if not isinstance(values, dict):
+            continue
+        safe[section] = {}
+        for key, value in values.items():
+            if key not in allowed:
+                continue
+            if type(value) in (int, bool):
+                safe[section][key] = value
+            elif isinstance(value, str):
+                safe[section][key] = _label(value)
+            elif isinstance(value, list):
+                safe[section][key] = [_label(item) for item in value[:20]]
     limits = config.get("limits", {})
     allowed_limits = {
         "max_steps",
@@ -368,6 +404,25 @@ class Tracker:
                 for row in db.execute("SELECT * FROM calls WHERE run_id=? ORDER BY id", (run_id,))
             ]
 
+    def spend(self) -> dict:
+        """Live requests over the whole database: what the team's allowance has paid for.
+
+        Replayed cache hits and mock calls cost nothing. Tokens and cost cover
+        the calls that reported them, so both are lower bounds.
+        """
+        with self._db() as db:
+            rows = [
+                row
+                for row in db.execute("SELECT * FROM calls WHERE billable=1")
+                if not _cache_hit(row)
+            ]
+        return {
+            "calls": len(rows),
+            "tokens": sum((row["input_tokens"] or 0) + (row["output_tokens"] or 0) for row in rows),
+            "usd": sum(row["cost_usd"] or 0.0 for row in rows),
+            "unknown_cost_calls": sum(row["cost_usd"] is None for row in rows),
+        }
+
     def summary(self, run_id: str | None = None) -> dict:
         with self._db() as db:
             db.execute("BEGIN")
@@ -390,6 +445,8 @@ class Tracker:
             "run_count": run_count,
             "calls": len(rows),
             "mock_calls": sum(not row["billable"] for row in rows),
+            # Replayed replies: counted with their original usage, paid for only once.
+            "cache_hits": sum(_cache_hit(row) for row in rows),
             "input_tokens": known_input if input_complete else None,
             "output_tokens": known_output if output_complete else None,
             "total_tokens": known_input + known_output

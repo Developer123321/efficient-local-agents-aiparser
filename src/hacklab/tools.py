@@ -24,20 +24,38 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError
 
+from hacklab.forensics.events import count_by, flatten, matches, where_column
 from hacklab.models import Citation, StrictModel
 
-MAX_FILE_BYTES = 8 * 1024 * 1024
+# Incident logs run to tens of thousands of rows; the limits bound memory, not ambition.
+MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
-MAX_DOCUMENT_CHARS = 500_000
-MAX_UNITS = 10_000
-MAX_SEARCH_CHARS = 2_000_000
-MAX_SEARCH_UNITS = 20_000
+MAX_DOCUMENT_CHARS = 30_000_000
+MAX_UNITS = 200_000
+MAX_SEARCH_CHARS = 60_000_000
+MAX_SEARCH_UNITS = 400_000
 MAX_RESPONSE_CHARS = 24_000
 MAX_QUOTE_CHARS = 2000
-SUPPORTED = {
+MAX_COLUMNS = 100
+TEXT_SUFFIXES = {
     ".txt",
     ".md",
+    ".log",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".xml",
+    ".py",
+    ".sh",
+    ".sql",
+}
+SUPPORTED = TEXT_SUFFIXES | {
     ".json",
+    ".jsonl",
+    ".ndjson",
     ".csv",
     ".tsv",
     ".html",
@@ -72,9 +90,10 @@ class CalculateArgs(StrictModel):
 
 class TableArgs(StrictModel):
     document: str = Field(min_length=1, max_length=1000)
-    operation: Literal["rows", "count", "sum", "min", "max", "mean"] = "rows"
+    operation: Literal["rows", "count", "sum", "min", "max", "mean", "group", "distinct"] = "rows"
     column: str | None = Field(default=None, max_length=200)
-    where: dict[str, str | int | float | bool | None] | None = None
+    # {"col": "v"} tests equality; {"col__gt": 5} uses an operator, see events.matches.
+    where: dict[str, str | int | float | bool | None | list[str | int | float]] | None = None
     limit: int = Field(default=30, ge=1, le=100, strict=True)
 
 
@@ -321,25 +340,47 @@ class ToolRegistry:
         if self.allowed is not None and len(self.allowed) > 200:
             raise ToolError("At most 200 task documents are supported")
         self._cache: dict[str, tuple[str, Document]] = {}
+        self._index: tuple[tuple[str, ...], Any] | None = None
 
-    def schemas(self) -> list[dict[str, Any]]:
-        descriptions = {
-            "search": "Rank matching evidence snippets in task documents. No web access.",
-            "read": "Read document units from a 1-based start (line/page/row).",
-            "calculate": "Compute bounded decimal arithmetic without executing code.",
-            "table": (
-                "Filter exact column values and aggregate CSV/TSV/XLSX rows deterministically. "
-                "Aggregates read amounts such as 1.234,56 EUR and report number_format."
-            ),
-        }
+    def inventory(self) -> list[dict[str, Any]]:
+        """Size and columns of every task document, so a table needs no discovery turn."""
+        listing = []
+        for name in self._names():
+            try:
+                loaded = self._load(name)
+                entry: dict[str, Any] = {"document": name, "units": len(loaded.units)}
+                if loaded.columns:
+                    entry["columns"] = loaded.columns[:40]
+            except (ToolError, OSError, ValueError, UnicodeError, csv.Error, zipfile.BadZipFile):
+                entry = {"document": name, "error": "unreadable"}
+            listing.append(entry)
+        return listing
+
+    def rows(self, document: str, where: dict[str, Any] | None = None) -> list[Unit]:
+        """Structured units of a table or log that satisfy `where`."""
+        loaded = self._load(document)
+        if not loaded.columns:
+            raise ToolError("Table requires a CSV, JSONL, JSON-array or XLSX document")
+        where = where or {}
+        if len(where) > 20:
+            raise ToolError("Filter has more than 20 conditions")
+        unknown = sorted({where_column(key) for key in where} - set(loaded.columns))
+        if unknown:
+            raise ToolError(
+                f"Unknown column {unknown[0][:60]!r}; columns: {', '.join(loaded.columns[:40])}"
+            )
         return [
-            {
-                "name": name,
-                "description": descriptions[name],
-                "parameters": args.model_json_schema(),
-            }
-            for name, args in self._arguments.items()
+            unit for unit in loaded.units if unit.values is not None and matches(unit.values, where)
         ]
+
+    def units(self, document: str) -> list[Unit]:
+        return self._load(document).units
+
+    def columns(self, document: str) -> list[str]:
+        return self._load(document).columns
+
+    def argument_names(self, name: str) -> set[str]:
+        return set(self._arguments[name].model_fields) if name in self._arguments else set()
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -430,17 +471,55 @@ class ToolRegistry:
             extracted_chars += len(unit.text)
             if len(units) >= MAX_UNITS or extracted_chars > MAX_DOCUMENT_CHARS:
                 raise ToolError(
-                    "Document exceeds the 10000-unit / 500000-character extraction limit"
+                    f"Document exceeds the {MAX_UNITS}-unit / "
+                    f"{MAX_DOCUMENT_CHARS}-character extraction limit"
                 )
             units.append(unit)
 
-        if suffix in {".txt", ".md", ".json"}:
-            content = _decode(path.read_bytes())
-            if suffix == ".json":
-                # Reject malformed JSON instead of silently treating it as text.
-                json.loads(content)
-            for i, line in enumerate(content.splitlines(), 1):
+        def record(locator: str, text: str, item: Any) -> None:
+            """A log entry: its fields become filterable columns when it is an object."""
+            if not isinstance(item, dict):
+                append(Unit(locator, text))
+                return
+            values = flatten(item, limit=MAX_COLUMNS)
+            for key in values:
+                if key and key not in columns and len(columns) < MAX_COLUMNS:
+                    columns.append(key)
+            append(Unit(locator, text, values))
+
+        if suffix in TEXT_SUFFIXES:
+            for i, line in enumerate(_decode(path.read_bytes()).splitlines(), 1):
                 append(Unit(f"line:{i}", line))
+        elif suffix in {".jsonl", ".ndjson"}:
+            for i, line in enumerate(_decode(path.read_bytes()).splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    item = None  # A damaged line stays readable as text.
+                record(f"line:{i}", line, item)
+        elif suffix == ".json":
+            content = _decode(path.read_bytes())
+            # Reject malformed JSON instead of silently treating it as text.
+            parsed = json.loads(content)
+            entries = parsed
+            prefix = "item"
+            if isinstance(parsed, dict):
+                lists = {
+                    key: value
+                    for key, value in parsed.items()
+                    if isinstance(value, list) and value and isinstance(value[0], dict)
+                }
+                if lists:
+                    prefix = max(lists, key=lambda key: len(lists[key]))
+                    entries = lists[prefix]
+            if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+                for i, item in enumerate(entries, 1):
+                    record(f"{prefix}:{i}", self._row_text(item), item)
+            else:
+                for i, line in enumerate(content.splitlines(), 1):
+                    append(Unit(f"line:{i}", line))
         elif suffix in {".html", ".htm"}:
             for i, line in enumerate(_html_lines(_decode(path.read_bytes())), 1):
                 append(Unit(f"line:{i}", line))
@@ -617,34 +696,14 @@ class ToolRegistry:
             or any(len(unit.text) > MAX_QUOTE_CHARS for unit in units[: len(rows)]),
         }
 
-    def _search(self, query: str, limit: int) -> dict[str, Any]:
-        wanted = set(_terms(query))
-        if not wanted:
-            raise ToolError("Search requires at least one letter or number")
-        records: list[tuple[str, Unit, list[str]]] = []
-        errors: list[dict[str, str]] = []
+    def _scan(self) -> dict[str, Any]:
+        """Tokenise the task documents once; later searches reuse the index."""
         names = self._names()
-        scanned_chars = 0
-        unscanned_documents = 0
-        for index, name in enumerate(names):
+        loaded: list[tuple[str, Document]] = []
+        errors: list[dict[str, str]] = []
+        for name in names:
             try:
-                document = self._load(name)
-                scanned_chars += sum(len(unit.text) for unit in document.units)
-                if (
-                    scanned_chars > MAX_SEARCH_CHARS
-                    or len(records) + len(document.units) > MAX_SEARCH_UNITS
-                ):
-                    unscanned_documents = len(names) - index
-                    errors.append(
-                        {
-                            "document": name,
-                            "error": (
-                                "Search scan limit reached; read directly or narrow task documents"
-                            ),
-                        }
-                    )
-                    break
-                records.extend((name, unit, _terms(unit.text)) for unit in document.units)
+                loaded.append((name, self._load(name)))
             except (
                 ToolError,
                 OSError,
@@ -656,27 +715,69 @@ class ToolRegistry:
             ) as exc:
                 # A single bad document must not erase valid evidence in the remaining scope.
                 errors.append({"document": name, "error": str(exc)[:200]})
-        average_length = sum(len(terms) for _, _, terms in records) / max(len(records), 1)
-        frequencies = Counter(term for _, _, terms in records for term in set(terms) & wanted)
-        ranked: list[tuple[float, str, Unit]] = []
-        for name, unit, terms in records:
-            counts = Counter(terms)
-            score = 0.0
-            for term in wanted:
-                count = counts[term]
-                if count:
-                    idf = math.log(
-                        1 + (len(records) - frequencies[term] + 0.5) / (frequencies[term] + 0.5)
-                    )
-                    score += (
-                        idf
-                        * count
-                        * 2.2
-                        / (count + 1.2 * (0.25 + 0.75 * len(terms) / max(average_length, 1)))
-                    )
-            if score:
-                ranked.append((score, name, unit))
-        ranked.sort(key=lambda item: (-item[0], item[1], item[2].locator))
+        signature = tuple(f"{name}:{document.digest}" for name, document in loaded)
+        if self._index is not None and self._index[0] == signature:
+            return self._index[1]
+        records: list[tuple[str, Unit, int]] = []
+        postings: dict[str, dict[int, int]] = {}
+        scanned_chars = 0
+        unscanned = 0
+        for position, (name, document) in enumerate(loaded):
+            scanned_chars += sum(len(unit.text) for unit in document.units)
+            if (
+                scanned_chars > MAX_SEARCH_CHARS
+                or len(records) + len(document.units) > MAX_SEARCH_UNITS
+            ):
+                unscanned = len(loaded) - position
+                errors.append(
+                    {
+                        "document": name,
+                        "error": "Search scan limit reached; read directly or narrow the task",
+                    }
+                )
+                break
+            for unit in document.units:
+                terms = _terms(unit.text)
+                for term, count in Counter(terms).items():
+                    postings.setdefault(term, {})[len(records)] = count
+                records.append((name, unit, len(terms)))
+        index = {
+            "records": records,
+            "postings": postings,
+            "errors": errors,
+            "unscanned": unscanned,
+            "average": sum(length for _, _, length in records) / max(len(records), 1),
+        }
+        self._index = (signature, index)
+        return index
+
+    def _search(self, query: str, limit: int) -> dict[str, Any]:
+        wanted = set(_terms(query))
+        if not wanted:
+            raise ToolError("Search requires at least one letter or number")
+        index = self._scan()
+        records, errors = index["records"], index["errors"]
+        scores: dict[int, float] = {}
+        for term in sorted(wanted):
+            posting = index["postings"].get(term, {})
+            if not posting:
+                continue
+            idf = math.log(1 + (len(records) - len(posting) + 0.5) / (len(posting) + 0.5))
+            for position, count in posting.items():
+                length = records[position][2]
+                scores[position] = scores.get(position, 0.0) + (
+                    idf
+                    * count
+                    * 2.2
+                    / (count + 1.2 * (0.25 + 0.75 * length / max(index["average"], 1)))
+                )
+        ranked = sorted(
+            (
+                (score, records[position][0], records[position][1])
+                for position, score in scores.items()
+            ),
+            key=lambda item: (-item[0], item[1], item[2].locator),
+        )
         rows = [
             {
                 "document": name,
@@ -691,12 +792,12 @@ class ToolRegistry:
             "results": rows,
             "matched_units": len(ranked),
             "scanned_units": len(records),
-            "unscanned_documents": unscanned_documents,
+            "unscanned_documents": index["unscanned"],
             "errors": errors[:20],
             "truncated": bounded
             or len(ranked) > len(rows)
             or len(errors) > 20
-            or unscanned_documents > 0,
+            or index["unscanned"] > 0,
             "coverage": "partial" if errors else "complete",
         }
 
@@ -707,31 +808,18 @@ class ToolRegistry:
         self, document: str, operation: str, column: str | None, where: dict | None, limit: int
     ) -> dict[str, Any]:
         loaded = self._load(document)
-        if not loaded.columns:
-            raise ToolError("Table requires a CSV or XLSX document")
-        where = where or {}
-        if len(where) > 20 or any(key not in loaded.columns for key in where):
-            raise ToolError("Filter contains an unknown column or more than 20 conditions")
+        matching = self.rows(document, where)
         if column is not None and column not in loaded.columns:
-            raise ToolError("Unknown table column")
-        matching = [
-            unit
-            for unit in loaded.units
-            if unit.values is not None
-            and all(
-                key in unit.values and str(unit.values[key]) == str(value)
-                for key, value in where.items()
-            )
-        ]
-        rows = [
-            {
+            raise ToolError(f"Unknown column; columns: {', '.join(loaded.columns[:40])}")
+
+        def cite(unit: Unit) -> dict[str, Any]:
+            return {
                 "document": document,
                 "locator": unit.locator,
                 "quote": self._snippet(unit.text),
-                "values": unit.values,
             }
-            for unit in matching[:limit]
-        ]
+
+        rows = [{**cite(unit), "values": unit.values} for unit in matching[:limit]]
         rows, bounded = self._bounded_rows(rows)
         if operation == "rows":
             return {
@@ -739,6 +827,25 @@ class ToolRegistry:
                 "columns": loaded.columns,
                 "matched_rows": len(matching),
                 "truncated": bounded or len(matching) > len(rows),
+            }
+        if operation in {"group", "distinct"}:
+            if column is None:
+                raise ToolError("A column is required for group and distinct")
+            first: dict[str, Unit] = {}
+            for unit in matching:
+                value = unit.values.get(column)
+                first.setdefault("" if value is None else str(value), unit)
+            counts = count_by((unit.values for unit in matching), column)
+            return {
+                "groups": [
+                    {"value": value, "count": count, **cite(first[value])}
+                    for value, count in counts[:limit]
+                ],
+                "operation": operation,
+                "column": column,
+                "distinct_values": len(counts),
+                "matched_rows": len(matching),
+                "truncated": len(counts) > limit,
             }
         if operation == "count":
             value = str(len(matching))

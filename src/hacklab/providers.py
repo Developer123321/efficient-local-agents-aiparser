@@ -1,8 +1,10 @@
 """Small, explicit HTTP adapters. Every request attempt has a receipt.
 
-No provider-specific SDK retry layer or cache is hidden underneath this module.
-Cost limits reserve a conservative request allowance before sending. A remote
-invoice cannot be guaranteed when the remote service omits usage or times out.
+No provider-specific SDK retry layer is hidden underneath this module. The
+optional development cache is explicit: a replayed reply gets its own receipt
+marked as a cache hit. Cost limits reserve a conservative request allowance
+before sending. A remote invoice cannot be guaranteed when the remote service
+omits usage or times out.
 """
 
 from __future__ import annotations
@@ -14,11 +16,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
 
-from hacklab.config import Config, JevConfig, Limits, ModelConfig, read_secret
+from hacklab.cache import ResponseCache
+from hacklab.config import Config, DevBudget, JevConfig, Limits, ModelConfig, read_secret
 
 MAX_RESPONSE_BYTES = 1_000_000
 
@@ -119,6 +123,35 @@ class Budget:
             raise BudgetExceeded("reported_cost_exceeded_budget")
 
 
+class DevSpend:
+    """Live spend recorded in one tracking database, held against the team's allowance.
+
+    The baseline is read once per task; requests of this task are added as
+    they happen. Replayed replies cost nothing and are not counted.
+    """
+
+    def __init__(self, budget: DevBudget, tracker: Any):
+        self.budget = budget
+        spent = tracker.spend()
+        self.calls: int = spent["calls"]
+        self.tokens: int = spent["tokens"]
+        self.usd: float = spent["usd"]
+
+    def check(self) -> None:
+        limits = (
+            (self.budget.max_calls, self.calls),
+            (self.budget.max_tokens, self.tokens),
+            (self.budget.max_usd, self.usd),
+        )
+        if any(limit is not None and used >= limit for limit, used in limits):
+            raise BudgetExceeded("development_budget_exhausted")
+
+    def add(self, input_tokens: int | None, output_tokens: int | None, cost: float | None) -> None:
+        self.calls += 1
+        self.tokens += (input_tokens or 0) + (output_tokens or 0)
+        self.usd += cost or 0.0
+
+
 def decision_object(content: str) -> dict[str, Any]:
     """Find the one JSON object in a small model's reply.
 
@@ -159,6 +192,22 @@ def _usage(payload: Any, provider: str) -> tuple[int | None, int | None]:
     return _token(usage.get("prompt_tokens")), _token(usage.get("completion_tokens"))
 
 
+def _usage_details(payload: Any) -> dict[str, int]:
+    """Cached prompt tokens and hidden reasoning tokens, where an endpoint reports them."""
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return {}
+    details = {}
+    for name, section, key in (
+        ("cached_tokens", "prompt_tokens_details", "cached_tokens"),
+        ("reasoning_tokens", "completion_tokens_details", "reasoning_tokens"),
+    ):
+        value = usage.get(section)
+        if isinstance(value, dict) and _token(value.get(key)) is not None:
+            details[name] = value[key]
+    return details
+
+
 def _retry_after(value: str | None) -> float:
     if not value:
         return 0.0
@@ -167,7 +216,7 @@ def _retry_after(value: str | None) -> float:
     except ValueError:
         try:
             delay = parsedate_to_datetime(value).timestamp() - time.time()
-        except ValueError, TypeError, OverflowError, OSError:
+        except (ValueError, TypeError, OverflowError, OSError):
             return 0.0
     return max(0.0, delay) if math.isfinite(delay) else 0.0
 
@@ -187,7 +236,17 @@ class _HTTPProvider:
         tracker: Any,
         run_id: str,
         client: httpx.Client | None = None,
+        cache: ResponseCache | None = None,
+        cache_salt: str = "",
+        spend: DevSpend | None = None,
+        auth_header: str = "Authorization",
+        auth_scheme: str = "Bearer",
     ):
+        self.cache = cache
+        self.cache_salt = cache_salt
+        self.spend = spend
+        self.auth_header = auth_header
+        self.auth_scheme = auth_scheme
         self.provider = provider
         self.model = model
         self.endpoint = endpoint
@@ -212,7 +271,17 @@ class _HTTPProvider:
         *,
         output_allowance: int,
     ) -> Any:
+        key = None
+        if self.cache is not None:
+            key = self.cache.key(self.provider, self.endpoint, body, self.cache_salt)
+            cached = self.cache.get(key)
+            if cached is not None:
+                return self._replay(body, cached, parse, output_allowance)
+            if self.cache.mode == "replay":
+                raise ProviderError("cache_miss_in_replay_mode")
         for attempt in range(self.limits.max_retries + 1):
+            if self.spend is not None:
+                self.spend.check()
             reservation = self.budget.reserve(
                 body, output_allowance, self.input_rate, self.output_rate
             )
@@ -231,7 +300,7 @@ class _HTTPProvider:
                     "POST",
                     self.endpoint,
                     json=body,
-                    headers={"Authorization": f"Bearer {self.key}"},
+                    headers={self.auth_header: f"{self.auth_scheme} {self.key}".strip()},
                     timeout=max(0.001, timeout),
                 ) as response:
                     chunks = bytearray()
@@ -242,7 +311,7 @@ class _HTTPProvider:
                             raise ProviderError("provider_response_too_large")
                     try:
                         payload = json.loads(chunks)
-                    except ValueError, UnicodeDecodeError:
+                    except (ValueError, UnicodeDecodeError):
                         payload = None
                     input_tokens, output_tokens = _usage(payload, self.provider)
                     if not 200 <= response.status_code < 300:
@@ -256,6 +325,10 @@ class _HTTPProvider:
                             raise ProviderError("provider_returned_invalid_json")
                         if not isinstance(payload, dict):
                             raise ProviderError("provider_response_must_be_object")
+                        if self.cache is not None and key is not None:
+                            # Stored before parsing: a reply that needs a repair
+                            # turn replays as the same reply.
+                            self.cache.put(key, self.provider, payload)
                         result = parse(payload)
                         status = "ok"
             except httpx.TransportError:
@@ -274,7 +347,7 @@ class _HTTPProvider:
                 error = exc
                 if status == "transport_error":
                     status = "invalid_response"
-            except ValueError, KeyError, TypeError, IndexError:
+            except (ValueError, KeyError, TypeError, IndexError):
                 error_type = ModelOutputError if self.provider == "openai" else ProviderError
                 error = error_type("provider_response_schema_invalid")
                 status = "invalid_response"
@@ -297,7 +370,18 @@ class _HTTPProvider:
                     attempt=attempt + 1,
                     requested_model=self.model,
                     model_reported=model_reported,
+                    **_usage_details(payload),
                 )
+                if self.spend is not None:
+                    known = None not in (input_tokens, output_tokens, self.input_rate)
+                    self.spend.add(
+                        input_tokens,
+                        output_tokens,
+                        (input_tokens * self.input_rate + output_tokens * (self.output_rate or 0.0))
+                        / 1_000_000
+                        if known
+                        else None,
+                    )
             self.budget.check_consumed()
             if error is None:
                 return result
@@ -313,6 +397,43 @@ class _HTTPProvider:
                     time.sleep(min(1.0, remaining_wait))
         raise ProviderError("request_failed")  # pragma: no cover
 
+    def _replay(
+        self, body: dict[str, Any], payload: dict, parse: Callable[[Any], Any], allowance: int
+    ) -> Any:
+        """Serve a stored reply. It counts against the task budget like a live one."""
+        reservation = self.budget.reserve(body, allowance, self.input_rate, self.output_rate)
+        input_tokens, output_tokens = _usage(payload, self.provider)
+        error: ProviderError | None = None
+        result: Any = None
+        try:
+            result = parse(payload)
+        except ProviderError as exc:
+            error = exc
+        except (ValueError, KeyError, TypeError, IndexError):
+            error_type = ModelOutputError if self.provider == "openai" else ProviderError
+            error = error_type("provider_response_schema_invalid")
+        self.budget.settle(
+            reservation, input_tokens, output_tokens, self.input_rate, self.output_rate
+        )
+        reported = payload.get("model")
+        self.tracker.record_call(
+            self.run_id,
+            provider=self.provider,
+            model=reported if isinstance(reported, str) and reported.strip() else self.model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=0.0,
+            status="cache_hit",
+            input_rate=self.input_rate,
+            output_rate=self.output_rate,
+            cache_hit=True,
+            **_usage_details(payload),
+        )
+        self.budget.check_consumed()
+        if error is not None:
+            raise error
+        return result
+
 
 class SmallModelProvider(_HTTPProvider):
     """An explicitly selected OpenAI-compatible Chat Completions adapter."""
@@ -326,6 +447,9 @@ class SmallModelProvider(_HTTPProvider):
         run_id: str,
         *,
         client: httpx.Client | None = None,
+        cache: ResponseCache | None = None,
+        cache_salt: str = "",
+        spend: DevSpend | None = None,
     ):
         if not config.base_url or not config.model:
             raise ProviderError("configure_small_model_base_url_and_name")
@@ -348,10 +472,16 @@ class SmallModelProvider(_HTTPProvider):
             tracker=tracker,
             run_id=run_id,
             client=client,
+            cache=cache,
+            cache_salt=cache_salt,
+            spend=spend,
+            auth_header=config.auth_header,
+            auth_scheme=config.auth_scheme,
         )
 
     def complete(self, messages: list[dict[str, str]], schema: dict[str, Any]) -> dict[str, Any]:
         body: dict[str, Any] = {
+            **self.config.extra_body,
             "model": self.model,
             "messages": messages,
             self.config.max_tokens_parameter: self.limits.max_output_tokens,
@@ -374,8 +504,17 @@ class SmallModelProvider(_HTTPProvider):
                 raise ModelOutputError("model_choice_must_be_object")
             if choice.get("finish_reason") == "length":
                 raise ModelOutputError("model_output_truncated")
-            content = choice["message"]["content"]
-            if not isinstance(content, str):
+            message = choice["message"]
+            content = message["content"]
+            if isinstance(content, list):
+                # Some gateways return the reply as typed parts.
+                content = "".join(
+                    part.get("text", "") for part in content if isinstance(part, dict)
+                )
+            if not isinstance(content, str) or not content.strip():
+                if message.get("reasoning_content") or message.get("reasoning"):
+                    # The whole allowance went into hidden thinking.
+                    raise ModelOutputError("model_returned_reasoning_only")
                 raise ModelOutputError("model_content_must_be_json_text")
             return decision_object(content)
 
@@ -394,6 +533,9 @@ class JevProvider(_HTTPProvider):
         run_id: str,
         *,
         client: httpx.Client | None = None,
+        cache: ResponseCache | None = None,
+        cache_salt: str = "",
+        spend: DevSpend | None = None,
     ):
         key = read_secret(config.api_key_env)
         if not key:
@@ -410,7 +552,38 @@ class JevProvider(_HTTPProvider):
             tracker=tracker,
             run_id=run_id,
             client=client,
+            cache=cache,
+            cache_salt=cache_salt,
+            spend=spend,
         )
+
+    def choose(self, state: Any, instructions: str, criteria: dict[str, str]) -> tuple[str, float]:
+        """One Choice question: the selected option and Jev's confidence in it.
+
+        The confidence derives from the probabilities of the options; it is
+        not a second, independent check.
+        """
+        if not 2 <= len(criteria) <= 255 or not instructions.strip():
+            raise ProviderError("jev_choice_requires_instructions_and_two_to_255_options")
+        question = {"type": "choice", "instructions": instructions, "criteria": criteria}
+        body = {"model": self.model, "state": state, "questions": {"choice": question}}
+
+        def parse(payload: Any) -> tuple[str, float]:
+            answer = payload.get("answers", {}).get("choice")
+            if not isinstance(answer, dict) or answer.get("type") != "choice":
+                raise ProviderError("jev_answer_type_invalid")
+            choice, confidence = answer.get("choice"), answer.get("confidence")
+            if choice not in criteria:
+                raise ProviderError("jev_choice_invalid")
+            if (
+                type(confidence) not in (int, float)
+                or not math.isfinite(confidence)
+                or not 0 <= confidence <= 1
+            ):
+                raise ProviderError("jev_probability_invalid")
+            return choice, float(confidence)
+
+        return self.request(body, parse, output_allowance=64)
 
     def judge(self, state: Any, questions: dict[str, Any]) -> dict[str, float]:
         if (
@@ -448,12 +621,26 @@ class JevProvider(_HTTPProvider):
 
 
 def make_providers(
-    config: Config, budget: Budget, tracker: Any, run_id: str
+    config: Config, budget: Budget, tracker: Any, run_id: str, cache_salt: str = ""
 ) -> tuple[SmallModelProvider, JevProvider | None]:
-    small = SmallModelProvider(config.model, config.limits, budget, tracker, run_id)
+    cache = (
+        ResponseCache(Path(config.cache.path), config.cache.mode)
+        if config.cache.mode != "off"
+        else None
+    )
+    limited = any(
+        value is not None
+        for value in (config.budget.max_calls, config.budget.max_tokens, config.budget.max_usd)
+    )
+    shared: dict[str, Any] = {
+        "cache": cache,
+        "cache_salt": cache_salt,
+        "spend": DevSpend(config.budget, tracker) if limited else None,
+    }
+    small = SmallModelProvider(config.model, config.limits, budget, tracker, run_id, **shared)
     try:
         jev = (
-            JevProvider(config.jev, config.limits, budget, tracker, run_id)
+            JevProvider(config.jev, config.limits, budget, tracker, run_id, **shared)
             if config.jev.enabled
             else None
         )

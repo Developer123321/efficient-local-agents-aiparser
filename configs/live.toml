@@ -4,9 +4,14 @@
 [model]
 provider = "openai"
 response_format = "json_object"
-# If the endpoint rejects a request, these two are the usual reasons:
+# If the endpoint rejects a request, these are the usual reasons:
 # max_tokens_parameter = "max_completion_tokens"
 # temperature = "omit"
+# auth_header = "api-key"   # with auth_scheme = "" for gateways without Bearer
+# A reasoning model spends output tokens on hidden thinking. Switch it off or
+# down with the parameter the endpoint documents, for example:
+# extra_body = { chat_template_kwargs = { enable_thinking = false } }
+# extra_body = { reasoning_effort = "low" }
 # input_usd_per_million = 0.0  # Replace with the organizer's actual scoring tariff.
 # output_usd_per_million = 0.0
 
@@ -20,10 +25,28 @@ base_url = "https://api.typesafe.ai/v1/systemone"
 threshold = 0.7  # TypeSafe's suggested starting point, not a measured optimum.
 
 [agent]
-# Search results for the question in the first prompt: an answerable task then
-# needs one generator call instead of a search turn first.
+# Search results for the task text in the first prompt: an answerable task
+# then needs one generator call instead of a search turn first.
 preload_results = 5
+inventory = true
+# Short prose documents (a runbook, a policy) are shown in full up front.
+preload_documents_under = 40
+# Every tool costs prompt tokens on every call. Remove what the scenario does
+# not need; add "phases" if tasks ask about attack stages.
+tools = ["search", "read", "table", "calculate", "decode", "iocs", "graph"]
+# thought_chars = 300        # Schema-guided reasoning; costs output tokens.
+# on_unverified = "answer"   # If a wrong answer costs no more than an abstention.
+# playbooks = "mypackage.playbooks:playbooks"   # Code-only solvers, tried first.
 # decimal_separator = "comma"  # Fix once the data's convention is known; default "auto".
+
+[guard]
+injection = "flag"            # "withhold" hides instruction-like text entirely
+compact_secrets = true
+decode_previews = true
+require_grounded_targets = true
+max_actions = 20
+# allowed_actions = ["quarantine_agent", "revoke_token"]   # From the organizers' action list.
+# protected_targets = ["night-shift", "hub-scanner"]
 
 [limits]
 max_steps = 6
@@ -35,3 +58,13 @@ max_context_chars = 24000
 max_output_tokens = 1400
 max_total_tokens = 16000
 # max_cost_usd = 0.02  # Requires all enabled prices to be explicitly configured.
+
+# The team's development allowance across all runs in this tracking database.
+# [budget]
+# max_calls = 2000
+# max_tokens = 3000000
+
+# Development only: replay unchanged requests instead of paying again. Leave it
+# off here and use HACKLAB_CACHE_MODE=readwrite while iterating.
+[cache]
+mode = "off"

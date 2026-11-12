@@ -1,4 +1,5 @@
-# A deliberately simple live baseline for controlled A/B comparisons.
+# A deliberately simple live baseline for controlled A/B comparisons: no Jev,
+# no preloaded evidence, no document inventory.
 [model]
 provider = "openai"
 response_format = "json_object"
@@ -6,10 +7,13 @@ response_format = "json_object"
 [jev]
 enabled = false
 
+[agent]
+inventory = false
+
 [limits]
-max_steps = 3
-max_calls = 5
+max_steps = 4
+max_calls = 6
 max_retries = 1
 max_context_chars = 12000
 max_output_tokens = 1000
-max_total_tokens = 8000
+max_total_tokens = 12000

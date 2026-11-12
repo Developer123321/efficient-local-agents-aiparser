@@ -51,6 +51,13 @@ in
     qemu.enableSharedMemory = false;
     useNixStoreImage = true;
     writableStore = true;
+    # The submission runs in a container. Rootless Podman builds and runs the
+    # same Dockerfile without a daemon and without a root-equivalent group;
+    # `docker` is an alias for it.
+    podman = {
+      enable = true;
+      dockerCompat = true;
+    };
   };
   services = {
     getty.autologinUser = "hackathon";
@@ -91,23 +98,23 @@ in
     hackathon-seed = {
       description = "Seed the reviewed project source into the workspace once";
       wantedBy = [ "multi-user.target" ];
-      unitConfig.ConditionPathExists = "!/home/hackathon/workspace/python-vm";
+      unitConfig.ConditionPathExists = "!/home/hackathon/workspace/hacklab-vm";
       path = [ pkgs.git ];
       serviceConfig = {
         Type = "oneshot";
         User = "hackathon";
       };
       script = ''
-        project="$HOME/workspace/python-vm"
+        project="$HOME/workspace/hacklab-vm"
         mkdir -p "$HOME/workspace"
         mkdir "$project"
         cp -R --no-preserve=mode,ownership /etc/hackathon-source/. "$project/"
         chmod -R u+w "$project"
         # Establish the Git filtering boundary before the user adds runtime data.
         git -C "$project" init -q -b main
-        git -C "$project" remote add origin https://github.com/timfewi/python-vm.git
+        git -C "$project" remote add origin https://github.com/timfewi/hacklab-vm.git
         git -C "$project" add -- .
-        # Bob reads project skills from .bob/skills; the links are Git-ignored.
+        # Bob reads project skills from .bob/skills; the link is Git-ignored.
         if ! HACKATHON_SKILLS_DIR=/run/current-system/sw/share/hackathon-skills \
           ${pkgs.runtimeShell} "$project/scripts/vm-skills" \
           "$project/${if config.hackathon.bob.enable then ".bob" else ".agents"}/skills"; then
@@ -119,11 +126,12 @@ in
 
   environment.etc."hackathon-help".text = ''
     Welcome to the efficient local agents workbench.
-    Source is seeded into ~/workspace/python-vm at first boot.
+    Source is seeded into ~/workspace/hacklab-vm at first boot.
     Set a console password: passwd
     This guest runs no SSH daemon and forwards no port; use this console.
     After resizing the terminal window, type: fit
-    Run: cd ~/workspace/python-vm; just ready; just benchmark
+    Run: cd ~/workspace/hacklab-vm; just ready; just practice
+    Test the submission image offline: just container-test
     Join the team history: gh auth login; git fetch origin; git reset origin/main
     Keep API keys in runtime .env or your existing secret manager, never in Nix.
   '';

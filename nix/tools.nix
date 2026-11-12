@@ -1,12 +1,16 @@
 { pkgs }:
 let
   python = pkgs.python315;
-  # Escape hatch for an event-day dependency that has no CPython 3.15 wheel:
-  # `export UV_PYTHON=3.14`, then sync. Only the versioned name is exposed, so `python3`
-  # stays unambiguous.
-  pythonFallback = pkgs.runCommand "python3.14-fallback" { } ''
+  # Older interpreters under their versioned names only, so `python3` stays
+  # unambiguous. 3.13 is what the submission image runs (see Dockerfile) and
+  # 3.11 is the oldest version the starter kit and this project support:
+  # `export UV_PYTHON=3.13`, then sync, runs the project as the container does.
+  # 3.14 is the escape hatch for a dependency without a CPython 3.15 wheel.
+  pythonFallback = pkgs.runCommand "python-fallbacks" { } ''
     mkdir -p "$out/bin"
     ln -s ${pkgs.python314}/bin/python3.14 "$out/bin/python3.14"
+    ln -s ${pkgs.python313}/bin/python3.13 "$out/bin/python3.13"
+    ln -s ${pkgs.python311}/bin/python3.11 "$out/bin/python3.11"
   '';
 in
 {

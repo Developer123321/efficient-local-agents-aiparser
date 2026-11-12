@@ -1,4 +1,5 @@
 .venv/
+.venv-*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -8,7 +9,7 @@ __pycache__/
 !.env.example
 .state/
 results/
-data/private/
+/data/
 *.qcow2
 *.img
 result
@@ -19,6 +20,4 @@ dist/
 vendor/
 .agents/skills/
 .bob/skills/
-.mcp.json
-.bob/mcp.json
 .tabula/state.json
