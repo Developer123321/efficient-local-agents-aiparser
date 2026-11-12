@@ -27,6 +27,9 @@ dev-setup:
     uv run --locked hacklab-dev setup
     if [ -n "${HACKATHON_SKILLS_DIR:-}" ]; then bash scripts/vm-skills; fi
 
+# One step after the first boot or clone: dependencies, memory, index, MCP, skills.
+ready: setup dev-setup doctor
+
 dev-status:
     uv run --locked hacklab-dev status
 

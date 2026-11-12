@@ -10,12 +10,13 @@ against the working tree that introduced Python 3.15 and the VM changes.
 | `project-check fast` in `nix develop` | Passed on Python 3.15.2: Ruff 0.17.4 format/lint and **99 Python tests** |
 | Same tests on the fallback interpreter | `export UV_PYTHON=3.14`, `uv sync --locked`, `pytest`: 99 passed on Python 3.14.10 |
 | `nix fmt -- --ci` | All Nix source formatted |
-| `nix flake check` | All outputs evaluated; `vm-contract` built and passed |
+| `nix flake check` | All outputs evaluated; `vm-contract` and `host-contract` built and passed |
 | `nix build .#dev-tools` | Ichnora, AST Index, agent-evidence, agent-tool-meter and Tabula built from their locked sources |
 | `nix build .#vm-with-bob`, `.#vm` | Both VM runners built |
 | `bash scripts/vm-smoke` | Passed: guest with Bob Shell booted under KVM on a disposable disk in about one minute |
 | `bash scripts/vm-smoke --no-bob` | Passed for the variant without Bob |
-| Shellcheck 0.11.0 | `vm-run`, `vm-smoke` and `vm-skills` passed |
+| Shellcheck 0.11.0 | `vm-run`, `vm-smoke` and `vm-skills` passed; `python-vm` is checked when its package builds |
+| Host module start and stop helpers | Run directly against a disposable guest: started with the module's `memoryMiB`/`vcpu`, SSH with the generated key, clean guest power-off 2 s after the stop helper |
 
 Inside each booted guest the smoke test observed:
 
@@ -25,8 +26,11 @@ Inside each booted guest the smoke test observed:
 - `bob --version` answering in the Bob variant;
 - the project seeded at `~/workspace/python-vm` with `origin` set and 13 skills
   linked, including `typesafe-ai`;
-- `uv sync --locked` from PyPI through QEMU user networking;
-- `just check` with 99 tests passing, `hacklab doctor` and the mock benchmark;
+- a rejected connection from the guest to a host loopback listener (`10.0.2.2:2222`),
+  while DNS and HTTPS egress worked;
+- `just ready`: `uv sync --locked` from PyPI through QEMU user networking, the
+  project's Ichnora service, AST index and `.bob/mcp.json`, then `hacklab doctor`;
+- `just check` with 99 tests passing and the mock benchmark;
 - `import numpy, pandas, pymupdf, duckdb` from binary wheels.
 
 Binary wheels were also checked on the Nix Python 3.15.2 interpreter outside
@@ -56,6 +60,9 @@ Unix socket paths. The guest and ordinary machines are not affected.
   session. Whether Bob activates the linked skills was not observed; the
   location follows IBM's documentation and the 2.1.0 client's skill scanner.
 - An editor remote session into the guest.
+- The `python-vm` command and its user service on an activated host. The
+  helpers behind `start` and `stop` ran directly; `view`, `status` and `logs`
+  need the installed unit and an interactive terminal.
 - The laptop that will be used at the event, its KVM access and the event Wi-Fi.
 - The two organizer-provided API keys, the generative model, the official
   benchmark transport, submission contract, event prices and score normalization.

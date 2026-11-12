@@ -50,8 +50,10 @@ bash scripts/vm-run                  # Persistent guest with IBM Bob Shell; --no
 ssh -p 2222 hackathon@127.0.0.1      # vm-run authorizes your host's public SSH key
 ```
 
-The guest seeds this project into `~/workspace/python-vm` with the selected
-skills linked for Bob. See [VM operation](docs/vm.md) for persistence, SSH,
+On a NixOS host, `nixosModules.host` provides the same guest as an on-demand
+service with `python-vm start|stop|view`. The guest seeds this project into
+`~/workspace/python-vm` with the selected skills linked for Bob; `just ready`
+there syncs dependencies and prepares development memory, code index and MCP. See [VM operation](docs/vm.md) for persistence, SSH,
 `--memory`/`--cpus`, Bob's license and login steps, project transfer and running
 on your Security Laptop or inside the Lab VM. Running the development shell
 directly inside the existing Lab VM avoids nested virtualization.
@@ -84,6 +86,7 @@ login are runtime steps described in [VM operation](docs/vm.md#ibm-bob).
 | --- | --- |
 | `just check` | Format/lint checks and offline regression tests |
 | `bash scripts/vm-smoke` | Boot a disposable guest and run the checks inside it |
+| `just ready` | Dependency sync, `dev-setup` and `doctor` in one step |
 | `just dev-setup` / `just dev-status` | Prepare and check local development memory, AST and MCP |
 | `just index` / `just dev-down` | Refresh code navigation / stop project memory |
 | `hacklab doctor` | Local readiness and credential-presence checks; no API requests |

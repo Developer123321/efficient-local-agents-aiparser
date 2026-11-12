@@ -79,14 +79,14 @@ before leaving the console unattended. Then, on the console or over SSH:
 ```console
 passwd
 cd ~/workspace/python-vm
-uv sync --locked
-just doctor
+just ready          # Dependency sync, development memory, code index, MCP, skills
 just benchmark
 ```
 
 SSH accepts public keys and rejects password/root login. The host listener binds
 only `127.0.0.1:2222`; there is no LAN listener. QEMU user-mode NAT allows the
-guest to reach the model APIs. The host home, workspace, SSH agent and device
+guest to reach the model APIs, and the guest's firewall rejects new connections
+to the host's loopback services. The host home, workspace, SSH agent and device
 files are not mounted into the guest. Reach a service inside the guest with an
 SSH tunnel, for example `ssh -p 2222 -L 8000:127.0.0.1:8000 hackathon@127.0.0.1`.
 
@@ -122,6 +122,45 @@ publish it.
 boots a disposable disk with a throwaway key, then runs the dependency sync,
 `just check`, the mock benchmark and a native-wheel import inside the guest. It
 needs KVM, a free port 2222 and PyPI access, and leaves the real disk untouched.
+
+## On a NixOS host: `python-vm`
+
+A NixOS machine can carry the guest as an on-demand service instead of running
+`scripts/vm-run` from a checkout. Add this repository as a flake input without
+`nixpkgs.follows`, so the guest keeps the package set it was tested with, then:
+
+```nix
+{
+  imports = [ inputs.python-vm.nixosModules.host ];
+  services.python-vm = {
+    enable = true;
+    operatorName = "alice";     # Existing account that owns and runs the VM
+    # memoryMiB = 8192; vcpu = 4; bob.enable = true; stateDirectory = null;
+  };
+}
+```
+
+The module installs a user service that is never started automatically and the
+`python-vm` command for that account:
+
+| Command | Effect |
+| --- | --- |
+| `python-vm start` / `stop` / `restart` | Control the VM; `stop` asks the guest to power off cleanly |
+| `python-vm view` | Open the guest's persistent `tmux` session in `~/workspace/python-vm` |
+| `python-vm ssh [ARGUMENTS...]` | Run SSH against the guest, for example `python-vm ssh -L 8000:127.0.0.1:8000` |
+| `python-vm status` / `logs` | Service state and the guest's boot console |
+
+No sudo is involved: QEMU runs as the operator with user-mode networking. The
+first start creates an SSH key used only for this guest, so no personal key is
+needed. Disk, key and the per-boot store image live in
+`~/.local/state/python-vm` unless `stateDirectory` names another path; keep it
+on persistent storage. The service ends with the operator's login session.
+
+The guest reaches the Internet through the host's ordinary outbound path and
+is not reachable from the network the host is connected to: the only listener
+is `127.0.0.1:2222` on the host. The guest's firewall also rejects new
+connections to the host's own loopback services, which QEMU's user network
+would otherwise expose at `10.0.2.2`.
 
 ## KVM and nested guests
 

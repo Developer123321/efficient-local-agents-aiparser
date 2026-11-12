@@ -12,7 +12,30 @@ in
   system.stateVersion = "26.05";
   networking = {
     hostName = "hackathon";
-    firewall.enable = true;
+    firewall = {
+      enable = true;
+      # QEMU user networking maps 10.0.2.2 and fec0::2 to the host's loopback
+      # services. The guest needs them only as a next hop and for DHCP, so
+      # nothing in the guest may open connections to the host itself. Replies
+      # stay allowed: forwarded SSH arrives from that same address.
+      extraCommands = ''
+        for tables in iptables ip6tables; do
+          $tables -N hackathon-host 2>/dev/null || $tables -F hackathon-host
+          $tables -A hackathon-host -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+          $tables -A hackathon-host -p tcp -j REJECT
+          $tables -A hackathon-host -p udp -j REJECT
+        done
+        iptables -I hackathon-host -p udp --dport 67 -j RETURN
+        iptables -C OUTPUT -d 10.0.2.2 -j hackathon-host 2>/dev/null ||
+          iptables -A OUTPUT -d 10.0.2.2 -j hackathon-host
+        ip6tables -C OUTPUT -d fec0::2 -j hackathon-host 2>/dev/null ||
+          ip6tables -A OUTPUT -d fec0::2 -j hackathon-host
+      '';
+      extraStopCommands = ''
+        iptables -D OUTPUT -d 10.0.2.2 -j hackathon-host 2>/dev/null || true
+        ip6tables -D OUTPUT -d fec0::2 -j hackathon-host 2>/dev/null || true
+      '';
+    };
   };
   hackathon.enable = true;
   virtualisation = {
@@ -137,7 +160,7 @@ in
     Set a console password: passwd
     Host connection: ssh -p 2222 hackathon@127.0.0.1
       scripts/vm-run passes your host's public SSH key at every boot.
-    Run: cd ~/workspace/python-vm; uv sync --locked; just doctor; just benchmark
+    Run: cd ~/workspace/python-vm; just ready; just benchmark
     Join the team history: gh auth login; git fetch origin; git reset origin/main
     To update source later, use scripts/vm-copy from the host.
     Keep API keys in runtime .env or your existing secret manager, never in Nix.

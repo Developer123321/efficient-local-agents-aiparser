@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-state_root=${XDG_STATE_HOME:-${HOME}/.local/state}/efficient-local-agents/vm
+# A host service supplies a prebuilt runner and its own state directory.
+state_root=${HACKATHON_VM_STATE:-${XDG_STATE_HOME:-${HOME}/.local/state}/efficient-local-agents/vm}
+runner=${HACKATHON_VM_RUNNER:-}
 variant=vm-with-bob
 tcg=false
 memory=
@@ -33,7 +34,9 @@ while (($#)); do
   esac
   shift
 done
-command -v nix >/dev/null || { printf '%s\n' 'Install Nix with flakes before starting the VM.' >&2; exit 1; }
+if [[ -z "$runner" ]]; then
+  command -v nix >/dev/null || { printf '%s\n' 'Install Nix with flakes before starting the VM.' >&2; exit 1; }
+fi
 umask 077
 mkdir -p -- "$state_root"
 chmod 700 -- "$state_root"
@@ -77,7 +80,10 @@ if [[ -n "$memory" ]]; then options+=" -m $memory"; fi
 if [[ -n "$cpus" ]]; then options+=" -smp $cpus"; fi
 if "$tcg"; then options+=" -accel tcg -cpu max"; fi
 
-runner=$(nix build --no-link --print-out-paths "${repo}#${variant}")
+if [[ -z "$runner" ]]; then
+  repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+  runner=$(nix build --no-link --print-out-paths "${repo}#${variant}")
+fi
 export NIX_DISK_IMAGE="$state_root/hackathon.qcow2"
 export QEMU_OPTS=$options TMPDIR=$run_dir USE_TMPDIR=1
 exec "$runner/bin/run-hackathon-vm"

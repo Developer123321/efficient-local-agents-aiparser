@@ -28,7 +28,8 @@ The [flake](../flake.nix) pins the workbench, Bob packaging, development tools
 and skill sources; [the tool list](../nix/tools.nix) selects Python 3.15.
 [VM configuration](../nix/vm.nix) seeds a writable Git-backed checkout with
 linked skills at first boot. [The runner](../scripts/vm-run) starts the guest
-with Bob and passes one SSH public key; [the smoke test](../scripts/vm-smoke)
+with Bob and passes one SSH public key; [the host module](../nix/host.nix) wraps
+it as an on-demand user service with the [`python-vm` command](../scripts/python-vm.sh); [the smoke test](../scripts/vm-smoke)
 boots a disposable guest and checks it. The [Justfile](../Justfile) selects
 explicit workflows; [the fast gate](../scripts/check) runs Python formatting,
 lint and tests. [Verification](../VERIFICATION.md) distinguishes the VM boot and

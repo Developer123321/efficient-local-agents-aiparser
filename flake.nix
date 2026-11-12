@@ -111,6 +111,26 @@
         };
       vm = mkVM false;
       vmWithBob = mkVM true;
+      # A synthetic receiving host for checking the host module's contract.
+      hostFixture = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          self.nixosModules.host
+          {
+            services.python-vm = {
+              enable = true;
+              operatorName = "alice";
+            };
+            users.users.alice.isNormalUser = true;
+            fileSystems."/" = {
+              device = "/dev/disk/by-label/fixture";
+              fsType = "ext4";
+            };
+            boot.loader.grub.enable = false;
+            system.stateVersion = "26.05";
+          }
+        ];
+      };
     in
     {
       devShells.${system} = {
@@ -152,20 +172,41 @@
           bob
           ;
       };
+      # For a machine that hosts the VM; `default` configures a guest.
+      nixosModules.host = import ./nix/host.nix { inherit self; };
       nixosConfigurations = {
         hackathon = vm;
         hackathon-with-bob = vmWithBob;
       };
-      checks.${system}.vm-contract = pkgs.runCommand "hackathon-vm-contract" { } ''
-        test '${toString vm.config.virtualisation.memorySize}' = 8192
-        test '${toString vm.config.virtualisation.cores}' = 4
-        test '${toString vm.config.virtualisation.diskSize}' = 40960
-        test '${toString vm.config.services.openssh.settings.PasswordAuthentication}' = ""
-        test '${toString vm.config.hackathon.bob.enable}' = ""
-        test '${vm.config.environment.sessionVariables.UV_PYTHON}' = '${python}/bin/python3.15'
-        test '${toString vm.config.programs.nix-ld.enable}' = 1
-        touch "$out"
-      '';
+      checks.${system} = {
+        vm-contract = pkgs.runCommand "hackathon-vm-contract" { } ''
+          test '${toString vm.config.virtualisation.memorySize}' = 8192
+          test '${toString vm.config.virtualisation.cores}' = 4
+          test '${toString vm.config.virtualisation.diskSize}' = 40960
+          test '${toString vm.config.services.openssh.settings.PasswordAuthentication}' = ""
+          test '${toString vm.config.hackathon.bob.enable}' = ""
+          test '${vm.config.environment.sessionVariables.UV_PYTHON}' = '${python}/bin/python3.15'
+          test '${toString vm.config.programs.nix-ld.enable}' = 1
+          touch "$out"
+        '';
+        host-contract =
+          let
+            unit = hostFixture.config.systemd.user.units."python-vm.service".unit + "/python-vm.service";
+            command = nixpkgs.lib.findFirst (
+              package: nixpkgs.lib.getName package == "python-vm"
+            ) null hostFixture.config.environment.systemPackages;
+          in
+          pkgs.runCommand "python-vm-host-contract" { } ''
+            grep -F 'ConditionUser=alice' ${unit}
+            grep -F '%S/python-vm' ${unit}
+            grep -F 'ExecStop=' ${unit}
+            # Off by default: nothing may pull the VM into a session start.
+            ! grep -F 'WantedBy=' ${unit}
+            test -x ${command}/bin/python-vm
+            (${command}/bin/python-vm bogus 2>&1 || true) | grep -F 'Usage: python-vm'
+            touch "$out"
+          '';
+      };
       formatter.${system} = pkgs.nixfmt-tree;
     };
 }

@@ -32,14 +32,24 @@ set -euo pipefail
 echo "python: $(python3 --version), fallback: $(python3.14 --version), uv: $(uv --version)"
 echo "resources: $(nproc) vCPUs, $(awk '/MemTotal/ {printf "%d MiB", $2/1024}' /proc/meminfo)"
 if command -v bob >/dev/null; then echo "bob: $(bob --version 2>&1 | tail -n 1)"; else echo "bob: not in this variant"; fi
+# The host's loopback services must stay out of the guest's reach; the SSH
+# forward itself listens there, so it is a listener that certainly exists.
+if timeout 3 bash -c '</dev/tcp/10.0.2.2/2222' 2>/dev/null; then
+  echo 'The guest reached a host loopback service.' >&2
+  exit 1
+fi
+echo "host loopback: unreachable from the guest"
 cd ~/workspace/python-vm
 git remote get-url origin
 test -r .bob/skills/typesafe-ai/SKILL.md || test -r .agents/skills/typesafe-ai/SKILL.md
 echo "skills: $(find .bob/skills .agents/skills -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) linked"
-uv sync --locked
+just ready >/dev/null
+just dev-status >/dev/null
+test -r .bob/mcp.json
+echo "development memory, code index and MCP configuration: ready"
 just check
-uv run --locked hacklab doctor >/dev/null
 just benchmark >/dev/null
+just dev-down >/dev/null
 # Binary wheels that need libstdc++ and zlib from the guest.
 uv run --locked --with numpy --with pandas --with pymupdf --with duckdb \
   python -c 'import numpy, pandas, pymupdf, duckdb; print("native wheels: ok")'
