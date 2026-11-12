@@ -54,6 +54,10 @@ On this workstation the test suite needs a short temporary directory
 temporary path is long enough that the development-tool tests reject their
 Unix socket paths. The guest and ordinary machines are not affected.
 
+A guest built with a consuming host's package source (Nixpkgs of 2026-11-04,
+Python 3.15.0 and 3.14.8, Ruff 0.17.3) also passed `scripts/vm-smoke` through
+`HACKATHON_VM_RUNNER`.
+
 ### Not verified
 
 - Bob's license acceptance, IBM login or API key, and any authenticated Bob

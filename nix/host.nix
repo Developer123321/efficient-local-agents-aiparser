@@ -11,7 +11,6 @@
 let
   cfg = config.services.python-vm;
   system = "x86_64-linux";
-  runner = self.packages.${system}.${if cfg.bob.enable then "vm-with-bob" else "vm"};
   # systemd expands %S to the user's state directory when no path is configured.
   unitState = if cfg.stateDirectory == null then "%S/python-vm" else cfg.stateDirectory;
   start = pkgs.writeShellApplication {
@@ -32,7 +31,7 @@ let
         ssh-keygen -q -t ed25519 -N "" -C python-vm -f "$state/id_ed25519"
       fi
       export HACKATHON_VM_STATE="$state"
-      export HACKATHON_VM_RUNNER=${runner}
+      export HACKATHON_VM_RUNNER=${cfg.runner}
       export HACKATHON_VM_SSH_PUBKEY="$state/id_ed25519.pub"
       # A private control socket lets `stop` ask the guest to power off cleanly.
       export QEMU_OPTS="-qmp unix:qmp.sock,server=on,wait=off"
@@ -106,6 +105,17 @@ in
       type = lib.types.bool;
       default = true;
       description = "Run the guest variant that contains the unfree IBM Bob Shell package.";
+    };
+    runner = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      default = self.packages.${system}.${if cfg.bob.enable then "vm-with-bob" else "vm"};
+      defaultText = lib.literalMD "this flake's `vm-with-bob` or `vm` package";
+      description = ''
+        The guest runner this host starts. A host that overrides this flake's
+        inputs gets a different guest than the one tested here; build this
+        option and pass it to `scripts/vm-smoke` as `HACKATHON_VM_RUNNER`.
+      '';
     };
   };
 

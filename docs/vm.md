@@ -126,8 +126,7 @@ needs KVM, a free port 2222 and PyPI access, and leaves the real disk untouched.
 ## On a NixOS host: `python-vm`
 
 A NixOS machine can carry the guest as an on-demand service instead of running
-`scripts/vm-run` from a checkout. Add this repository as a flake input without
-`nixpkgs.follows`, so the guest keeps the package set it was tested with, then:
+`scripts/vm-run` from a checkout. Add this repository as a flake input, then:
 
 ```nix
 {
@@ -149,6 +148,16 @@ The module installs a user service that is never started automatically and the
 | `python-vm view` | Open the guest's persistent `tmux` session in `~/workspace/python-vm` |
 | `python-vm ssh [ARGUMENTS...]` | Run SSH against the guest, for example `python-vm ssh -L 8000:127.0.0.1:8000` |
 | `python-vm status` / `logs` | Service state and the guest's boot console |
+
+Without `follows`, the guest keeps the package set this repository tests. A
+host that makes the input follow its own Nixpkgs gets a different guest, for
+example another Python patch release. Boot-test that one from a checkout:
+
+```console
+runner=$(nix build --no-link --print-out-paths \
+  'git+file:///path/to/host#nixosConfigurations.NAME.config.services.python-vm.runner')
+HACKATHON_VM_RUNNER=$runner bash scripts/vm-smoke
+```
 
 No sudo is involved: QEMU runs as the operator with user-mode networking. The
 first start creates an SSH key used only for this guest, so no personal key is
