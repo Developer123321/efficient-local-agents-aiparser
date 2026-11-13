@@ -135,6 +135,12 @@
         hackathon-with-bob = vmWithBob;
       };
       checks.${system} = {
+        # Where Ruff is not on PATH, scripts/ruff fetches this version: a
+        # laptop formats and lints exactly as the Nix shell and the VM do.
+        ruff-pin = pkgs.runCommand "hacklab-ruff-pin" { } ''
+          grep -Fx 'version=${pkgs.ruff.version}' ${./scripts/ruff}
+          touch "$out"
+        '';
         vm-contract = pkgs.runCommand "hackathon-vm-contract" { } ''
           test '${toString vm.config.virtualisation.memorySize}' = 8192
           test '${toString vm.config.virtualisation.cores}' = 4

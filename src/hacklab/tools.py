@@ -13,9 +13,11 @@ import io
 import json
 import math
 import re
+import threading
 import zipfile
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation, localcontext
 from email import message_from_bytes, policy
 from html.parser import HTMLParser
@@ -45,6 +47,10 @@ MAX_SEARCH_UNITS = 400_000
 MAX_RESPONSE_CHARS = 24_000
 MAX_QUOTE_CHARS = 2000
 MAX_COLUMNS = 100
+MAX_DOCUMENTS = 2000
+# Parsed documents are kept across tasks: a run asks many questions about the
+# same logs. Bounded by the rows held, oldest out first.
+MAX_SHARED_UNITS = 2_000_000
 TEXT_SUFFIXES = {
     ".txt",
     ".md",
@@ -73,6 +79,10 @@ SUPPORTED = TEXT_SUFFIXES | {
     ".docx",
     ".xlsx",
 }
+# A log under these names is often structured: one JSON object or one run of
+# key=value pairs per line. Such a file is read as a table.
+SNIFFED_SUFFIXES = {".log", ".txt", ".out", ""}
+_LOGFMT = re.compile(r"""([A-Za-z_@][\w.@/-]*)=("(?:[^"\\]|\\.)*"|[^\s"]*)""")
 _CURRENCY = re.compile(r"(?i)eur|usd|chf|gbp|[€$£%]")
 _BLOCK_TAGS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "section"}
 
@@ -119,9 +129,144 @@ class Document:
     units: list[Unit]
     digest: str
     columns: list[str] = field(default_factory=list)
-    # Filled on first use for tables: rows in time order, and what each column holds.
+    # Filled on first use for tables: rows in time order, what each column
+    # holds, and which column carries the time of a row.
     ordered: list[Unit] | None = None
     profile: dict[str, dict[str, Any]] | None = None
+    time: str | None = None
+    timed: bool = False
+
+
+_SHARED: OrderedDict[tuple[str, str, str], Document] = OrderedDict()
+_SHARED_LOCK = threading.Lock()
+
+
+def _shared(key: tuple[str, str, str], document: Document | None = None) -> Document | None:
+    """Look up or store a parsed document by path, content digest and name."""
+    with _SHARED_LOCK:
+        if document is None:
+            found = _SHARED.get(key)
+            if found is not None:
+                _SHARED.move_to_end(key)
+            return found
+        _SHARED[key] = document
+        while len(_SHARED) > 1 and sum(len(d.units) for d in _SHARED.values()) > MAX_SHARED_UNITS:
+            _SHARED.popitem(last=False)
+        return document
+
+
+def _looks_like_text(data: bytes) -> bool:
+    """No NUL byte in the first kilobytes: a log without a telling suffix, not a binary."""
+    return b"\x00" not in data[:8192]
+
+
+def list_documents(root: Path, limit: int = MAX_DOCUMENTS) -> list[str]:
+    """Every readable document below `root` as a relative name, in name order.
+
+    Hidden files and folders are left out. At most `limit` names are returned
+    and at most ten times as many entries visited: a huge tree is cut short,
+    never an error.
+    """
+    base = root.resolve()
+    names = []
+    for visited, path in enumerate(base.rglob("*")):
+        if visited >= limit * 10 or len(names) >= limit:
+            break
+        relative = path.relative_to(base)
+        if any(part.startswith(".") for part in relative.parts) or not path.is_file():
+            continue
+        if path.suffix.lower() not in SUPPORTED:
+            try:
+                with path.open("rb") as stream:
+                    if not _looks_like_text(stream.read(8192)):
+                        continue
+            except OSError:
+                continue
+        names.append(relative.as_posix())
+    return sorted(names)
+
+
+def _logfmt(line: str) -> dict[str, str] | None:
+    """The key=value pairs of a logfmt line, or None when the line is something else.
+
+    A leading timestamp, and a level after it, are accepted before the pairs.
+    """
+    values: dict[str, str] = {}
+    position = 0
+    prefix = ""
+    for match in _LOGFMT.finditer(line):
+        between = line[position : match.start()]
+        if between.strip():
+            if values:
+                return None
+            prefix = between.strip()
+        value = match.group(2)
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1].replace('\\"', '"')
+        values[match.group(1)] = value
+        position = match.end()
+    if line[position:].strip() or len(values) < 2:
+        return None
+    if prefix:
+        stamp, _, level = prefix.partition(" ")
+        if parse_timestamp(prefix) is not None:
+            stamp, level = prefix, ""
+        elif parse_timestamp(stamp) is None or " " in level.strip():
+            return None
+        values = {"ts": stamp, **({"level": level.strip()} if level.strip() else {}), **values}
+    return values
+
+
+def _line_format(lines: list[str]) -> str:
+    """ "json", "logfmt" or "text": what nearly every non-empty line of a log is."""
+    sample = [line for line in lines if line.strip()][:50]
+    if not sample:
+        return "text"
+
+    def objects(line: str) -> bool:
+        if not line.lstrip().startswith("{"):
+            return False
+        try:
+            return isinstance(json.loads(line), dict)
+        except ValueError:
+            return False
+
+    for name, test in (("json", objects), ("logfmt", lambda line: _logfmt(line) is not None)):
+        if sum(map(test, sample)) >= 0.9 * len(sample):
+            return name
+    return "text"
+
+
+def _json_tables(
+    value: Any, path: str = "", depth: int = 0
+) -> list[tuple[str, list[tuple[str | None, dict]]]]:
+    """Every list of records inside a JSON document, named by its path.
+
+    A list of records is a list of objects, or an object that maps IDs to
+    records: all of its values are flat objects that share a field.
+    """
+    if isinstance(value, list):
+        rows = [(None, item) for item in value if isinstance(item, dict)]
+        return [(path or "item", rows)] if rows and len(rows) * 2 >= len(value) else []
+    if not isinstance(value, dict) or depth >= 4:
+        return []
+    children = list(value.values())
+    keyed = (
+        len(children) >= 2
+        and all(isinstance(child, dict) and child for child in children)
+        and bool(set(children[0]) & set(children[1]))
+        and not any(
+            isinstance(item, list) and item and isinstance(item[0], dict)
+            for child in children[:20]
+            for item in child.values()
+        )
+    )
+    if keyed:
+        return [(path or "item", [(str(key), child) for key, child in value.items()])]
+    tables = []
+    for key, child in value.items():
+        tables += _json_tables(child, f"{path}.{key}" if path else str(key), depth + 1)
+    return tables
 
 
 def _terms(text: str) -> list[str]:
@@ -345,13 +490,17 @@ class ToolRegistry:
         decimal_separator: str = "auto",
     ):
         self.decimal_separator = decimal_separator
+        self.allowed = None if allowed_documents is None else frozenset(allowed_documents)
+        if self.allowed is not None and len(self.allowed) > MAX_DOCUMENTS:
+            raise ToolError(f"At most {MAX_DOCUMENTS} task documents are supported")
+        if self.allowed == frozenset() and not root.is_dir():
+            # A task without documents works through other tools: nothing is
+            # ever opened below the root, so it need not exist.
+            root = Path.cwd()
         self.root = root.resolve(strict=True)
         if not self.root.is_dir():
             raise ToolError("Document root must be a directory")
-        self.allowed = None if allowed_documents is None else frozenset(allowed_documents)
-        if self.allowed is not None and len(self.allowed) > 200:
-            raise ToolError("At most 200 task documents are supported")
-        self._cache: dict[str, tuple[str, Document]] = {}
+        self._cache: dict[str, tuple[tuple[int, ...], Document]] = {}
         self._index: tuple[tuple[str, ...], Any] | None = None
 
     def inventory(self) -> list[dict[str, Any]]:
@@ -368,11 +517,22 @@ class ToolRegistry:
             listing.append(entry)
         return listing
 
+    def _time(self, loaded: Document) -> str | None:
+        if not loaded.timed:
+            rows = [unit.values for unit in loaded.units if unit.values is not None]
+            loaded.time = time_field(loaded.columns, rows)
+            loaded.timed = True
+        return loaded.time
+
+    def time_column(self, document: str) -> str | None:
+        """The column that carries the time of a row: a usual name, else by its values."""
+        return self._time(self._load(document))
+
     def _ordered(self, loaded: Document) -> list[Unit]:
         """Table rows in time order when the table has a time column, else in file order."""
         if loaded.ordered is None:
             rows = [unit for unit in loaded.units if unit.values is not None]
-            column = time_field(loaded.columns)
+            column = self._time(loaded)
             if column is not None:
                 moments = [parse_timestamp(unit.values.get(column)) for unit in rows]
                 if all(moment is not None for moment in moments):
@@ -390,7 +550,7 @@ class ToolRegistry:
         loaded = self._load(document)
         if loaded.profile is None:
             profile: dict[str, dict[str, Any]] = {}
-            moment_column = time_field(loaded.columns)
+            moment_column = self._time(loaded)
             for column in loaded.columns[:MAX_COLUMNS]:
                 counts = Counter(
                     "" if unit.values.get(column) is None else str(unit.values[column])
@@ -428,6 +588,45 @@ class ToolRegistry:
                 f"Unknown column {unknown[0][:60]!r}; columns: {', '.join(loaded.columns[:40])}"
             )
         return [unit for unit in self._ordered(loaded) if matches(unit.values, where)]
+
+    def after(
+        self,
+        document: str,
+        key: str,
+        first: dict[str, Any],
+        where: dict[str, Any] | None = None,
+        time: str | None = None,
+    ) -> tuple[list[Unit], int]:
+        """Rows matching `where` of each `key` value, from its first row matching `first` on.
+
+        "What did every compromised agent do after its compromise": `first`
+        selects the trigger rows, and the earliest one per key value starts
+        that value's clock. Returns the rows in time order and how many key
+        values had a trigger row.
+        """
+        columns = self.columns(document)
+        time = time or self.time_column(document)
+        if key not in columns:
+            raise ToolError(f"key must be a column: {', '.join(columns[:40])}")
+        if not time or time not in columns:
+            raise ToolError("no time column found; pass time")
+        if not first:
+            raise ToolError("first must be a filter for the trigger rows")
+        started: dict[str, datetime] = {}
+        for unit in self.rows(document, first):
+            moment = parse_timestamp(unit.values.get(time))
+            who = unit.values.get(key)
+            if moment is None or who in (None, ""):
+                continue
+            who = str(who)
+            started[who] = min(started[who], moment) if who in started else moment
+        selected = []
+        for unit in self.rows(document, where):
+            moment = parse_timestamp(unit.values.get(time))
+            begin = started.get(str(unit.values.get(key)))
+            if moment is not None and begin is not None and moment >= begin:
+                selected.append(unit)
+        return selected, len(started)
 
     def units(self, document: str) -> list[Unit]:
         return self._load(document).units
@@ -478,27 +677,15 @@ class ToolRegistry:
             raise ToolError("Document is missing or outside the document root") from exc
         if not resolved.is_file():
             raise ToolError("Document must be a regular file")
-        if resolved.suffix.lower() not in SUPPORTED:
-            raise ToolError("Unsupported document format")
         if resolved.stat().st_size > MAX_FILE_BYTES:
-            raise ToolError("Document exceeds the 8 MiB input limit")
+            raise ToolError(f"Document exceeds the {MAX_FILE_BYTES // 2**20} MiB input limit")
         return resolved
 
     def _names(self) -> list[str]:
         if self.allowed is not None:
             return sorted(self.allowed)
         # An explicit task allowlist is preferred. Unscoped usage remains bounded.
-        names = []
-        visited = 0
-        for path in self.root.rglob("*"):
-            visited += 1
-            if visited > 5000:
-                raise ToolError("Directory inventory exceeds 5000 entries; supply a document list")
-            if path.is_file() and path.suffix.lower() in SUPPORTED:
-                names.append(path.relative_to(self.root).as_posix())
-                if len(names) > 200:
-                    raise ToolError("Directory contains over 200 documents; supply a document list")
-        return sorted(names)
+        return list_documents(self.root)
 
     @staticmethod
     def _archive_guard(path: Path) -> None:
@@ -519,11 +706,28 @@ class ToolRegistry:
 
     def _load(self, name: str) -> Document:
         path = self._path(name)
-        # Hash actual bytes on each access: preserved timestamps must not validate stale evidence.
-        signature = hashlib.sha256(path.read_bytes()).hexdigest()
-        if name in self._cache and self._cache[name][0] == signature:
-            return self._cache[name][1]
+        # Unchanged size, modification time, change time and inode: the bytes
+        # are the ones already hashed. A writer can restore the modification
+        # time, not the change time, so stale evidence is still caught.
+        status = path.stat()
+        stamp = (status.st_size, status.st_mtime_ns, status.st_ctime_ns, status.st_ino)
+        known = self._cache.get(name)
+        if known is not None and known[0] == stamp:
+            return known[1]
+        data = path.read_bytes()
+        signature = hashlib.sha256(data).hexdigest()
+        shared = (str(path), signature, name)
+        document = known[1] if known is not None and known[1].digest == signature else None
+        document = document or _shared(shared)
+        if document is None:
+            document = _shared(shared, self._parse(name, path, data, signature))
+        self._cache[name] = (stamp, document)
+        return document
+
+    def _parse(self, name: str, path: Path, data: bytes, signature: str) -> Document:
         suffix = path.suffix.lower()
+        if suffix not in SUPPORTED and not _looks_like_text(data):
+            raise ToolError("Unsupported document format")
         units: list[Unit] = []
         columns: list[str] = []
         extracted_chars = 0
@@ -549,44 +753,41 @@ class ToolRegistry:
                     columns.append(key)
             append(Unit(locator, text, values))
 
-        if suffix in TEXT_SUFFIXES:
-            for i, line in enumerate(_decode(path.read_bytes()).splitlines(), 1):
-                append(Unit(f"line:{i}", line))
-        elif suffix in {".jsonl", ".ndjson"}:
-            for i, line in enumerate(_decode(path.read_bytes()).splitlines(), 1):
-                if not line.strip():
-                    continue
-                try:
-                    item = json.loads(line)
-                except ValueError:
-                    item = None  # A damaged line stays readable as text.
-                record(f"line:{i}", line, item)
+        if suffix in TEXT_SUFFIXES or suffix in {".jsonl", ".ndjson"} or suffix not in SUPPORTED:
+            lines = _decode(data).splitlines()
+            kind = "json" if suffix in {".jsonl", ".ndjson"} else "text"
+            if suffix in SNIFFED_SUFFIXES or suffix not in SUPPORTED:
+                kind = _line_format(lines)
+            for i, line in enumerate(lines, 1):
+                if kind == "text":
+                    append(Unit(f"line:{i}", line))
+                elif line.strip():
+                    try:
+                        item = json.loads(line) if kind == "json" else _logfmt(line)
+                    except ValueError:
+                        item = None  # A damaged line stays readable as text.
+                    record(f"line:{i}", line, item)
         elif suffix == ".json":
-            content = _decode(path.read_bytes())
+            content = _decode(data)
             # Reject malformed JSON instead of silently treating it as text.
-            parsed = json.loads(content)
-            entries = parsed
-            prefix = "item"
-            if isinstance(parsed, dict):
-                lists = {
-                    key: value
-                    for key, value in parsed.items()
-                    if isinstance(value, list) and value and isinstance(value[0], dict)
-                }
-                if lists:
-                    prefix = max(lists, key=lambda key: len(lists[key]))
-                    entries = lists[prefix]
-            if isinstance(entries, list) and entries and isinstance(entries[0], dict):
-                for i, item in enumerate(entries, 1):
-                    record(f"{prefix}:{i}", self._row_text(item), item)
-            else:
+            tables = _json_tables(json.loads(content))
+            for table, rows in tables:
+                for i, (key, item) in enumerate(rows, 1):
+                    # Several lists of records in one file stay apart by `_table`;
+                    # a record that was stored under an ID carries it as `_key`.
+                    if len(tables) > 1:
+                        item = {"_table": table, **item}
+                    if key is not None:
+                        item = {"_key": key, **item}
+                    record(f"{table}:{i}", self._row_text(item), item)
+            if not tables:
                 for i, line in enumerate(content.splitlines(), 1):
                     append(Unit(f"line:{i}", line))
         elif suffix in {".html", ".htm"}:
-            for i, line in enumerate(_html_lines(_decode(path.read_bytes())), 1):
+            for i, line in enumerate(_html_lines(_decode(data)), 1):
                 append(Unit(f"line:{i}", line))
         elif suffix == ".eml":
-            message = message_from_bytes(path.read_bytes(), policy=policy.default)
+            message = message_from_bytes(data, policy=policy.default)
             lines = [
                 f"{header}: {message[header]}"
                 for header in ("From", "To", "Cc", "Date", "Subject")
@@ -601,14 +802,17 @@ class ToolRegistry:
             for i, line in enumerate(lines, 1):
                 append(Unit(f"line:{i}", line))
         elif suffix in {".csv", ".tsv"}:
-            content = _decode(path.read_bytes())
+            content = _decode(data)
             delimiter = "\t" if suffix == ".tsv" else _delimiter(content.split("\n", 1)[0])
-            reader = csv.DictReader(io.StringIO(content, newline=""), delimiter=delimiter)
-            columns = list(reader.fieldnames or [])
-            self._check_columns(columns)
-            for row_number, values in enumerate(reader, 2):
-                if None in values or any(v is None for v in values.values()):
-                    raise ToolError("CSV row has a different number of cells from the header")
+            reader = csv.reader(io.StringIO(content, newline=""), delimiter=delimiter)
+            columns = self._headers(next((cells for cells in reader if cells), []))
+            width = len(columns)
+            for row_number, cells in enumerate((cells for cells in reader if cells), 2):
+                # One ragged row must not hide ten thousand good ones: missing
+                # cells are empty, surplus cells stay in the last column.
+                if len(cells) > width:
+                    cells = cells[: width - 1] + [delimiter.join(cells[width - 1 :])]
+                values = dict(zip(columns, cells + [""] * (width - len(cells)), strict=True))
                 append(Unit(f"row:{row_number}", self._row_text(values), values))
         elif suffix == ".pdf":
             from pypdf import PdfReader
@@ -664,23 +868,28 @@ class ToolRegistry:
                     if sheet.max_column and sheet.max_column > 100:
                         raise ToolError("Workbook exceeds the 100-column limit")
                     if sheet.max_row and sheet.max_row > MAX_UNITS + 1:
-                        raise ToolError("Workbook exceeds the 10000-row limit")
+                        raise ToolError(f"Workbook exceeds the {MAX_UNITS}-row limit")
                     rows = sheet.iter_rows()
                     header_cells = next(rows, ())
+                    if not header_cells:
+                        continue  # An empty sheet beside the data, as most workbooks have.
                     if any(c.data_type == "f" for c in header_cells):
                         raise ToolError("Workbook formula headers are not supported")
-                    headers = [str(c.value) if c.value is not None else "" for c in header_cells]
-                    self._check_columns(headers)
+                    headers = self._headers(
+                        [str(c.value) if c.value is not None else "" for c in header_cells]
+                    )
                     columns.extend(c for c in headers if c not in columns)
                     for row_number, row in enumerate(rows, 2):
                         if any(c.data_type == "f" for c in row):
                             raise ToolError(
                                 "Workbook formulas are not evaluated; export values-only CSV first"
                             )
-                        values = {
-                            header: self._cell(c.value)
-                            for header, c in zip(headers, row, strict=True)
-                        }
+                        # A short row has empty cells; cells beyond the header have no name.
+                        values = dict.fromkeys(headers)
+                        values.update(
+                            (header, self._cell(c.value))
+                            for header, c in zip(headers, row, strict=False)
+                        )
                         append(
                             Unit(
                                 f"sheet:{sheet.title}:row:{row_number}",
@@ -695,9 +904,7 @@ class ToolRegistry:
             finally:
                 if workbook is not None:
                     workbook.close()
-        document = Document(name, units, signature, columns)
-        self._cache[name] = (signature, document)
-        return document
+        return Document(name, units, signature, columns)
 
     @staticmethod
     def _cell(value: Any) -> str | int | float | bool | None:
@@ -710,11 +917,22 @@ class ToolRegistry:
         return json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
-    def _check_columns(columns: list[str]) -> None:
-        if not columns or len(columns) > 100 or any(not c or len(c) > 200 for c in columns):
-            raise ToolError("Table requires 1–100 non-empty headers of at most 200 characters")
-        if len(set(columns)) != len(columns):
-            raise ToolError("Table headers must be unique")
+    def _headers(cells: list[str]) -> list[str]:
+        """Usable column names from a header row: none empty, none twice.
+
+        An export with an unnamed index column or a repeated header is still a
+        table; the names are completed instead of refusing the document.
+        """
+        if not cells or len(cells) > MAX_COLUMNS:
+            raise ToolError(f"Table requires 1–{MAX_COLUMNS} header cells")
+        names: list[str] = []
+        for position, cell in enumerate(cells, 1):
+            name = str(cell).strip()[:200] or f"column_{position}"
+            base, repeat = name, 2
+            while name in names:
+                name, repeat = f"{base}_{repeat}", repeat + 1
+            names.append(name)
+        return names
 
     @staticmethod
     def _snippet(text: str, query_terms: set[str] | None = None) -> str:

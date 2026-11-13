@@ -10,10 +10,12 @@ from hacklab.providers import (
     Budget,
     BudgetExceeded,
     DevSpend,
+    FunctionModel,
     JevProvider,
     ModelOutputError,
     ProviderError,
     SmallModelProvider,
+    chat_endpoint,
     jev_usable,
     make_providers,
 )
@@ -83,7 +85,7 @@ def test_http_retry_has_separate_receipts_and_unknown_failed_cost(receipt):
     assert receipt[0].summary(receipt[1])["known_cost_usd"] == pytest.approx(0.00004)
     body = json.loads(seen[-1].content)
     assert seen[-1].url.path == "/v1/chat/completions"
-    assert body["max_tokens"] == 1400
+    assert body["max_tokens"] == 3000
     assert body["response_format"] == {"type": "json_object"}
 
 
@@ -181,11 +183,13 @@ def test_transport_retries_are_counted_with_unknown_usage(receipt):
     def handler(request):
         raise httpx.ReadTimeout("synthetic timeout with private endpoint", request=request)
 
-    provider, budget = small(receipt, handler)
-    with pytest.raises(ProviderError, match="^provider_transport_error$"):
+    # A slow endpoint gets one more try, however many retries a lost connection may have.
+    provider, budget = small(receipt, handler, Limits(http_retries=4))
+    with pytest.raises(ProviderError, match="^provider_timeout$"):
         provider.complete([], {})
     assert budget.calls == 2
-    assert all(call["input_tokens"] is None for call in receipt[0].calls(receipt[1]))
+    calls = receipt[0].calls(receipt[1])
+    assert all(call["input_tokens"] is None and call["status"] == "timeout" for call in calls)
 
 
 def test_response_decoding_error_is_sanitized_without_retry(receipt):
@@ -238,7 +242,11 @@ def test_token_budget_reserves_output_before_network_request(receipt):
 def test_reported_tokens_over_budget_stop_subsequent_work(receipt):
     payload = completion()
     payload["usage"]["completion_tokens"] = 30000
-    provider, _ = small(receipt, lambda request: httpx.Response(200, json=payload))
+    provider, _ = small(
+        receipt,
+        lambda request: httpx.Response(200, json=payload),
+        Limits(max_total_tokens=16000),
+    )
     with pytest.raises(BudgetExceeded, match="reported_token_usage_exceeded_budget"):
         provider.complete([], {})
     assert receipt[0].summary(receipt[1])["total_tokens"] == 30020
@@ -775,3 +783,178 @@ def test_jev_choice_returns_option_and_confidence(receipt):
     jev.client = httpx.Client(transport=httpx.MockTransport(wrong))
     with pytest.raises(ProviderError, match="^jev_choice_invalid$"):
         jev.choose({}, "Which?", criteria)
+
+
+def test_retries_wait_longer_each_time_and_count_against_the_request_budget(receipt, monkeypatch):
+    clock = [0.0]
+    sleeps = []
+    count = [0]
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    def handler(request):
+        count[0] += 1
+        if count[0] <= 3:
+            return httpx.Response(429 if count[0] == 1 else 503, json={})
+        return httpx.Response(200, json=completion())
+
+    monkeypatch.setattr("hacklab.providers.RETRY_PAUSES", (0.5, 1.0, 2.0, 4.0))
+    monkeypatch.setattr("hacklab.providers.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("hacklab.providers.time.sleep", sleep)
+    # A repair turn costs tokens and stays at one; waiting out a rate limit is nearly free.
+    provider, budget = small(receipt, handler, Limits(max_retries=1, http_retries=3))
+    assert provider.complete([], {}) == {"action": "final"}
+    assert count[0] == 4 and budget.calls == 4
+    # 0.5 s, 1 s and 2 s, slept in steps of at most one second.
+    assert sum(sleeps) == 3.5 and max(sleeps) <= 1
+    statuses = [call["status"] for call in receipt[0].calls(receipt[1])]
+    assert statuses == ["http_429", "http_503", "http_503", "ok"]
+    # Without the setting, a request is retried as often as a reply is repaired.
+    count[0] = 0
+    provider, budget = small(receipt, handler, Limits(max_retries=1))
+    with pytest.raises(ProviderError, match="^provider_http_503$"):
+        provider.complete([], {})
+    assert budget.calls == 2
+
+
+def test_the_end_of_the_run_bounds_every_request(receipt):
+    now = [100.0]
+    limits = Limits(task_timeout_seconds=300)
+    budget = Budget(limits, clock=lambda: now[0], deadline=130.0)
+    # The task has five minutes, the run thirty seconds: the nearer end counts.
+    assert budget.remaining_seconds() == 30
+    budget.reserve({}, 1, None, None)
+    now[0] = 130.0
+    with pytest.raises(BudgetExceeded, match="^run_deadline_reached$"):
+        budget.reserve({}, 1, None, None)
+    assert budget.calls == 1
+    assert Budget(limits, clock=lambda: now[0]).remaining_seconds() == 300
+
+
+@pytest.mark.parametrize(
+    ("base_url", "endpoint"),
+    [
+        ("https://host/v1", "https://host/v1/chat/completions"),
+        ("https://host/v1/", "https://host/v1/chat/completions"),
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080/chat/completions"),
+        # Pasted complete, as it stands in most documentation.
+        ("https://host/v1/chat/completions", "https://host/v1/chat/completions"),
+        ("https://host/api/chat", "https://host/api/chat"),
+        # A gateway that carries its API version in the query string.
+        (
+            "https://host/openai/deployments/small/chat/completions?api-version=2024-06-01",
+            "https://host/openai/deployments/small/chat/completions?api-version=2024-06-01",
+        ),
+        ("https://host/route?key=value", "https://host/route?key=value"),
+    ],
+)
+def test_the_endpoint_is_the_prefix_plus_the_chat_route_unless_already_complete(
+    receipt, base_url, endpoint
+):
+    assert chat_endpoint(base_url) == endpoint
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json=completion())
+
+    tracker, run_id = receipt
+    limits = Limits()
+    provider = SmallModelProvider(
+        ModelConfig(provider="openai", base_url=base_url, model="m"),
+        limits,
+        Budget(limits),
+        tracker,
+        run_id,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.complete([], {})
+    assert seen == [endpoint]
+
+
+def kit(receipt, call, limits=None, **options):
+    tracker, run_id = receipt
+    limits = limits or Limits()
+    budget = Budget(limits)
+    config = ModelConfig(
+        provider="openai", model="kit-model", input_usd_per_million=1, output_usd_per_million=2
+    )
+    return FunctionModel(call, config, limits, budget, tracker, run_id, **options), budget
+
+
+def test_a_kit_function_is_metered_cached_and_bounded_like_the_http_adapter(receipt, tmp_path):
+    asked = []
+
+    def chat(messages):
+        asked.append(messages)
+        return completion({"action": "final", "n": len(asked)})
+
+    ask = [{"role": "user", "content": "same question"}]
+    cache = {"cache": ResponseCache(tmp_path / "private" / "cache.sqlite", "readwrite")}
+    spend = DevSpend(DevBudget(max_calls=2), receipt[0])
+    model, budget = kit(receipt, chat, spend=spend, **cache)
+    assert model.complete(ask, {}) == {"action": "final", "n": 1}
+    again, _ = kit(receipt, chat, spend=spend, **cache)
+    assert again.complete(ask, {}) == {"action": "final", "n": 1} and len(asked) == 1
+    live, replay = receipt[0].calls(receipt[1])
+    assert (live["status"], live["input_tokens"], live["output_tokens"]) == ("ok", 20, 10)
+    assert live["model"] == "kit-model" and replay["status"] == "cache_hit"
+    # Only the live call counts against the team's allowance.
+    assert receipt[0].spend()["calls"] == 1 and budget.calls == 1
+    # A reply the harness cannot read is a repairable model error, not a crash.
+    for reply in (None, 7, {"choices": []}, "no json here"):
+        broken, _ = kit(receipt, lambda messages, reply=reply: reply)
+        with pytest.raises(ModelOutputError):
+            broken.complete(ask, {})
+    truncated, _ = kit(receipt, lambda messages: completion(finish="length"))
+    with pytest.raises(ModelOutputError, match="^model_output_truncated$"):
+        truncated.complete(ask, {})
+    # In replay mode nothing is asked.
+    replay_only, _ = kit(
+        receipt,
+        lambda messages: pytest.fail("must not call"),
+        cache=ResponseCache(tmp_path / "private" / "cache.sqlite", "replay"),
+    )
+    assert replay_only.complete(ask, {}) == {"action": "final", "n": 1}
+    with pytest.raises(ProviderError, match="^cache_miss_in_replay_mode$"):
+        replay_only.complete([{"role": "user", "content": "new"}], {})
+
+
+def test_a_kit_function_that_hangs_or_fails_is_given_up_within_bounds(receipt):
+    import threading
+
+    release = threading.Event()
+    started = []
+
+    def hangs(messages):
+        started.append(1)
+        release.wait(30)
+        return completion()
+
+    # No timeout of its own: the harness stops waiting, tries once more, gives up.
+    model, budget = kit(receipt, hangs, Limits(timeout_seconds=0.05, http_retries=4))
+    try:
+        with pytest.raises(ProviderError, match="^provider_timeout$"):
+            model.complete([], {})
+    finally:
+        release.set()
+    assert len(started) == 2 and budget.calls == 2
+    assert [call["status"] for call in receipt[0].calls(receipt[1])] == ["timeout", "timeout"]
+
+    attempts = []
+
+    def flaky(messages):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise RuntimeError("rate limited, with a private detail")
+        return "```json\n" + json.dumps({"action": "final"}) + "\n```"
+
+    model, budget = kit(receipt, flaky, Limits(http_retries=3))
+    assert model.complete([], {}) == {"action": "final"} and len(attempts) == 3
+    down, _ = kit(receipt, lambda messages: 1 / 0, Limits(http_retries=1))
+    with pytest.raises(ProviderError, match="^kit_model_call_failed$"):
+        down.complete([], {})
+    # Usage the kit did not report stays unknown instead of being guessed.
+    assert receipt[0].calls(receipt[1])[-1]["input_tokens"] is None

@@ -6,7 +6,7 @@ import ipaddress
 import json
 import re
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -24,6 +24,8 @@ _FORMATS = (
     "%Y-%m-%d",
 )
 _SYSLOG = re.compile(r"^([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}:\d{2}:\d{2})$")
+# Column names that suggest a moment: event_time, loggedAt, created, @timestamp.
+_TIME_NAME = re.compile(r"(?i)(time|stamp|date|when|created|logged|occurred|_at|_ts)$|^(at|ts|t)$")
 _OPERATORS = (
     "contains",
     "not_contains",
@@ -129,9 +131,30 @@ def flatten(value: Any, prefix: str = "", limit: int = 100) -> dict[str, Any]:
     return flat
 
 
-def time_field(columns: Iterable[str]) -> str | None:
+def time_field(
+    columns: Iterable[str], rows: Sequence[Mapping[str, Any]] | None = None
+) -> str | None:
+    """The column that carries the time of a row.
+
+    A usual name wins. Otherwise, given `rows`, it is the first column whose
+    values are all timestamps, columns with a telling name first. A bare number
+    counts as a timestamp only under such a name: IDs and sizes are numbers too.
+    """
+    columns = list(columns)
     lowered = {column.lower(): column for column in columns}
-    return next((lowered[name] for name in TIME_FIELDS if name in lowered), None)
+    named = next((lowered[name] for name in TIME_FIELDS if name in lowered), None)
+    if named is not None or rows is None:
+        return named
+    telling = [column for column in columns if _TIME_NAME.search(column)]
+    for column in telling + [column for column in columns if column not in telling]:
+        values = [row.get(column) for row in rows[:200] if row.get(column) not in (None, "")]
+        if values and all(
+            parse_timestamp(value) is not None
+            and (column in telling or not re.fullmatch(r"[\d.]+", str(value).strip()))
+            for value in values
+        ):
+            return column
+    return None
 
 
 def _number(value: Any) -> float | None:

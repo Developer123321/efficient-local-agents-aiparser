@@ -1,10 +1,22 @@
 import json
+from pathlib import Path
 
 import pytest
 
-from hacklab.benchmark import Expected, compare, dataset_digest, load_cases, score_answer
+from hacklab.benchmark import (
+    Expected,
+    benchmark,
+    compare,
+    dataset_digest,
+    failures,
+    load_cases,
+    score_answer,
+)
+from hacklab.config import Config, load_config
 from hacklab.models import Answer, Citation
+from hacklab.practice import generate
 from hacklab.tools import ToolRegistry
+from hacklab.tracking import Tracker
 
 
 def test_score_rejects_fabricated_quote_and_wrong_status(tmp_path):
@@ -141,3 +153,74 @@ def test_numeric_answers_compare_by_value_and_text_answers_by_text(tmp_path):
     label = Expected(exact_answer="agent-007")
     assert score_answer(Answer(status="ok", answer="Agent-007"), label, tools)["score"] == 1
     assert score_answer(Answer(status="ok", answer="agent-7"), label, tools)["score"] == 0
+
+
+def test_failures_name_what_the_harness_itself_stopped(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("alpha\n")
+    (tmp_path / "b.txt").write_text("beta\ngamma\n")
+    dataset = tmp_path / "cases.jsonl"
+    cases = [
+        ("one", "Return it.", ["a.txt"], {"exact_answer": "alpha"}, "lookup"),
+        # The offline mock abstains on two lines; a model would be asked here.
+        ("two", "Return it.", ["b.txt"], {"exact_answer": "beta"}, "lookup"),
+        ("three", "Return it.", ["a.txt"], {"exact_answer": "alpha"}, "late"),
+    ]
+    dataset.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "task": {"id": name, "question": question, "documents": documents},
+                    "expected": expected,
+                    "category": category,
+                }
+            )
+            + "\n"
+            for name, question, documents, expected, category in cases
+        )
+    )
+    tracker = Tracker(tmp_path / "state" / "t.sqlite")
+    report = benchmark(dataset, tmp_path, Config(), tracker)
+    assert [record["cause"] for record in report["records"]] == [None, None, None]
+    lost = failures(report)
+    assert lost["failed"] == 1 and lost["by_category"]["lookup"]["causes"] == {}
+    # A missing setting shows up by name, not as a mysterious failure ...
+    model = {"provider": "openai", "model": "m"}
+    unset = Config.model_validate({"model": model})
+    lost = failures(benchmark(dataset, tmp_path, unset, tracker))
+    assert lost["by_category"]["lookup"]["causes"] == {
+        "configure_small_model_base_url_and_name": ["one", "two"]
+    }
+    assert lost["by_category"]["late"]["statuses"] == {"error": 1}
+    # ... and so does a limit that is too tight for the task.
+    monkeypatch.setenv("SMALL_MODEL_API_KEY", "synthetic")
+    tight = Config.model_validate(
+        {
+            "model": {**model, "base_url": "http://127.0.0.1:9/v1"},
+            "limits": {"max_total_tokens": 128},
+        }
+    )
+    report = benchmark(dataset, tmp_path, tight, tracker)
+    lost = failures(report)
+    assert lost["failed"] == 3 and report["calls"] == 0
+    assert lost["by_category"]["lookup"]["causes"] == {
+        "token_budget_exhausted_before_request": ["one", "two"]
+    }
+    assert lost["by_category"]["late"]["statuses"] == {"abstain": 1}
+
+
+def test_a_parallel_benchmark_scores_the_same_in_the_same_order(tmp_path):
+    out = tmp_path / "scenario"
+    generate(5, out, agents=20, events=300)
+    config = load_config(Path(__file__).parents[1] / "configs" / "practice.toml")
+    tracker = Tracker(tmp_path / "state" / "t.sqlite")
+    dataset, root = out / "cases.jsonl", out / "docs"
+    alone = benchmark(dataset, root, config, tracker)
+    together = benchmark(dataset, root, config, tracker, workers=4)
+    keys = ("task_id", "category", "status", "score", "checks")
+    assert [[r[key] for key in keys] for r in together["records"]] == [
+        [r[key] for key in keys] for r in alone["records"]
+    ]
+    assert together["accuracy"] == alone["accuracy"] == 1.0
+    assert together["dataset_sha256"] == alone["dataset_sha256"]
+    with pytest.raises(ValueError, match="workers"):
+        benchmark(dataset, root, config, tracker, workers=0)

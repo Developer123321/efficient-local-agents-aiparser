@@ -93,6 +93,68 @@ def test_one_edit_preserves_model_guards_and_all_other_parameters():
         apply_edit(changed, edit)
 
 
+def test_configuration_identity_survives_validation_without_erasing_typed_changes():
+    from hacklab.optimize import _digest
+
+    original = Config()
+    validated = Config.model_validate(original.model_dump())
+    assert _digest(original.model_dump()) == _digest(validated.model_dump())
+    assert _digest({"value": True}) != _digest({"value": 1})
+    assert _digest({"value": "1"}) != _digest({"value": 1})
+    changed = apply_edit(
+        original, ConfigEdit(field="agent.list_preview", value=4, hypothesis="reduce_copying")
+    )
+    assert _digest(original.model_dump()) != _digest(changed.model_dump())
+
+
+def test_measurement_discards_results_when_input_documents_change(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from hacklab import optimize
+
+    config = Config()
+    (tmp_path / "note.txt").write_text("Before.\n")
+    dataset = tmp_path / "dev.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "task": {
+                    "id": "input-stability",
+                    "question": "Return the source.",
+                    "documents": ["note.txt"],
+                },
+                "expected": {"exact_answer": "Before."},
+            }
+        )
+        + "\n"
+    )
+    tuning = tmp_path / "tuning.json"
+    tuning.write_text(
+        json.dumps(
+            {
+                "configuration": safe_config(config),
+                "budget_ceiling": 0.05,
+                "runtime_config_sha256": optimize._digest(
+                    optimize._clamp_budget(config, 0.05).model_dump()
+                ),
+            }
+        )
+    )
+    actual = optimize.benchmark
+
+    def measured_then_changed(*args, **kwargs):
+        result = actual(*args, **kwargs)
+        (tmp_path / "note.txt").write_text("After.\n")
+        return result
+
+    monkeypatch.setattr(optimize, "benchmark", measured_then_changed)
+    output = tmp_path / "report.json"
+    args = SimpleNamespace(_tuning=tuning, _out=output, dataset=dataset, root=tmp_path, repeat=1)
+    with pytest.raises(RuntimeError, match="^measurement_inputs_changed$"):
+        optimize._measure(args, config, Tracker(tmp_path / ".state" / "tracking.sqlite"))
+    assert not output.exists()
+
+
 @pytest.mark.parametrize(
     "accuracy,cost,accepted,reason",
     [

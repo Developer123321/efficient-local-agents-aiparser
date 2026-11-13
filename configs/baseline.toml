@@ -10,10 +10,16 @@ enabled = false
 [agent]
 inventory = false
 
+[guard]
+max_actions = 20
+
 [limits]
 max_steps = 4
 max_calls = 6
 max_retries = 1
+timeout_seconds = 25
+task_timeout_seconds = 180
 max_context_chars = 12000
 max_output_tokens = 1000
-max_total_tokens = 12000
+# Checked against request BYTES plus the output allowance, see live.toml.
+max_total_tokens = 60000

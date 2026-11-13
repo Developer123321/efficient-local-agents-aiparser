@@ -2,6 +2,10 @@
 
 ## The loop
 
+For a bounded automatic development loop and graphical results, see the
+[feedback workspace](feedback-loop.md). It keeps hold-out observations separate
+and makes rejected or uncertain trials visible alongside improvements.
+
 ```sh
 export HACKLAB_CACHE_MODE=readwrite      # replay unchanged requests for free
 uv run hacklab benchmark --config configs/baseline.toml \
@@ -14,8 +18,12 @@ uv run hacklab budget --config configs/live.toml
 ```
 
 - `compare` shows the change in accuracy, cost, calls and tokens.
-- `failures` shows which check failed per category and the calls per task.
+- `failures` shows which check failed per category, the calls per task and
+  `causes`: tasks that the harness itself stopped.
 - `budget` shows what was really sent against `[budget]`.
+- `benchmark --workers 4` runs four cases side by side: the same requests and
+  the same scores in less time. Compare latencies only between runs with the
+  same number of workers.
 
 Copy a config and change exactly one setting. One configuration is better
 only if accuracy does not fall and cost does not rise. There is no combined
@@ -58,6 +66,27 @@ freeze.
 
 Then read the trace of the failing task: `HACKLAB_TRACE_DIR=.state/trace`
 writes every prompt, reply and tool result to a private text file.
+
+Check `causes` before anything else. A cause is a fixed code that says which
+bound ended the task; no prompt change helps against it.
+
+| Cause | Setting to look at |
+| --- | --- |
+| `token_budget_exhausted_before_request` | `max_total_tokens`: it is compared with the request size in bytes |
+| `request_budget_exhausted`, `step_limit_reached` | `max_calls`, `max_steps`; or a skill that ends the wandering |
+| `task_time_budget_exhausted`, `provider_timeout` | `task_timeout_seconds`, `timeout_seconds`, reasoning effort |
+| `run_deadline_reached` | `submit --deadline-seconds`, `--workers` |
+| `provider_http_429`, `provider_http_503` and the like, `provider_transport_error` | `http_retries`, fewer workers |
+| `model_returned_reasoning_only`, `model_output_truncated` | `extra_body` (thinking), `max_output_tokens` |
+| `output_failed_validation` | The reply format: `response_format`, then the trace |
+| `configure_small_model_base_url_and_name`, `small_model_key_missing` | `.env` |
+| `local_setup_failed` | A document or tool raised: run `solve` on the task with `HACKLAB_DEBUG=1` |
+
+This table exists because of a mistake found on 13 November: the profile to
+be submitted had tighter limits than the profile that was measured. Replaying
+the recorded runs under those limits turned the `secrets` and `contain` tasks
+into abstentions before the model was asked (7 of 9 became 6, 6 became 5).
+The two profiles are now equal and a test keeps them so.
 
 ## Budget
 

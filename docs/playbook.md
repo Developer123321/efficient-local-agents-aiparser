@@ -7,9 +7,11 @@ four. Rules and open questions: [hackathon.md](hackathon.md).
 
 - [ ] ID or passport that matches IBM's invitation is packed.
 - [ ] AIM Slack works on the laptop you bring.
-- [ ] On that laptop: `git pull`, then `just ready`, `just check`,
-      `just practice` and `just container-test` all pass.
-- [ ] No Docker or Podman? Then you depend on the limited test submissions.
+- [ ] On that laptop: `git pull`, then `bash scripts/setup --check` and
+      `bash scripts/container-test` pass (in the Nix shell or the VM:
+      `just ready`, `just check`, `just practice`, `just container-test`).
+- [ ] No Docker or Podman? Then you depend on a teammate's laptop or on the
+      limited test submissions.
 - [ ] Your coding assistant is logged in. If it has a five-hour usage window,
       send it a short message at 07:00 so a fresh window opens around 12:00.
 - [ ] Charger, and phone tethering as a second way online.
@@ -20,9 +22,9 @@ One owner per area keeps four people out of each other's files.
 
 | Role | Does | Files |
 | --- | --- | --- |
-| Integrator | Starter kit, task and answer format, container, submissions | `cli.py`, `Dockerfile`, `examples/kit_adapter.py` |
-| Analyst | Reads the data by hand, writes playbooks | a new playbook module, `forensics/` |
-| Prompt and loop | Prompt, skills, tools, guards, model settings | `agent.py`, `configs/*.toml`, the skills directory |
+| Integrator | Starter kit, task and answer format, container, submissions | `event/adapter.py`, `Dockerfile`, `cli.py` |
+| Analyst | Reads the data by hand, writes playbooks | `event/playbooks.py`, `forensics/` |
+| Prompt and loop | Prompt, skills, tools, guards, model settings | `agent.py`, `configs/live.toml`, `event/skills/` |
 | Measurer | Cases, benchmark runs, budget, the freeze | `bench/`, `results/` |
 
 With fewer people, merge Integrator and Measurer first.
@@ -41,14 +43,20 @@ The first goal is one valid submission, not a good one.
 2. `cp .env.example .env && chmod 600 .env`, enter URL, model name and key.
    Run `uv run hacklab probe --config configs/live.toml` and adjust `[model]`
    until it is green.
-3. Connect kit and harness with the least glue: either the kit calls
-   `hacklab.agent.run_task` with its tools wrapped
-   ([examples/kit_adapter.py](../examples/kit_adapter.py)), or
-   `hacklab submit` reads the kit's task files.
+3. Connect kit and harness with the least glue. Either the kit's entry
+   point calls `hacklab.event.adapter.solve` once per task
+   ([adapter.py](../src/hacklab/event/adapter.py): its tools are wrapped,
+   `model=kit.chat` routes requests through the kit's own client, `snapshot`
+   turns rows from a kit tool into a citable document), or `hacklab submit`
+   reads the kit's task file. `submit` takes JSON Lines, a JSON array or an
+   object holding one, under the usual key names; its summary lists
+   `ignored_keys`, the fields of the input that nothing has read yet.
 4. Submit the unmodified or minimally adapted example once. This tests the
    container path while a failure is still cheap.
 5. Set `[budget]` to the team's allowance and
    `export HACKLAB_CACHE_MODE=readwrite` in every shell.
+6. `uv run hacklab doctor --strict --config configs/live.toml` must list no
+   problem: it names a playbook module or a skill folder that cannot be found.
 
 ## 10:45 Learn the task types
 
@@ -57,7 +65,9 @@ The first goal is one valid submission, not a good one.
 - **Measurer:** turn the organizers' tasks and feedback into `bench/*.jsonl`
   cases. Put a third aside as a hold-out file that nobody tunes against.
 - **Prompt and loop:** run `configs/baseline.toml` and `configs/live.toml` on
-  the same cases; `hacklab failures` shows where points are lost.
+  the same cases; `hacklab failures` shows where points are lost. Look at
+  `causes` first: a task the harness itself stopped (a limit, a provider
+  error) is fixed in `[limits]`, not in the prompt.
 - **Integrator:** wrap the kit's tools, mark the ones that change something,
   set `allowed_actions` and `protected_targets`, get `just container-test`
   green with the kit inside the image.
@@ -74,11 +84,13 @@ idea -> change -> just check -> benchmark -> hacklab compare
 What usually pays off, best first:
 
 1. **A playbook per task type.** If code can compute the answer, write the
-   solver ([template](../examples/event_playbooks.py)). It costs no tokens and
-   cannot be talked out of its answer.
+   solver in [event/playbooks.py](../src/hacklab/event/playbooks.py)
+   ([worked example](../examples/event_playbooks.py)). It costs no tokens and
+   cannot be talked out of its answer. `workspace.rows`, `workspace.after`
+   and `workspace.call` read tables and use the kit's tools from code.
 2. **A skill per task type that code cannot solve.** Five lines with the real
    file and column names and one example of the right tool calls
-   ([examples](../examples/skills)).
+   ([event/skills](../src/hacklab/event/skills)).
 3. **Fewer calls.** Raise `preload_results`, set `preload_documents_under`,
    lower `max_steps`.
 4. **Smaller prompts.** Remove unused tools from `[agent] tools`, lower
@@ -97,6 +109,8 @@ Rules for the afternoon:
 - Never tune on the hold-out file.
 - Run `hacklab budget` before every live benchmark. Keep a fifth of the
   allowance for the last hour.
+- `benchmark --workers 4` sends the same requests in a quarter of the time,
+  if the endpoint allows parallel requests.
 - Commit every kept change. Tag the commit of every submission.
 - Endpoint down? `HACKLAB_CACHE_MODE=replay` sends nothing; work on playbooks.
 
@@ -115,11 +129,26 @@ Rules for the afternoon:
 
 The agent runs once, alone, on data nobody has seen.
 
-- Every task gets a valid answer, also after a tool error or a timeout.
-  `run_task` guarantees this; keep new code inside it.
-- It needs nothing but the endpoints the organizers provide. If Jev is
-  missing there, the agent carries on without it.
-- A playbook checks the files and columns it relies on and returns `None`
-  when the data looks different, so the model takes over.
-- It finishes in time: `submit --workers N` if parallel requests are allowed,
-  `--deadline-seconds` so that late tasks still get an answer line.
+- **Every task gets a valid answer line.** `submit` writes one line per task
+  before the first request and replaces it as answers arrive, so a run that
+  is stopped early still leaves a complete file. A record it cannot read
+  becomes an `error` line, never the end of the run. A second run overwrites
+  the file.
+- **Nothing but the provided endpoints is needed.** If Jev is missing, the
+  agent carries on without it. A rate limit, a server error or a lost
+  connection is retried after 0.5, 1 and 2 seconds; a slow reply gets one
+  more try.
+- **A playbook checks the files and columns it relies on** and returns `None`
+  when the data looks different, so the model takes over. A playbook module
+  that cannot be loaded costs no task: the model answers alone.
+- **It finishes in time.** `submit --workers N` if parallel requests are
+  allowed. `--deadline-seconds S` is the end of the run: no request outlives
+  it, and later tasks are answered by playbooks only.
+- **No receipts, no problem.** Without a writable place for the tracking
+  database the run goes on without it.
+- **If a command fails with exit code 2**, `HACKLAB_DEBUG=1` adds where it
+  failed (file and line, no data).
+
+Keep `--all-documents` for a kit whose tasks name no files: every document
+below `--root` is then readable for every task. The task file and the answer
+file are left out; keep notes and old results out of that directory.

@@ -61,6 +61,11 @@ def _internal(address: str) -> bool:
         return False
 
 
+def _write(path: Path, text: str) -> None:
+    """The same bytes on every operating system: digests and the replay cache depend on them."""
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def _stamp(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -234,16 +239,17 @@ def generate(seed: int, out: Path, agents: int = 40, events: int = 1500) -> dict
     audit.sort(key=lambda row: row["ts"])
     for index, row in enumerate(board, 1):
         row["id"] = f"m{index:05d}"
-    (docs / BOARD).write_text("".join(json.dumps(row) + "\n" for row in board))
-    (docs / AUDIT).write_text("".join(json.dumps(row) + "\n" for row in audit))
-    (docs / TOKENS).write_text(
+    _write(docs / BOARD, "".join(json.dumps(row) + "\n" for row in board))
+    _write(docs / AUDIT, "".join(json.dumps(row) + "\n" for row in audit))
+    _write(
+        docs / TOKENS,
         "token,owner,scope,created_at\n"
         + "".join(
             f'{token},{owner},"{scope}",{_stamp(created)}\n'
             for token, (owner, scope, created) in sorted(tokens.items())
-        )
+        ),
     )
-    (docs / RUNBOOK).write_text(RUNBOOK_TEXT)
+    _write(docs / RUNBOOK, RUNBOOK_TEXT)
 
     # Reference facts follow the runbook's rules over the finished log, so that
     # ordinary uploads by an already compromised agent count as well.
@@ -337,7 +343,8 @@ def generate(seed: int, out: Path, agents: int = 40, events: int = 1500) -> dict
             {"status": "abstain"},
         ),
     ]
-    (out / "cases.jsonl").write_text(
+    _write(
+        out / "cases.jsonl",
         "".join(
             json.dumps(
                 {
@@ -348,15 +355,16 @@ def generate(seed: int, out: Path, agents: int = 40, events: int = 1500) -> dict
             )
             + "\n"
             for name, category, question, documents, expected in cases
-        )
+        ),
     )
     # The same tasks without reference labels: the input format of `hacklab submit`.
-    (out / "tasks.jsonl").write_text(
+    _write(
+        out / "tasks.jsonl",
         "".join(
             json.dumps({"id": f"s{seed}-{name}", "question": question, "documents": documents})
             + "\n"
             for name, _, question, documents, _ in cases
-        )
+        ),
     )
     return {
         "seed": seed,

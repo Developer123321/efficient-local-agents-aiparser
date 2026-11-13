@@ -287,7 +287,8 @@ def test_loop_step_limit_stops_repeated_tools(lab, monkeypatch):
         Task(id="loop", question="Find missing data."), root, config, tracker
     )
     assert answer.status == "abstain"
-    assert answer.reason == "Maximum planning steps reached."
+    # The harness ended the task, and says so in a fixed code.
+    assert answer.reason == answer.cause == "step_limit_reached"
     assert len(calls) == 3
     # The same call twice is answered from memory with a nudge, not repeated.
     assert calls[2]["messages"][-1]["content"].startswith("repeated call")
@@ -334,7 +335,7 @@ def test_a_crashing_tool_or_document_still_yields_an_answer(lab, monkeypatch):
     _, answer = agent.run_task(Task(id="crash", question="Who?"), root, config, tracker, [spec])
     assert answer.status == "abstain"
     assert calls[1]["messages"][-1]["content"] == (
-        "error: The tool failed on these arguments\n-- 5 steps left"
+        "error: The tool failed on these arguments\n-- 7 steps left"
     )
     assert "private detail" not in json.dumps(calls)
     _, answer = agent.run_task(
@@ -1013,7 +1014,7 @@ def test_shipped_example_skills_match_the_tasks_they_are_written_for():
     from hacklab.config import Config as Settings
 
     config = Settings()
-    config.agent.skills = str(Path(__file__).parents[1] / "examples" / "skills")
+    config.agent.skills = "hacklab.event:skills"
     contain = Task(id="c", question="Contain the incident according to the runbook.")
     listing = Task(id="l", question="Which tokens must be revoked under the runbook?")
     single = Task(id="s", question="Which agent was compromised first?")
@@ -1026,3 +1027,231 @@ def test_shipped_example_skills_match_the_tasks_they_are_written_for():
         and "answer_from" in agent._skills(listing, config)[0]
     )
     assert agent._skills(single, config) == []
+
+
+def test_many_documents_never_push_a_task_over_the_context_limit(lab, monkeypatch):
+    root, tracker = lab
+    names = [f"agent-{index:03d}.jsonl" for index in range(60)]
+    for index, name in enumerate(names):
+        (root / name).write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "ts": f"2026-11-14T02:{minute:02d}:00Z",
+                        "actor": f"agent-{index:03d}",
+                        "action": "login",
+                        "target": f"models/hub/base-{minute}",
+                        "token": f"tok-{index:03d}",
+                        "src_ip": f"10.0.{index}.{minute}",
+                        "status": "ok",
+                    }
+                )
+                + "\n"
+                for minute in range(50)
+            )
+        )
+    (root / "runbook.md").write_text("Quarantine every compromised agent.\n")
+    config, calls = live(monkeypatch, [final("none", ["e1"])])
+    config.agent.preload_documents_under = 40
+    task = Task(
+        id="many", question="Which agents are compromised?", documents=[*names, "runbook.md"]
+    )
+    _, answer = agent.run_task(task, root, config, tracker)
+    # Described column by column, the sixty logs alone exceed the context: the
+    # task used to be abstained before the model saw it.
+    assert answer.status == "ok" and len(calls) == 1
+    briefing = calls[0]["messages"][1]["content"]
+    assert len(calls[0]["messages"][0]["content"]) + len(briefing) < config.limits.max_context_chars
+    # Detail went first; every document is still named and the runbook is shown.
+    assert "- agent-059.jsonl: table, 50 rows" in briefing and "src_ip:" not in briefing
+    assert "Quarantine every compromised agent." in briefing
+    # With room to spare the listing is as detailed as before.
+    few = Task(id="few", question="Which agents are compromised?", documents=names[:2])
+    agent.run_task(few, root, config, tracker)
+    assert "    src_ip: 50 distinct values" in calls[1]["messages"][1]["content"]
+    # A listing that cannot fit even as names is cut and says so.
+    tight = live(monkeypatch, [final("none", ["e1"])], limits=Limits(max_context_chars=6000))
+    agent.run_task(task, root, tight[0], tracker)
+    assert "more documents; search covers all of them" in tight[1][0]["messages"][1]["content"]
+
+
+def test_a_failing_tracker_never_costs_the_answer(lab, monkeypatch, capsys):
+    root, tracker = lab
+    (root / "note.txt").write_text("Budget approved: 42 EUR.\n")
+
+    class Broken:
+        def __getattr__(self, name):
+            def fail(*args, **kwargs):
+                raise OSError("read-only file system")
+
+            return fail
+
+    monkeypatch.setattr(agent._Receipts, "warned", False)
+    config, calls = live(monkeypatch, [tool("read", document="note.txt"), final("42 EUR", ["e1"])])
+    task = Task(id="budget", question="Approved budget?", documents=["note.txt"])
+    run_id, answer = agent.run_task(task, root, config, Broken())
+    assert answer.status == "ok" and answer.answer == "42 EUR" and run_id
+    agent.run_task(task, root, config, Broken())
+    # Said once, not once per task.
+    assert capsys.readouterr().err.count("tracking failed") == 1
+
+
+def test_playbooks_that_cannot_be_loaded_hand_the_task_to_the_model(lab, monkeypatch, capsys):
+    root, tracker = lab
+    (root / "note.txt").write_text("Budget approved: 42 EUR.\n")
+    monkeypatch.setattr(agent, "_UNLOADABLE", set())
+    config, calls = live(monkeypatch, [tool("read", document="note.txt"), final("42 EUR", ["e1"])])
+    config.agent.playbooks = "package_missing_from_the_image:playbooks"
+    task = Task(id="budget", question="Approved budget?", documents=["note.txt"])
+    run_id, answer = agent.run_task(task, root, config, tracker)
+    # A registry left out of the image used to turn every task into an error.
+    assert answer.status == "ok" and len(calls) == 2
+    assert ("playbook", "unavailable") in events(tracker, run_id, root.parent)
+    assert "cannot be loaded" in capsys.readouterr().err
+
+
+def test_past_the_end_of_the_run_only_playbooks_answer(lab, monkeypatch):
+    import time
+
+    root, tracker = lab
+    (root / "audit.jsonl").write_text(
+        '{"ts":"2026-11-14T02:00:00Z","actor":"agent-2","action":"exec_payload"}\n'
+    )
+    module = types.ModuleType("late_playbooks")
+    module.playbooks = Playbooks()
+
+    @module.playbooks.register(r"compromised first")
+    def first(task, workspace):
+        units = workspace.rows("audit.jsonl", {"action": "exec_payload"})
+        return workspace.answer(units[0].values["actor"], [workspace.cite("audit.jsonl", units[0])])
+
+    monkeypatch.setitem(sys.modules, "late_playbooks", module)
+    config, calls = live(monkeypatch, [final("agent-2", ["e1"])])
+    config.agent.playbooks = "late_playbooks:playbooks"
+    config.agent.preload_documents_under = 10
+    over = time.monotonic() - 1
+    known = Task(id="pz", question="Which agent was compromised first?", documents=["audit.jsonl"])
+    _, answer = agent.run_task(known, root, config, tracker, deadline=over)
+    assert answer.status == "ok" and answer.answer == "agent-2"
+    other = Task(id="other", question="Who is the contact?", documents=["audit.jsonl"])
+    _, answer = agent.run_task(other, root, config, tracker, deadline=over)
+    assert answer.status == "abstain" and answer.cause == "run_deadline_reached" and calls == []
+    # Before the end of the run the same task reaches the model.
+    _, answer = agent.run_task(other, root, config, tracker, deadline=time.monotonic() + 60)
+    assert answer.status == "ok" and len(calls) == 1
+
+
+def test_the_kits_own_chat_function_stands_in_for_the_http_client(lab, monkeypatch):
+    root, tracker = lab
+    (root / "note.txt").write_text("Budget approved: 42 EUR.\n")
+    task = Task(id="budget", question="Approved budget?", documents=["note.txt"])
+    config = Config(model=ModelConfig(provider="openai", model="kit-model"))
+    config.agent.preload_documents_under = 10
+    seen = []
+
+    class Completion:
+        """What an SDK returns: an object that can be dumped to a chat completion."""
+
+        def model_dump(self):
+            return {
+                "choices": [{"message": {"content": json.dumps(final("42 EUR", ["e1"]))}}],
+                "usage": {"prompt_tokens": 70, "completion_tokens": 9},
+            }
+
+    replies = {
+        "text": "Here you go: " + json.dumps(final("42 EUR", ["e1"])),
+        "dict": Completion().model_dump(),
+        "object": Completion(),
+    }
+    for kind, reply in replies.items():
+
+        def chat(messages, reply=reply):
+            seen.append(messages)
+            return reply
+
+        run_id, answer = agent.run_task(task, root, config, tracker, model=chat)
+        assert answer.status == "ok" and answer.answer == "42 EUR", kind
+        usage = tracker.summary(run_id)
+        # Usage is recorded when the kit reports it, and unknown when it does not.
+        assert usage["calls"] == 1
+        assert usage["total_tokens"] == (None if kind == "text" else 79)
+    assert seen[0][0]["role"] == "system" and "note.txt in full" in seen[0][1]["content"]
+
+    failures = []
+
+    def down(messages):
+        failures.append(1)
+        raise ConnectionError("gateway unreachable with private detail")
+
+    config.limits.http_retries = 2
+    _, answer = agent.run_task(task, root, config, tracker, model=down)
+    assert answer.status == "error" and answer.cause == "kit_model_call_failed"
+    assert len(failures) == 3 and "private detail" not in answer.reason
+
+
+def test_skills_inside_a_package_are_found_and_a_broken_one_is_skipped(tmp_path):
+    from hacklab.config import Config as Settings
+
+    packaged = agent.skill_directory("hacklab.event:skills")
+    assert packaged.is_dir() and packaged.parent.name == "event"
+    # A path stays a path, also one that names no package.
+    assert agent.skill_directory(str(tmp_path)) == tmp_path
+    assert agent.skill_directory("no_such_package:skills") == Path("no_such_package:skills")
+    (tmp_path / "good.md").write_text("match: contain\nUse targets_from.\n")
+    (tmp_path / "broken.md").write_bytes(b"match: contain\n\xff\xfe not utf-8\n")
+    (tmp_path / "pattern.md").write_text("match: contain(\nAn invalid pattern.\n")
+    (tmp_path / "notes.md").write_text("No match line: not a skill.\n")
+    config = Settings()
+    config.agent.skills = str(tmp_path)
+    task = Task(id="c", question="Contain the incident.")
+    assert agent._skills(task, config) == ["Use targets_from."]
+
+
+def test_a_solver_reads_filters_and_acts_through_the_workspace(lab, monkeypatch):
+    root, tracker = lab
+    (root / "audit.jsonl").write_text(
+        "".join(
+            json.dumps({"ts": f"2026-11-14T02:0{i}:00Z", "actor": who, "action": what, "target": t})
+            + "\n"
+            for i, (who, what, t) in enumerate(
+                [
+                    ("a1", "create_token", "tok-early"),
+                    ("a1", "exec_payload", "ops"),
+                    ("a1", "create_token", "tok-x1"),
+                    ("a2", "create_token", "tok-clean"),
+                ]
+            )
+        )
+    )
+    revoked = []
+
+    def revoke_token(token):
+        """Revoke one token."""
+        revoked.append(token)
+        return {"revoked": token}
+
+    module = types.ModuleType("acting_playbooks")
+    module.playbooks = Playbooks()
+
+    @module.playbooks.register(r"revoke")
+    def revoke(task, workspace):
+        minted = workspace.after(
+            "audit.jsonl", "actor", {"action": "exec_payload"}, {"action": "create_token"}
+        )
+        evidence = [workspace.cite("audit.jsonl", unit) for unit in minted]
+        for unit in minted:
+            workspace.call("revoke_token", token=unit.values["target"])
+        # A target that no evidence names is refused, and the solver gives up.
+        workspace.call("revoke_token", token="tok-invented")
+        return workspace.answer("never reached", evidence)
+
+    monkeypatch.setitem(sys.modules, "acting_playbooks", module)
+    config, calls = live(monkeypatch, [tool("read", document="audit.jsonl"), final("a1", ["e1"])])
+    config.agent.playbooks = "acting_playbooks:playbooks"
+    task = Task(id="r", question="Revoke what the attack minted.", documents=["audit.jsonl"])
+    tools = [ToolSpec.from_function(revoke_token, mutating=True)]
+    _, answer = agent.run_task(task, root, config, tracker, tools)
+    # Only what the compromised actor minted after its compromise was revoked,
+    # and the model took over where the solver stopped.
+    assert revoked == ["tok-x1"] and len(calls) == 2
+    assert answer.status == "ok" and answer.answer == "a1"

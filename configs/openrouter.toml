@@ -20,7 +20,7 @@ enabled = false
 preload_results = 5
 inventory = true
 preload_documents_under = 40
-skills = "examples/skills"
+skills = "hacklab.event:skills"
 tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
 
 [guard]
@@ -30,13 +30,14 @@ max_actions = 200
 
 [limits]
 max_steps = 8
-max_calls = 12
+max_calls = 16
 max_retries = 1
+http_retries = 3
 timeout_seconds = 60
 task_timeout_seconds = 300
 max_context_chars = 24000
 max_output_tokens = 3000
-max_total_tokens = 60000
+max_total_tokens = 120000
 
 # The temporary key is capped at 3 USD; stop well before that.
 [budget]

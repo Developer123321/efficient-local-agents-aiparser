@@ -23,13 +23,17 @@ Task
 | File | Owns |
 | --- | --- |
 | `agent.py` | Order of work, the loop, repair, final checks |
-| `playbooks.py` | Registry of code-only solvers |
+| `pipeline.py` | Opt-in Analyst / Responder experiment, shared budgets and guarded handoffs |
+| `optimize.py` | Development-only configuration proposals, measurements, promotion and hold-out freeze |
+| `dashboard/` | Local Bun / React workspace over body-free receipts and bounded visual source maps |
+| `event/` | What the team writes on the day: playbooks, skills, the starter-kit adapter |
+| `playbooks.py` | Registry of code-only solvers and the workspace they work in |
 | `toolkit.py` | Tool list for the prompt, result rendering, the organizers' tools |
 | `tools.py` | Document access, search, tables, arithmetic |
 | `forensics/` | Decoding, indicators, timestamps, propagation, attack phases |
 | `evidence.py` | Every row shown to the model, its ID, citations |
 | `guard.py` | Injection scan, placeholders for secrets, action guard |
-| `providers.py` | HTTP calls to the models, budgets, replay cache |
+| `providers.py` | Calls to the models (HTTP, or the kit's own client), retries, budgets, replay cache |
 | `tracking.py` | A receipt for every request |
 | `benchmark.py` | Scoring, comparison, failure view |
 | `practice.py` | Rehearsal incident and its playbooks |
@@ -56,6 +60,14 @@ Cost is half the score. Best lever first:
 A skill file starts with `match: <regex>` and then holds a few lines with
 example tool calls. Code picks it from the task text, never from the evidence.
 At most two skills are added per task.
+
+The [development feedback loop](feedback-loop.md) measures one allowed setting
+change at a time and keeps a candidate only when accuracy and cost meet its
+explicit promotion rule. Its Analyst sees aggregates, not competition tasks or
+reference answers. The dashboard is read-only and cannot launch paid calls.
+`[agent] workflow = "pipeline"` separately tests batched read-only planning and
+a fresh Responder; it is not the submission default. The initial experiment lost
+accuracy despite costing less ([results](research/small-model-collaboration.md)).
 
 ## Defence layers
 
@@ -105,6 +117,24 @@ gateway.
 All are deterministic and bounded, and none executes recovered content.
 `hacklab decode` and `hacklab iocs` offer two of them on the command line.
 
+## What counts as a table
+
+The data's shape is unknown until the opening, so a document is read by what
+it holds, not by its name.
+
+| Document | Read as |
+| --- | --- |
+| `.jsonl`, `.ndjson`, and a `.log`, `.txt` or suffix-less file of JSON lines | One row per line, nested fields as `a.b` columns |
+| A log of `key=value` pairs, with or without a leading timestamp and level | One row per line |
+| `.csv`, `.tsv` | Rows; a short row gets empty cells, a long one keeps its surplus in the last column, unnamed or repeated headers get names |
+| `.json` with one list of records | Rows |
+| `.json` with several lists, or records stored under their IDs | All rows, told apart by a `_table` column; the ID is `_key` |
+| Anything else that is text | Lines to read and search |
+
+The time column is found by its usual names, else by its values: the column
+whose every value is a timestamp. A damaged line stays readable as text. A
+binary file is refused, not guessed at.
+
 ## The organizers' tools
 
 Wrap each starter-kit function and pass the list to `run_task`:
@@ -121,10 +151,35 @@ tools = [
 `mutating=True` sends the call through the action guard first. A failing tool
 gives the model an error line, never an exception.
 
+[`hacklab.event.adapter`](../src/hacklab/event/adapter.py) does this wrapping
+and the rest of the seam: `solve(question, task_id=..., data_dir=...,
+kit_tools=[...])` returns the answer as a plain dict in the organizers'
+shape. Three things a kit may bring are covered:
+
+- **Its own model client.** `model=kit.chat` sends every request through
+  that function instead of our HTTP client. Budgets, receipts, the replay
+  cache and the request timeout apply as before; a call that hangs is given
+  up after `timeout_seconds`.
+- **Data only through tools.** `snapshot(directory, name, rows)` writes what
+  a kit tool returned as a document, so that `table`, `after` and `graph`
+  work on it and every row can be cited.
+- **Actions from code.** A playbook calls a kit tool with
+  `workspace.call("quarantine_agent", agent="a7")`; a mutating tool passes
+  the action guard there too.
+
 ## Limits and privacy
 
 - Each task has limits for steps, calls, time, context and output tokens
-  (`[limits]`). Every HTTP attempt counts, including Jev and retries.
+  (`[limits]`). Every HTTP attempt counts, including Jev and retries. The
+  defaults in `config.py` equal `configs/live.toml`, which equals the profile
+  the benchmark numbers come from; `tests/test_config.py` keeps the three
+  together.
+- When the harness itself ends a task (a limit, a provider failure, the end
+  of the run), the answer carries a fixed `cause` such as
+  `token_budget_exhausted_before_request`. `hacklab failures` groups by it.
+- A failed request is retried with a growing pause (`http_retries`); a
+  malformed reply gets one repair turn (`max_retries`). The first costs time,
+  the second tokens.
 - Nothing passes from one task to the next: no answers, no summaries.
 - The replay cache and the trace (`HACKLAB_TRACE_DIR`) hold model replies and
   task data. Both live in the ignored `.state/` directory and are off in the
@@ -132,8 +187,8 @@ gives the model an error line, never an exception.
 
 ## Adapt at the opening
 
-1. Map the organizers' task and answer format in the adapter and set the
-   image's `CMD`.
+1. Map the organizers' task and answer format in `event/adapter.py`
+   (`to_kit`, `MUTATING`) and set the image's `CMD`.
 2. Wrap their tools; set `allowed_actions` and `protected_targets`.
 3. Confirm URL, key and reply format with `hacklab probe`. Only the
    OpenAI-compatible chat API is implemented.

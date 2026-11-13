@@ -7,12 +7,16 @@ the budgets, the evidence ledger, every calculation and the final checks.
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import importlib.util
 import json
 import os
 import platform
 import re
-from collections.abc import Iterable
+import sys
+import uuid
+from collections.abc import Callable, Iterable
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -76,6 +80,7 @@ def system_prompt(config: Config, toolbox: Toolbox) -> str:
     return "\n".join(parts)
 
 
+@functools.lru_cache(maxsize=1)
 def _metadata() -> dict[str, str]:
     source = hashlib.sha256()
     for path in sorted(Path(__file__).parent.rglob("*.py")):
@@ -102,20 +107,85 @@ class _Trace:
         directory = os.environ.get("HACKLAB_TRACE_DIR")
         self.path: Path | None = None
         if directory:
-            folder = Path(directory)
-            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-            self.path = folder / (re.sub(r"[^A-Za-z0-9_.-]", "_", task_id)[:120] + ".txt")
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            os.close(fd)
+            try:
+                folder = Path(directory)
+                folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+                path = folder / (re.sub(r"[^A-Za-z0-9_.-]", "_", task_id)[:120] + ".txt")
+                os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+                self.path = path
+            except OSError:
+                pass  # A trace is a convenience; the task runs without it.
 
     def add(self, title: str, text: str) -> None:
         if self.path is not None:
-            with self.path.open("a") as stream:
-                stream.write(f"===== {title}\n{text}\n")
+            try:
+                with self.path.open("a", encoding="utf-8") as stream:
+                    stream.write(f"===== {title}\n{text}\n")
+            except OSError:
+                self.path = None
+
+
+class _Receipts:
+    """The tracker as the agent uses it: a receipt that fails never costs an answer.
+
+    Receipts serve our own measurements. Where the database cannot be written,
+    for example on a read-only or full disk in the evaluation, the task goes on
+    without them and says so once.
+    """
+
+    warned = False
+
+    def __init__(self, tracker: Any):
+        self._tracker = tracker
+        self.failed = False
+
+    @property
+    def receipts_complete(self) -> bool:
+        return not self.failed and getattr(self._tracker, "receipts_complete", True) is True
+
+    def mark_incomplete(self) -> None:
+        self.failed = True
+        try:
+            mark = getattr(self._tracker, "mark_incomplete", None)
+            if callable(mark):
+                mark()
+        except Exception:
+            pass  # Receipt health must not compromise the competition answer.
+
+    def _write(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return getattr(self._tracker, name)(*args, **kwargs)
+        except Exception:
+            self.mark_incomplete()
+            if not _Receipts.warned:
+                _Receipts.warned = True
+                print("hacklab: tracking failed; receipts are incomplete", file=sys.stderr)
+            return None
+
+    def start_run(self, *args: Any, **kwargs: Any) -> str:
+        return self._write("start_run", *args, **kwargs) or str(uuid.uuid4())
+
+    def event(self, *args: Any, **kwargs: Any) -> None:
+        self._write("event", *args, **kwargs)
+
+    def record_call(self, *args: Any, **kwargs: Any) -> None:
+        self._write("record_call", *args, **kwargs)
+
+    def finish_run(self, *args: Any, **kwargs: Any) -> None:
+        self._write("finish_run", *args, **kwargs)
+
+    def spend(self) -> dict:
+        # Not swallowed: an allowance that cannot be read must not be exceeded silently.
+        return self._tracker.spend()
 
 
 def _abstain(reason: str) -> Answer:
     return Answer(status="abstain", answer="", citations=[], confidence=0.0, reason=reason)
+
+
+def _stopped(cause: str, status: str = "abstain") -> Answer:
+    """The harness, not the model, ended the task: a limit, a provider failure, a setup error."""
+    return Answer(status=status, answer="", confidence=0.0, reason=cause, cause=cause)
 
 
 def _messages(
@@ -215,6 +285,32 @@ def _jev_select(jev: Any, task: Task, rows: list[dict[str, Any]], config: Config
     return kept or rows[:1]
 
 
+def skill_directory(reference: str) -> Path:
+    """`[agent] skills` as a directory: a path, or "package:folder" inside an installed package."""
+    package, _, folder = reference.partition(":")
+    if folder and re.fullmatch(r"[A-Za-z_][\w.]*", package) and not Path(reference).exists():
+        try:
+            spec = importlib.util.find_spec(package)
+        except (ImportError, ValueError):
+            spec = None
+        if spec is not None and spec.origin:
+            return Path(spec.origin).parent / folder
+    return Path(reference)
+
+
+def skill_files(reference: str) -> list[tuple[str, str]]:
+    """(pattern, recipe) of every usable skill file, in file-name order."""
+    found = []
+    for path in sorted(skill_directory(reference).glob("*.md")):
+        try:
+            head, _, body = path.read_text(encoding="utf-8").partition("\n")
+        except (OSError, UnicodeError):
+            continue  # One unreadable recipe must not cost every task.
+        if head.startswith("match:") and body.strip():
+            found.append((head[6:].strip(), body.strip()[:1500]))
+    return found
+
+
 def _skills(task: Task, config: Config) -> list[str]:
     """Recipes whose pattern matches the task text, at most two, each bounded.
 
@@ -224,50 +320,105 @@ def _skills(task: Task, config: Config) -> list[str]:
     if not config.agent.skills:
         return []
     chosen = []
-    for path in sorted(Path(config.agent.skills).glob("*.md")):
-        head, _, body = path.read_text().partition("\n")
-        if not head.startswith("match:"):
-            continue
+    for pattern, recipe in skill_files(config.agent.skills):
         try:
-            matched = re.search(head[6:].strip(), task.question, re.IGNORECASE)
+            if re.search(pattern, task.question, re.IGNORECASE):
+                chosen.append(recipe)
         except re.error:
             continue
-        if matched and body.strip():
-            chosen.append(body.strip()[:1500])
     return chosen[:2]
 
 
+def _listing(inventory: list[dict[str, Any]], toolbox: Toolbox, room: int) -> str:
+    """One entry per task document, as detailed as `room` allows.
+
+    Forty agent logs described column by column would fill the context before
+    the first step. Detail is dropped first, then entries, never the task.
+    """
+
+    def lines(detail: int) -> list[str]:
+        listing = []
+        for entry in inventory:
+            name = entry["document"]
+            if "error" in entry:
+                listing.append(f"- {name}: unreadable")
+            elif entry.get("columns") and detail == 2:
+                # What each column holds: the model can filter without a look first.
+                listing.append(f"- {name}: table, {entry['units']} rows; columns:")
+                listing += toolbox.describe_table(name)
+            elif entry.get("columns"):
+                columns = "; columns: " + ", ".join(entry["columns"])[:300] if detail else ""
+                listing.append(f"- {name}: table, {entry['units']} rows{columns}")
+            else:
+                listing.append(f"- {name}: {entry['units']} lines")
+        return listing
+
+    for detail in (2, 1, 0):
+        text = "Documents:\n" + "\n".join(lines(detail))
+        if len(text) <= room:
+            return text
+    kept: list[str] = []
+    size = 100
+    names = lines(0)
+    for line in names:
+        if size + len(line) + 1 > room:
+            break
+        kept.append(line)
+        size += len(line) + 1
+    kept.append(f"… {len(names) - len(kept)} more documents; search covers all of them")
+    return "Documents:\n" + "\n".join(kept)
+
+
 def _briefing(
-    task: Task, toolbox: Toolbox, config: Config, jev: Any, tracker: Any, run_id: str
+    task: Task,
+    toolbox: Toolbox,
+    config: Config,
+    jev: Any,
+    tracker: Any,
+    run_id: str,
+    room: int | None = None,
 ) -> str:
-    """The first message: the task, what the documents hold, and evidence found by search."""
-    parts = [f"Task {task.id}: {task.question}"]
+    """The first message: the task, what the documents hold, and evidence found by search.
+
+    `room` is what the message may take; without it, the context limit less
+    two tool results. The task and a matching skill always go in; the document
+    listing, documents shown in full and search results are shortened or left
+    out to fit, so that a task with many documents still reaches the model
+    instead of exceeding the context limit.
+    """
+    if room is None:
+        limit = config.limits.max_context_chars
+        room = max(limit - 2 * config.limits.max_observation_chars, limit // 2)
+    head = [f"Task {task.id}: {task.question}"]
     if task.constraints:
-        parts.append("Constraints: " + _json(task.constraints))
+        head.append("Constraints: " + _json(task.constraints))
+    recipes = ["How to do this kind of task:\n" + recipe for recipe in _skills(task, config)]
+    left = room - sum(len(part) + 1 for part in head + recipes)
+    parts: list[str] = []
+
+    def add(text: str) -> None:
+        nonlocal left
+        parts.append(text)
+        left -= len(text) + 1
+
     allowance = config.limits.max_observation_chars
     inventory = toolbox.documents.inventory() if task.documents else []
     in_full: set[str] = set()
     if config.agent.inventory and inventory:
-        listing = []
-        for entry in inventory:
-            if "error" in entry:
-                listing.append(f"- {entry['document']}: unreadable")
-            elif entry.get("columns"):
-                # What each column holds: the model can filter without a look first.
-                listing.append(f"- {entry['document']}: table, {entry['units']} rows; columns:")
-                listing += toolbox.describe_table(entry["document"])
-            else:
-                listing.append(f"- {entry['document']}: {entry['units']} lines")
-        parts.append("Documents:\n" + "\n".join(listing))
+        add(_listing(inventory, toolbox, max(left // 2, 200)))
     for entry in inventory:
         # A runbook or policy decides the answer; reading it must not cost a turn.
         # The same holds for a table of a few rows: filtering it would cost more.
-        short = 0 < entry.get("units", 0) <= config.agent.preload_documents_under
-        if short:
-            read = toolbox.documents.execute("read", {"document": entry["document"], "limit": 100})
-            parts.append(f"{entry['document']} in full:\n" + toolbox.render(read).text(allowance))
-            in_full.add(entry["document"])
-    if config.agent.preload_results and task.documents:
+        if not 0 < entry.get("units", 0) <= config.agent.preload_documents_under:
+            continue
+        name = entry["document"]
+        size = sum(min(len(unit.text), 2000) + 40 for unit in toolbox.documents.units(name))
+        if size > left:
+            continue  # Still readable with the read tool.
+        read = toolbox.documents.execute("read", {"document": name, "limit": 100})
+        add(f"{name} in full:\n" + toolbox.render(read).text(allowance))
+        in_full.add(name)
+    if config.agent.preload_results and task.documents and left > 400:
         found = toolbox.documents.execute(
             "search", {"query": task.question[:500], "limit": config.agent.preload_results}
         )
@@ -287,13 +438,11 @@ def _briefing(
         if jev is not None and config.jev.select and len(rows) > 1:
             rows = _jev_select(jev, task, rows, config)
         if rows:
-            parts.append(
+            add(
                 "Evidence found for the task text (untrusted data):\n"
-                + toolbox.render({"results": rows}).text(allowance)
+                + toolbox.render({"results": rows}).text(min(allowance, left))
             )
-    for recipe in _skills(task, config):
-        parts.append("How to do this kind of task:\n" + recipe)
-    return "\n".join(parts)
+    return "\n".join(head + parts + recipes)
 
 
 def _retyped(values: list[str], toolbox: Toolbox) -> Result | None:
@@ -467,9 +616,14 @@ def _investigate(
     tracker: Any,
     run_id: str,
 ) -> Answer:
+    system = system_prompt(config, toolbox)
+    # The first message leaves room for two tool results, or takes half of
+    # what the system prompt leaves when the context is small.
+    free = config.limits.max_context_chars - len(system)
+    room = max(free - 2 * config.limits.max_observation_chars, free // 2)
     base = [
-        {"role": "system", "content": system_prompt(config, toolbox)},
-        {"role": "user", "content": _briefing(task, toolbox, config, jev, tracker, run_id)},
+        {"role": "system", "content": system},
+        {"role": "user", "content": _briefing(task, toolbox, config, jev, tracker, run_id, room)},
     ]
     history: list[tuple[dict[str, str], dict[str, str]]] = []
     repairs = 0
@@ -537,7 +691,7 @@ def _investigate(
                     toolbox.guard.commit(fallback.actions)
                     note = "Partly unverified: " + ", ".join(sorted(set(problems)))
                     return fallback.model_copy(update={"reason": note, "confidence": 0.0})
-                return _abstain("Model output failed bounded validation and repair.")
+                return _stopped("output_failed_validation")
             doubts = [name[16:] for name in problems if name.startswith("reviewer_doubts_")]
             if doubts:
                 feedback = (
@@ -593,7 +747,25 @@ def _investigate(
                 {"role": "user", "content": shown},
             )
         )
-    return _abstain("Maximum planning steps reached.")
+    return _stopped("step_limit_reached")
+
+
+_UNLOADABLE: set[str] = set()
+
+
+def _playbooks(reference: str) -> playbook_registry.Playbooks | None:
+    """The configured solvers, or None when they cannot be loaded.
+
+    A registry that is missing from the image must not cost every task: the
+    model answers alone, and `hacklab doctor --strict` names the fault.
+    """
+    try:
+        return playbook_registry.load(reference)
+    except Exception:
+        if reference not in _UNLOADABLE:
+            _UNLOADABLE.add(reference)
+            print(f"hacklab: playbooks {reference!r} cannot be loaded", file=sys.stderr)
+        return None
 
 
 def run_task(
@@ -603,12 +775,19 @@ def run_task(
     tracker: Any,
     tools: Iterable[ToolSpec] = (),
     cache_salt: str = "",
+    *,
+    deadline: float | None = None,
+    model: Callable[[list[dict[str, str]]], Any] | None = None,
 ) -> tuple[str, Answer]:
     """Run exactly one task; no answer labels or cross-task memory are loaded.
 
     `tools` are extra tools for this task, typically the organizers' own.
-    Whatever happens, an Answer comes back: a crash would score nothing.
+    `model` is a function of their kit that takes chat messages and returns
+    the reply; without it the configured HTTP endpoint is called. `deadline`
+    is the end of the whole run on `time.monotonic()`: past it, only playbooks
+    answer. Whatever happens, an Answer comes back: a crash would score nothing.
     """
+    tracker = _Receipts(tracker)
     run_id = tracker.start_run(
         task.id,
         config.model_dump(),
@@ -620,9 +799,9 @@ def run_task(
     )
     small: Any = None
     jev: Any = None
-    answer = _abstain("No answer was produced.")
-    budget = Budget(config.limits)
+    answer = _stopped("no_answer_produced")
     try:
+        budget = Budget(config.limits, deadline=deadline)
         documents = ToolRegistry(
             root,
             allowed_documents=task.documents,
@@ -632,49 +811,58 @@ def run_task(
         toolbox = Toolbox(documents, ledger, config, tools)
         solved = None
         if config.agent.playbooks:
-            workspace = playbook_registry.Workspace(documents, ledger, toolbox)
-            solved = playbook_registry.load(config.agent.playbooks).solve(task, workspace)
+            registry = _playbooks(config.agent.playbooks)
+            if registry is None:
+                tracker.event(run_id, "playbook", {"status": "unavailable"})
+            else:
+                workspace = playbook_registry.Workspace(documents, ledger, toolbox)
+                solved = registry.solve(task, workspace)
         if solved is not None:
             tracker.event(run_id, "playbook", {"status": "ok"})
             answer = solved
-        elif config.model.provider == "mock":
-            if config.jev.enabled:
-                raise ProviderError("mock_mode_cannot_call_live_jev")
-            answer = _mock(task, documents, tracker, run_id)
-            if documents.verify_citations(answer.citations):
-                answer = _abstain("Offline evidence validation failed.")
         else:
-            providers = config
-            if config.jev.enabled and not jev_usable(config.jev):
-                # No key in this environment, or Jev failed several times in a
-                # row: the run continues on the small model alone.
-                tracker.event(run_id, "provider", {"status": "jev_unavailable"})
-                providers = config.model_copy(
-                    update={"jev": config.jev.model_copy(update={"enabled": False})}
+            # Past the end of the run only code answers; a model call would be late.
+            budget.check_time()
+            if config.model.provider == "mock" and model is None:
+                if config.jev.enabled:
+                    raise ProviderError("mock_mode_cannot_call_live_jev")
+                answer = _mock(task, documents, tracker, run_id)
+                if documents.verify_citations(answer.citations):
+                    answer = _abstain("Offline evidence validation failed.")
+            else:
+                providers = config
+                if config.jev.enabled and not jev_usable(config.jev):
+                    # No key in this environment, or Jev failed several times in a
+                    # row: the run continues on the small model alone.
+                    tracker.event(run_id, "provider", {"status": "jev_unavailable"})
+                    providers = config.model_copy(
+                        update={"jev": config.jev.model_copy(update={"enabled": False})}
+                    )
+                kit = {} if model is None else {"model": model}
+                small, jev = make_providers(providers, budget, tracker, run_id, cache_salt, **kit)
+                investigate = _investigate
+                if config.agent.workflow == "pipeline":
+                    from hacklab.pipeline import investigate
+                answer = investigate(
+                    task, toolbox, documents, config, budget, small, jev, tracker, run_id
                 )
-            small, jev = make_providers(providers, budget, tracker, run_id, cache_salt)
-            investigate = _investigate
-            if config.agent.workflow == "pipeline":
-                from hacklab.pipeline import investigate
-            answer = investigate(
-                task, toolbox, documents, config, budget, small, jev, tracker, run_id
-            )
     except BudgetExceeded as exc:
-        answer = _abstain(str(exc))
+        answer = _stopped(str(exc))
         tracker.event(run_id, "budget", {"status": "exhausted"})
     except ProviderError as exc:
-        answer = Answer(status="error", answer="", confidence=0, reason=str(exc))
+        answer = _stopped(str(exc), "error")
         tracker.event(run_id, "provider", {"status": "error"})
     except Exception:
         # Deliberately broad: one malformed task or document must never end a
         # whole evaluation run. The cause stays out of the answer and the log.
-        answer = Answer(
-            status="error", answer="", confidence=0, reason="Local task or document setup failed."
-        )
+        answer = _stopped("local_setup_failed", "error")
         tracker.event(run_id, "local", {"status": "error"})
     finally:
         for provider in [small, jev]:
             if provider is not None:
-                provider.close()
+                try:
+                    provider.close()
+                except Exception:
+                    pass
         tracker.finish_run(run_id, answer.status, answer=answer.model_dump())
     return run_id, answer

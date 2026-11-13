@@ -12,6 +12,7 @@ import importlib
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from hacklab.evidence import Ledger
 from hacklab.models import Action, Answer, Task
@@ -30,6 +31,42 @@ class Workspace:
     def cite(self, document: str, unit: Unit) -> str:
         """Register a row as evidence and return its ID."""
         return self.ledger.add(document, unit.locator, unit.text).id
+
+    def rows(self, document: str, where: dict[str, Any] | None = None) -> list[Unit]:
+        """Rows of a table that satisfy `where`, in time order; the filters of the table tool."""
+        return self.documents.rows(document, where)
+
+    def after(
+        self,
+        document: str,
+        key: str,
+        first: dict[str, Any],
+        where: dict[str, Any] | None = None,
+        time: str | None = None,
+    ) -> list[Unit]:
+        """Rows matching `where` of each `key` value from its first `first` row on.
+
+        `after(log, "actor", {"action": "exec_payload"}, {"action": "create_token"})`
+        is what every compromised actor minted after its compromise.
+        """
+        return self.documents.after(document, key, first, where, time)[0]
+
+    def call(self, tool: str, **arguments: Any) -> Any:
+        """Run one of the organizers' tools and return what it returned.
+
+        A tool registered as mutating passes the action guard first. A refused
+        call raises, which ends the solver and hands the task to the model.
+        """
+        spec = self.toolbox.extra[tool]
+        accepted: list[Action] = []
+        if spec.mutating:
+            accepted, refusal = self.toolbox.authorize(spec, arguments)
+            if refusal:
+                raise PermissionError(refusal)
+        result = spec.handler(**arguments)
+        self.toolbox.guard.commit(accepted)
+        self.toolbox.used = True
+        return result
 
     def answer(
         self,
@@ -64,6 +101,9 @@ class Playbooks:
             return solver
 
         return decorator
+
+    def __len__(self) -> int:
+        return len(self._solvers)
 
     def solve(self, task: Task, workspace: Workspace) -> Answer | None:
         for pattern, solver in self._solvers:

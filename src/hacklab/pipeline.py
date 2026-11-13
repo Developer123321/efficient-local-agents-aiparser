@@ -13,12 +13,12 @@ from typing import Any, Literal
 from pydantic import Field, ValidationError, model_validator
 
 from hacklab.agent import (
-    _abstain,
     _briefing,
     _finalize,
     _jev_verify,
     _json,
     _messages,
+    _stopped,
     _Trace,
 )
 from hacklab.config import Config
@@ -157,7 +157,7 @@ def investigate(
         round_number = round_index + 1
         budget.check_time()
         if round_index and query_count >= config.limits.max_steps:
-            return _abstain("Pipeline query budget exhausted.")
+            return _stopped("pipeline_query_budget_exhausted")
         event("analyst", "planning", round_number)
         try:
             with provider_stage("analyst"):
@@ -209,7 +209,7 @@ def investigate(
         new = (len(toolbox.ledger), len(toolbox.results), len(toolbox.numbers)) != known
         if round_index and not new:
             event("analyst", "no_new_evidence", round_number)
-            return _abstain("Pipeline revision found no new evidence.")
+            return _stopped("pipeline_no_new_evidence")
         event("responder", "planning", round_number)
         try:
             with provider_stage("responder"):
@@ -250,4 +250,4 @@ def investigate(
         toolbox.guard.commit(candidate.actions)
         event("responder", "accepted", round_number)
         return candidate
-    return _abstain("Pipeline rounds exhausted without a verified answer.")
+    return _stopped("pipeline_rounds_exhausted")

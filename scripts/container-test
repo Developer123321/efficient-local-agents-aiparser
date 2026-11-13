@@ -5,13 +5,23 @@
 # for the build only, access to the image registries and PyPI.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+# Git Bash on Windows rewrites arguments that look like Unix paths; the paths
+# below are paths inside the container.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 engine=${CONTAINER_ENGINE:-}
 if [[ -z "$engine" ]]; then
   engine=$(command -v docker || command -v podman || true)
 fi
 [[ -n "$engine" ]] || { echo 'Install Docker or Podman, or set CONTAINER_ENGINE.' >&2; exit 1; }
+"$engine" info >/dev/null 2>&1 || {
+  echo "$engine is installed but does not answer: start Docker Desktop or the daemon," >&2
+  echo 'or on Linux add yourself to the docker group and log in again.' >&2
+  exit 1
+}
 image=${HACKLAB_IMAGE:-hacklab-agent:test}
+# Set HACKLAB_PLATFORM=linux/amd64 to build on an ARM laptop for an x86_64 evaluation.
+platform=${HACKLAB_PLATFORM:-}
 model=hacklab-model-$$
 volume=hacklab-work-$$
 cleanup() {
@@ -20,9 +30,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$engine" build -t "$image" .
+"$engine" build ${platform:+--platform "$platform"} -t "$image" .
 "$engine" volume create "$volume" >/dev/null
-offline=(--rm --network none -v "$volume:/work")
+offline=(${platform:+--platform "$platform"} --rm --network none -v "$volume:/work")
 # Runs a shell script inside the image; the remaining arguments go to `run`.
 inside() {
   local script=$1
@@ -37,32 +47,38 @@ inside() {
   tee /dev/stderr | grep -q '"accuracy": 1.0'
 echo 'offline playbooks: 9 of 9 rehearsal tasks, no model call'
 
-# 2. The model path: a stand-in endpoint on the shared loopback interface.
-"$engine" run -d --name "$model" --network none "$image" mock-server --port 8080 >/dev/null
-shared=(--rm --network "container:$model" -v "$volume:/work")
-"$engine" run "${shared[@]}" \
-  -e SMALL_MODEL_BASE_URL=http://127.0.0.1:8080/v1 -e SMALL_MODEL_NAME=mock-small \
-  -e SMALL_MODEL_API_KEY=synthetic "$image" submit --config configs/baseline.toml \
-  --input /work/scenario/tasks.jsonl --output /work/answers.jsonl --root /work/scenario/docs \
-  --workers 3 >/dev/null
+# 2. The model path: a stand-in endpoint on the shared loopback interface. The
+# candidate profile must find its solvers and recipes inside the image.
+"$engine" run "${offline[@]}" "$image" doctor --strict --config configs/live.toml >/dev/null
+"$engine" run -d ${platform:+--platform "$platform"} --name "$model" --network none \
+  "$image" mock-server --port 8080 >/dev/null
+shared=(${platform:+--platform "$platform"} --rm --network "container:$model" -v "$volume:/work")
+endpoints=(-e SMALL_MODEL_BASE_URL=http://127.0.0.1:8080/v1 -e SMALL_MODEL_NAME=mock-small
+  -e SMALL_MODEL_API_KEY=synthetic)
+# Nine lines, every one an abstention: the stand-in model never answers.
 # shellcheck disable=SC2016  # expanded by the shell inside the container
-inside 'test "$(wc -l < /work/answers.jsonl)" -eq 9 &&
-  ! grep -v "\"status\": \"abstain\"" /work/answers.jsonl' "${offline[@]}"
-echo 'model path: 9 answers written through the stand-in endpoint'
+nine_abstentions='test "$(wc -l < "$1")" -eq 9 && ! grep -v "\"status\": \"abstain\"" "$1"'
+answered() {
+  "$engine" run "${offline[@]}" --entrypoint sh "$image" -c "$nine_abstentions" check "$1"
+}
+for profile in baseline live; do
+  "$engine" run "${shared[@]}" "${endpoints[@]}" "$image" submit --config "configs/$profile.toml" \
+    --input /work/scenario/tasks.jsonl --output "/work/answers-$profile.jsonl" \
+    --root /work/scenario/docs --workers 3 >/dev/null
+  answered "/work/answers-$profile.jsonl"
+done
+echo 'model path: 9 answers each for the baseline and the candidate profile'
 
 # 3. Jev. If the organizers route it into the container, both models answer
 # over a local address; if they do not, the agent still answers every task.
-endpoints=(-e SMALL_MODEL_BASE_URL=http://127.0.0.1:8080/v1 -e SMALL_MODEL_NAME=mock-small
-  -e SMALL_MODEL_API_KEY=synthetic)
-"$engine" run "${shared[@]}" "${endpoints[@]}" \
+report=$("$engine" run "${shared[@]}" "${endpoints[@]}" \
   -e TYPESAFE_BASE_URL=http://127.0.0.1:8080/v1/systemone -e TYPESAFE_API_KEY=synthetic \
-  "$image" probe --config configs/live.toml >/dev/null
-"$engine" run "${shared[@]}" "${endpoints[@]}" "$image" submit --config configs/live.toml \
+  "$image" probe --config configs/jev-select.toml)
+grep -q '"provider": "jev"' <<<"$report"
+"$engine" run "${shared[@]}" "${endpoints[@]}" "$image" submit --config configs/jev-select.toml \
   --input /work/scenario/tasks.jsonl --output /work/answers-without-jev.jsonl \
   --root /work/scenario/docs >/dev/null
-# shellcheck disable=SC2016
-inside 'test "$(wc -l < /work/answers-without-jev.jsonl)" -eq 9 &&
-  ! grep "\"status\": \"error\"" /work/answers-without-jev.jsonl' "${offline[@]}"
+answered /work/answers-without-jev.jsonl
 echo 'jev: reachable through a local route; without one, 9 answers and no error'
 
 # 4. The agent's network namespace must not reach the internet.

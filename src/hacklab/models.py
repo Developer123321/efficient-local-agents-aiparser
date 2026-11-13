@@ -18,7 +18,7 @@ class ModelReply(BaseModel):
 class Task(StrictModel):
     id: str = Field(min_length=1, max_length=200)
     question: str = Field(min_length=1, max_length=12000)
-    documents: list[str] = Field(default_factory=list, max_length=200)
+    documents: list[str] = Field(default_factory=list, max_length=2000)
     constraints: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -43,6 +43,9 @@ class Answer(StrictModel):
     actions: list[Action] = Field(default_factory=list, max_length=2000)
     confidence: float = Field(default=0.0, ge=0, le=1)
     reason: str = Field(default="", max_length=2000)
+    # Set when the harness, not the model, ended the task: a fixed code such as
+    # token_budget_exhausted_before_request, provider_http_429 or step_limit_reached.
+    cause: str = Field(default="", max_length=100)
 
 
 class ActionReply(ModelReply):

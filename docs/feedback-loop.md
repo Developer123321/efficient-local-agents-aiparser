@@ -17,7 +17,7 @@ with Bun. Benchmarks repeat twice by default (`--repeat 1..10`).
 
 ```sh
 uv run --locked hacklab practice --seed 41 --out data/feedback/dev
-uv run --locked hacklab practice --seed 104729 --out data/feedback/holdout
+uv run --locked hacklab practice --seed 104729 --out data/feedback/holdout > /dev/null
 uv run --locked python -m hacklab.optimize \
   --config configs/openrouter.toml \
   --dataset data/feedback/dev/cases.jsonl --root data/feedback/dev/docs \
@@ -29,6 +29,11 @@ it afterwards. Uncommitted work in another agent's checkout is not a candidate.
 Credentials use the existing environment or `.env` channel; they are never copied
 into the worktree, database or dashboard. The state and tracking database stay in
 the original checkout's ignored `.state/` directory.
+
+Another invocation with the same source, development data and fixed settings
+reuses the champion configuration, measures a fresh baseline, and gives the
+Analyst previous trial outcomes. Previously tested candidates are not measured
+again just because the campaign restarted.
 
 The dollar limit is a development spending cutoff based on reported usage and
 configured prices. It is not a provider invoice guarantee: one in-flight request
@@ -75,7 +80,7 @@ uv run --locked python -m hacklab.optimize \
 
 Hold-out results never enter the proposal loop. An attempted final evaluation
 freezes its experiment even if it fails, and its dataset digest cannot be reused
-as a fresh hold-out under another source revision. Use a genuinely new validation
+as a fresh hold-out or as development data under another source revision. Use a genuinely new validation
 set when developing another experiment.
 The champion is a development configuration, not an automatically deployed or
 submitted agent. Review its measurements and adapt the actual starter-kit schema
@@ -85,6 +90,7 @@ before choosing the submission.
 
 Requires Bun 1.4.4. The repository's Nix workbench supplies Bun; the dashboard
 locks React and TypeScript 7.0.2 in `dashboard/bun.lock`.
+The TypeScript command runs through Bun; Node.js and npm are not required.
 
 ```sh
 cd dashboard

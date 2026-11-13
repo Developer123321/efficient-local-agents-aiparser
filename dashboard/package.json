@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "bun --hot server.ts",
     "start": "NODE_ENV=production bun server.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun ./node_modules/typescript/bin/tsc --noEmit",
     "build": "bun build ./index.html --outdir ./dist --target browser --production",
     "test": "bun test",
     "check": "bun run typecheck && bun test && bun run build"

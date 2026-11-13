@@ -1,10 +1,16 @@
-# The candidate profile. Set URL, model and key in .env after the organizers
-# announce the model. base_url is the API prefix BEFORE /chat/completions, for
-# example https://host/v1. This adapter assumes an OpenAI-compatible API.
+# The candidate profile: what the submission image runs. Set URL, model and key
+# in .env after the organizers announce the model. base_url is the API prefix
+# BEFORE /chat/completions, for example https://host/v1; a complete URL with a
+# query string is used as it is. This adapter assumes an OpenAI-compatible API.
+#
+# [agent] and [limits] are the values measured on the stand-in model
+# (configs/openrouter.toml); tests/test_config.py keeps the two files equal
+# there. Change a value here only together with a benchmark number.
 [model]
 provider = "openai"
 response_format = "json_object"
 # If the endpoint rejects a request, these are the usual reasons:
+# response_format = "none"   # the endpoint knows no JSON mode
 # max_tokens_parameter = "max_completion_tokens"
 # temperature = "omit"
 # auth_header = "api-key"   # with auth_scheme = "" for gateways without Bearer
@@ -16,7 +22,10 @@ response_format = "json_object"
 # output_usd_per_million = 0.0
 
 [jev]
-enabled = true
+# Off until a benchmark on the day's cases shows a gain after its cost: as a
+# judge on the stand-in model, Jev lowered accuracy and raised cost
+# (docs/benchmarks.md). configs/jev-select.toml is this file with Jev on.
+enabled = false
 model = "jev-1.14.0"
 base_url = "https://api.typesafe.ai/v1/systemone"
 # Public list price is NOT necessarily the event's scoring tariff.
@@ -34,10 +43,12 @@ preload_documents_under = 40
 # Every tool costs prompt tokens on every call. Remove what the scenario does
 # not need; add "phases" if tasks ask about attack stages.
 tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
+# Code-only solvers, tried first, and recipes for the model. Both live inside
+# the package, so they are in the image without another COPY line.
+playbooks = "hacklab.event.playbooks:playbooks"
+skills = "hacklab.event:skills"
 # thought_chars = 300        # Schema-guided reasoning; costs output tokens.
 # on_unverified = "answer"   # If a wrong answer costs no more than an abstention.
-# playbooks = "mypackage.playbooks:playbooks"   # Code-only solvers, tried first.
-# skills = "skills"   # Directory of recipes added to the prompt for matching tasks.
 # decimal_separator = "comma"  # Fix once the data's convention is known; default "auto".
 
 [guard]
@@ -45,20 +56,29 @@ injection = "flag"            # "withhold" hides instruction-like text entirely
 compact_secrets = true
 decode_previews = true
 require_grounded_targets = true
-max_actions = 20
+# A brake against runaway containment. A swarm incident needs one action per
+# compromised agent, token and dataset: 20 was too few for the rehearsal.
+max_actions = 200
 # allowed_actions = ["quarantine_agent", "revoke_token"]   # From the organizers' action list.
 # protected_targets = ["night-shift", "hub-scanner"]
 
 [limits]
-max_steps = 6
-max_calls = 10
+max_steps = 8
+max_calls = 16
 max_retries = 1
-timeout_seconds = 25
-task_timeout_seconds = 180
+# Attempts after a rate limit, a server error or a lost connection; they wait
+# 0.5, 1 and 2 seconds. Each attempt counts against max_calls.
+http_retries = 3
+timeout_seconds = 60
+task_timeout_seconds = 300
 max_context_chars = 24000
 max_observation_chars = 4000  # One tool result; resent with every later step.
-max_output_tokens = 1400
-max_total_tokens = 16000
+max_output_tokens = 3000
+# Checked before each request against the request's size in BYTES plus the
+# output allowance, which is about four times its tokens. 16000 turned every
+# task of more than three steps into an abstention; the rehearsal's longest
+# task needed 30000.
+max_total_tokens = 120000
 # max_cost_usd = 0.02  # Requires all enabled prices to be explicitly configured.
 
 # The team's development allowance across all runs in this tracking database.

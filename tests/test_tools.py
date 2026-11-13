@@ -4,8 +4,9 @@ import zipfile
 
 import pytest
 
+from hacklab import tools
 from hacklab.models import Citation
-from hacklab.tools import ToolRegistry
+from hacklab.tools import ToolRegistry, list_documents
 
 
 @pytest.fixture
@@ -92,12 +93,24 @@ def test_task_scope_and_path_boundary(tmp_path):
     assert ToolRegistry(inside, []).execute("search", {"query": "evidence"})["results"] == []
 
 
-def test_malformed_csv_and_json_return_errors(tmp_path):
-    (tmp_path / "broken.csv").write_text("a,b\n1,2,3\n")
+def test_a_ragged_table_stays_readable_and_broken_json_is_an_error(tmp_path):
+    # One row with a stray comma used to make the whole export unreadable.
+    (tmp_path / "ragged.csv").write_text("actor,action,note\na1,login\na2,read,first,second\n")
+    (tmp_path / "headers.csv").write_text(",name,name, \n0,x,y,z\n")
     (tmp_path / "broken.json").write_text('{"no":')
     registry = ToolRegistry(tmp_path)
-    for document in ("broken.csv", "broken.json"):
-        assert "error" in registry.execute("read", {"document": document})
+    rows = registry.execute("table", {"document": "ragged.csv"})["rows"]
+    assert [row["values"] for row in rows] == [
+        {"actor": "a1", "action": "login", "note": ""},
+        {"actor": "a2", "action": "read", "note": "first,second"},
+    ]
+    # An unnamed index column and a repeated header get usable names.
+    assert registry.columns("headers.csv") == ["column_1", "name", "name_2", "column_4"]
+    found = registry.execute("table", {"document": "headers.csv", "where": {"name_2": "y"}})
+    assert found["matched_rows"] == 1
+    assert "error" in registry.execute("read", {"document": "broken.json"})
+    (tmp_path / "empty.csv").write_text("")
+    assert "error" in registry.execute("read", {"document": "empty.csv"})
 
 
 def test_bad_args_and_unknown_tools_are_structured(registry):
@@ -158,6 +171,15 @@ def test_docx_and_xlsx_ingestion_and_formula_rejection(tmp_path):
     )
     assert result["value"] == "1.25"
     assert result["citations"][0]["locator"] == "sheet:Costs:row:2"
+    # An empty second sheet and a short row do not make the workbook unreadable.
+    workbook.create_sheet("Empty")
+    notes = workbook.create_sheet("Notes")
+    notes.append(["item", "owner", "comment"])
+    notes.append(["A", "ops"])
+    workbook.save(tmp_path / "sheets.xlsx")
+    rows = registry.execute("table", {"document": "sheets.xlsx", "where": {"owner": "ops"}})
+    assert rows["rows"][0]["locator"] == "sheet:Notes:row:2"
+    assert rows["rows"][0]["values"]["comment"] is None
     sheet.append(["B", "=1+2"])
     workbook.save(tmp_path / "formula.xlsx")
     assert "formulas" in registry.execute("read", {"document": "formula.xlsx"})["error"]
@@ -376,3 +398,173 @@ def test_search_index_is_reused_until_a_document_changes(tmp_path):
     (tmp_path / "a.txt").write_text("the staged payload ran\npayload again\n")
     assert registry.execute("search", {"query": "payload"})["matched_units"] == 2
     assert registry._index is not index
+
+
+def test_logs_are_tables_whatever_they_are_called(tmp_path):
+    events = [
+        {"time": "2026-11-14T02:00:00Z", "agent": "a1", "event": "login"},
+        {"time": "2026-11-14T02:01:00Z", "agent": "a2", "event": "exec_payload"},
+    ]
+    lines = "".join(json.dumps(event) + "\n" for event in events)
+    # JSON lines under a log suffix, and without any suffix at all.
+    (tmp_path / "audit.log").write_text(lines)
+    (tmp_path / "audit").write_text(lines)
+    (tmp_path / "hub.events").write_text(lines)
+    (tmp_path / "gateway.log").write_text(
+        '2026-11-14T02:00:00Z INFO agent=a1 event=login msg="signed in" src=10.0.0.1\n'
+        '2026-11-14T02:01:00Z WARN agent=a2 event=exec_payload msg="ran \\"x\\"" src=10.0.0.2\n'
+    )
+    (tmp_path / "plain.log").write_text("level=info agent=a1 event=login\nlevel=warn agent=a2\n")
+    (tmp_path / "syslog.log").write_text(
+        "Nov 14 02:00:00 hub sshd[1]: accepted key for a1\nNov 14 02:01:00 hub sshd[1]: closed\n"
+    )
+    (tmp_path / "blob.dat").write_bytes(b"MZ\x00\x01\x02\x03 not text")
+    registry = ToolRegistry(tmp_path)
+    for document in ("audit.log", "audit", "hub.events"):
+        assert registry.columns(document) == ["time", "agent", "event"], document
+        hit = registry.execute("table", {"document": document, "where": {"event": "exec_payload"}})
+        assert hit["matched_rows"] == 1 and hit["rows"][0]["locator"] == "line:2"
+    assert registry.columns("gateway.log") == ["ts", "level", "agent", "event", "msg", "src"]
+    row = registry.execute("table", {"document": "gateway.log", "where": {"level": "WARN"}})
+    assert row["rows"][0]["values"]["msg"] == 'ran "x"' and row["rows"][0]["locator"] == "line:2"
+    assert registry.columns("plain.log") == ["level", "agent", "event"]
+    # Prose stays prose: lines to read and search, not a table.
+    assert registry.columns("syslog.log") == []
+    assert (
+        registry.execute("search", {"query": "accepted key"})["results"][0]["locator"] == "line:1"
+    )
+    # The quote of a table row is the line as it stands in the file.
+    read = registry.execute("read", {"document": "gateway.log", "limit": 1})["results"][0]
+    assert read["quote"].startswith("2026-11-14T02:00:00Z INFO agent=a1")
+    assert registry.verify_citations([Citation.model_validate(read)]) == []
+    assert "Unsupported" in registry.execute("read", {"document": "blob.dat"})["error"]
+
+
+def test_a_json_export_with_several_record_lists_exposes_all_of_them(tmp_path):
+    (tmp_path / "state.json").write_text(
+        json.dumps(
+            {
+                "generated": "2026-11-14T03:00:00Z",
+                "agents": [{"id": "a1", "role": "worker"}, {"id": "a2", "role": "worker"}],
+                "tokens": [
+                    {"id": "tok-1", "owner": "a1"},
+                    {"id": "tok-2", "owner": "a2"},
+                    {"id": "tok-3", "owner": "a2"},
+                ],
+            }
+        )
+    )
+    (tmp_path / "registry.json").write_text(
+        json.dumps(
+            {
+                "agent-1": {"status": "active", "team": "ops"},
+                "agent-2": {"status": "quarantined", "team": "ops"},
+            }
+        )
+    )
+    registry = ToolRegistry(tmp_path)
+    # Only the longest list used to be visible; the agents were not.
+    assert registry.columns("state.json") == ["_table", "id", "role", "owner"]
+    agents = registry.execute("table", {"document": "state.json", "where": {"_table": "agents"}})
+    assert agents["matched_rows"] == 2 and agents["rows"][1]["locator"] == "agents:2"
+    owned = registry.execute(
+        "table", {"document": "state.json", "where": {"_table": "tokens", "owner": "a2"}}
+    )
+    assert [row["values"]["id"] for row in owned["rows"]] == ["tok-2", "tok-3"]
+    # Records stored under their ID keep it as a column.
+    assert registry.columns("registry.json") == ["_key", "status", "team"]
+    found = registry.execute(
+        "table", {"document": "registry.json", "where": {"status": "quarantined"}}
+    )
+    assert found["rows"][0]["values"]["_key"] == "agent-2"
+    citation = Citation.model_validate(
+        {key: found["rows"][0][key] for key in ("document", "locator", "quote")}
+    )
+    assert registry.verify_citations([citation]) == []
+
+
+def test_the_time_column_is_found_by_name_or_by_its_values(tmp_path):
+    rows = [
+        ("2026-11-14T02:05:00Z", "a1", "create_token", "tok-late"),
+        ("2026-11-14T02:01:00Z", "a1", "create_token", "tok-early"),
+        ("2026-11-14T02:03:00Z", "a1", "exec_payload", "ops"),
+        ("2026-11-14T02:04:00Z", "a2", "create_token", "tok-clean"),
+    ]
+    for name, column in (("named.csv", "event_time"), ("values.csv", "moment")):
+        (tmp_path / name).write_text(
+            f"seq,{column},actor,action,target\n"
+            + "".join(f"{i},{','.join(row)}\n" for i, row in enumerate(rows, 1))
+        )
+    (tmp_path / "untimed.csv").write_text("actor,count\na1,3\na2,20261114\n")
+    registry = ToolRegistry(tmp_path)
+    assert registry.time_column("named.csv") == "event_time"
+    # No usual name: the column whose every value is a timestamp. A column of
+    # bare numbers is not mistaken for one.
+    assert registry.time_column("values.csv") == "moment"
+    assert registry.time_column("untimed.csv") is None
+    for document in ("named.csv", "values.csv"):
+        minted, compromised = registry.after(
+            document, "actor", {"action": "exec_payload"}, {"action": "create_token"}
+        )
+        # Only what the compromised actor did from its compromise on, in time order.
+        assert [unit.values["target"] for unit in minted] == ["tok-late"] and compromised == 1
+    with pytest.raises(tools.ToolError, match="no time column"):
+        registry.after("untimed.csv", "actor", {"count": "3"})
+    with pytest.raises(tools.ToolError, match="key must be a column"):
+        registry.after("named.csv", "agent", {"action": "exec_payload"})
+
+
+def test_a_document_is_parsed_once_for_all_tasks_until_it_changes(tmp_path, monkeypatch):
+    path = tmp_path / "audit.jsonl"
+    path.write_text('{"actor":"a1","action":"login"}\n')
+    parsed = []
+    original = ToolRegistry._parse
+
+    def counting(self, name, *args):
+        parsed.append(name)
+        return original(self, name, *args)
+
+    monkeypatch.setattr(ToolRegistry, "_parse", counting)
+    monkeypatch.setattr(tools, "_SHARED", type(tools._SHARED)())
+    first = ToolRegistry(tmp_path, ["audit.jsonl"])
+    assert len(first.units("audit.jsonl")) == 1 and len(first.units("audit.jsonl")) == 1
+    # The next task's registry reuses the parsed rows of the same bytes.
+    second = ToolRegistry(tmp_path, ["audit.jsonl"])
+    assert second.units("audit.jsonl") is first.units("audit.jsonl") and parsed == ["audit.jsonl"]
+    path.write_text('{"actor":"a1","action":"login"}\n{"actor":"a2","action":"login"}\n')
+    assert len(second.units("audit.jsonl")) == 2 and len(first.units("audit.jsonl")) == 2
+    assert parsed == ["audit.jsonl", "audit.jsonl"]
+    # The store is bounded: the oldest document goes first.
+    monkeypatch.setattr(tools, "MAX_SHARED_UNITS", 2)
+    (tmp_path / "other.jsonl").write_text('{"x":1}\n')
+    third = ToolRegistry(tmp_path)
+    third.units("other.jsonl")
+    assert [key[2] for key in tools._SHARED] == ["other.jsonl"]
+
+
+def test_documents_are_listed_without_hidden_files_and_binaries(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "logs" / "audit.jsonl").write_text("{}\n")
+    (tmp_path / "runbook.md").write_text("Quarantine.\n")
+    (tmp_path / "events").write_text("level=info agent=a1\n")
+    (tmp_path / ".env").write_text("SECRET=1\n")
+    (tmp_path / ".git" / "config.txt").write_text("hidden\n")
+    (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00")
+    assert list_documents(tmp_path) == ["events", "logs/audit.jsonl", "runbook.md"]
+    assert len(list_documents(tmp_path, limit=2)) == 2
+    assert list_documents(tmp_path / "missing") == []
+    # A registry without a document list sees the same documents.
+    assert [entry["document"] for entry in ToolRegistry(tmp_path).inventory()] == [
+        "events",
+        "logs/audit.jsonl",
+        "runbook.md",
+    ]
+
+
+def test_a_task_without_documents_needs_no_data_directory(tmp_path):
+    registry = ToolRegistry(tmp_path / "missing", [])
+    assert registry.execute("calculate", {"expression": "2 + 3"})["value"] == "5"
+    assert registry.inventory() == []
+    with pytest.raises(OSError):
+        ToolRegistry(tmp_path / "missing", ["a.txt"])

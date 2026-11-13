@@ -4,12 +4,16 @@ default:
 setup:
     uv sync --locked
 
+# First run on a laptop without Nix: what is missing, dependencies, offline rehearsal.
+laptop:
+    bash scripts/setup
+
 fmt:
-    ruff format src tests examples
-    ruff check --fix src tests examples
+    bash scripts/ruff format src tests examples
+    bash scripts/ruff check --fix src tests examples
 
 fmt-check:
-    ruff format --check src tests examples
+    bash scripts/ruff format --check src tests examples
 
 check:
     bash scripts/check
@@ -21,7 +25,7 @@ dashboard:
     cd dashboard && bun run start
 
 test:
-    uv run --locked pytest -q
+    uv run --locked python -m pytest -q
 
 doctor:
     uv run --locked hacklab doctor
@@ -60,6 +64,10 @@ budget config="configs/live.toml":
 # Build the submission image and run it without any network.
 container-test:
     bash scripts/container-test
+
+# The laptop setup inside stock Ubuntu and Debian containers.
+portability-test:
+    bash scripts/portability-test
 
 build:
     uv build

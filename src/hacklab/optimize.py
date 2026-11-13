@@ -76,7 +76,18 @@ def _now() -> str:
 
 
 def _digest(value: Any) -> str:
-    return hashlib.sha256(_json(value).encode()).hexdigest()
+    # Pydantic defaults may hold 60 while a validated round trip holds 60.0.
+    # These are the same effective configuration; booleans and strings are not.
+    def numbers(item: Any) -> Any:
+        if type(item) is float and math.isfinite(item) and item.is_integer():
+            return int(item)
+        if isinstance(item, dict):
+            return {key: numbers(entry) for key, entry in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [numbers(entry) for entry in item]
+        return item
+
+    return hashlib.sha256(_json(numbers(value)).encode()).hexdigest()
 
 
 class ConfigEdit(StrictModel):
@@ -534,6 +545,8 @@ def run_campaign(
         return max(0.0, tracker.spend()["usd"] - initial_spend["usd"])
 
     def stop_reason() -> str | None:
+        if getattr(tracker, "receipts_complete", True) is not True:
+            return "unknown_cost"
         current = tracker.spend()
         if current["unknown_cost_calls"] > initial_spend["unknown_cost_calls"]:
             return "unknown_cost"
@@ -550,7 +563,12 @@ def run_campaign(
         return None
 
     def measure(candidate: Config, remaining_seconds: float, run: Callable) -> dict:
-        measured = safe_report(run(candidate, remaining_seconds))
+        if getattr(tracker, "receipts_complete", True) is not True:
+            raise MeasurementUncertain("optimization_receipts_incomplete", timed_out=False)
+        raw_report = run(candidate, remaining_seconds)
+        if getattr(tracker, "receipts_complete", True) is not True:
+            raise MeasurementUncertain("optimization_receipts_incomplete", timed_out=False)
+        measured = safe_report(raw_report)
         if measured.get("dataset_sha256") != dev_digest and run is runner:
             raise ValueError("development_digest_changed")
         if run is holdout_runner and measured.get("dataset_sha256") == dev_digest:
@@ -683,6 +701,14 @@ def run_campaign(
                     )
                     raise
                 finally:
+                    if getattr(tracker, "receipts_complete", True) is not True:
+                        status, trial_status = "unknown_cost", "error"
+                        measured = {"cost_usd": None, "usage_complete": False}
+                        decision.update(
+                            accepted=False,
+                            reason="receipts_incomplete",
+                            unobserved_external_attempt_possible=True,
+                        )
                     store.finish_trial(trial, candidate, measured, trial_status, decision)
                     recent.append(
                         {
@@ -894,7 +920,17 @@ def _measure(args, config: Config, tracker: Tracker) -> None:
     config = _clamp_budget(config, tuning["budget_ceiling"])
     if _digest(config.model_dump()) != tuning["runtime_config_sha256"]:
         raise ValueError("runtime_configuration_mismatch")
+    if not tracker.receipts_complete:
+        raise RuntimeError("optimization_receipts_incomplete")
+    input_digest = dataset_digest(args.dataset, args.root, load_cases(args.dataset))
     report = benchmark(args.dataset, args.root, config, tracker, repeat=args.repeat)
+    if not tracker.receipts_complete:
+        raise RuntimeError("optimization_receipts_incomplete")
+    if (
+        report.get("dataset_sha256") != input_digest
+        or dataset_digest(args.dataset, args.root, load_cases(args.dataset)) != input_digest
+    ):
+        raise RuntimeError("measurement_inputs_changed")
     _private_json(args._out, report)
 
 

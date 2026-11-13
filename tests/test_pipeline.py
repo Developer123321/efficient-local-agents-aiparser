@@ -282,7 +282,7 @@ def test_no_new_evidence_stops_before_another_responder_call(live):
     )
     (lab.root / "note.txt").write_text("Budget approved: 42 EUR.\n")
     run_id, answer = lab.run(note_task())
-    assert answer.status == "abstain" and "no new evidence" in answer.reason.lower()
+    assert answer.status == "abstain" and answer.cause == "pipeline_no_new_evidence"
     assert [call["metadata"]["stage"] for call in lab.tracker.calls(run_id)] == [
         "analyst",
         "responder",
@@ -317,7 +317,7 @@ def test_tool_query_budget_is_shared_across_rounds(live):
     (lab.root / "note.txt").write_text("Budget approved: 42 EUR.\n")
     (lab.root / "other.txt").write_text("Another budget: 99 EUR.\n")
     _, answer = lab.run(note_task())
-    assert answer.status == "abstain" and "query budget" in answer.reason.lower()
+    assert answer.status == "abstain" and answer.cause == "pipeline_query_budget_exhausted"
     assert len(lab.requests) == 2
 
 
@@ -422,3 +422,34 @@ def test_default_workflow_remains_existing_single_role_loop(live):
     assert Config().agent.workflow == "loop"
     assert answer.status == "ok" and answer.answer == "42 EUR"
     assert lab.requests[1]["messages"][-2]["role"] == "assistant"
+
+
+def test_pipeline_uses_and_accounts_for_the_organizers_native_model_function(tmp_path):
+    (tmp_path / "note.txt").write_text("Budget approved: 42 EUR.\n")
+    decisions = iter([plan(query("read", document="note.txt")), final(evidence=["e1"])])
+    seen = []
+
+    def supplied_model(messages):
+        seen.append(messages)
+        return {
+            "choices": [{"message": {"content": json.dumps(next(decisions))}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+        }
+
+    config = Config.model_validate(
+        {
+            "model": {
+                "provider": "openai",
+                "model": "organizer-native",
+                "input_usd_per_million": 0.1,
+                "output_usd_per_million": 0.2,
+            },
+            "agent": {"workflow": "pipeline"},
+        }
+    )
+    tracker = Tracker(tmp_path / ".state" / "receipts.sqlite")
+    run_id, answer = agent.run_task(note_task(), tmp_path, config, tracker, model=supplied_model)
+    assert answer.status == "ok" and answer.answer == "42 EUR"
+    assert len(seen) == 2
+    assert [call["metadata"]["stage"] for call in tracker.calls(run_id)] == ["analyst", "responder"]
+    assert tracker.summary(run_id)["cost_usd"] == pytest.approx(0.00004)

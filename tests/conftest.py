@@ -12,6 +12,7 @@ ENVIRONMENT = (
     "TYPESAFE_BASE_URL",
     "HACKLAB_CACHE_MODE",
     "HACKLAB_DB",
+    "HACKLAB_DEBUG",
     "HACKLAB_TRACE_DIR",
 )
 
@@ -24,3 +25,5 @@ def isolated_from_the_developers_environment(monkeypatch):
     monkeypatch.setattr("hacklab.cli.load_dotenv", lambda *args, **kwargs: False)
     # Jev's outage counter lives for a process; every test starts without one.
     monkeypatch.setattr("hacklab.providers.JEV_OUTAGE", providers._Outage())
+    # Retries pause in production; a test that wants the pause sets it itself.
+    monkeypatch.setattr("hacklab.providers.RETRY_PAUSES", (0.0,))
