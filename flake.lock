@@ -92,11 +92,11 @@
         "project-check": "project-check"
       },
       "locked": {
-        "lastModified": 1794567263,
-        "narHash": "sha256-hSfr8637vHCZUbNclCcPbfaadedMS8e3bIwW49NbdbE=",
+        "lastModified": 1794591826,
+        "narHash": "sha256-RcLf8n1H2hnUtu067et5LfkA2ZkbeaG+eQcAC41A7DU=",
         "ref": "main",
-        "rev": "4f8e1001190887a81aea069e6642b27f592c6f9b",
-        "revCount": 7,
+        "rev": "31e7810a09f43d2065cfa5947cc8485ac488edcd",
+        "revCount": 8,
         "type": "git",
         "url": "https://github.com/timfewi/vm-cli.git"
       },
