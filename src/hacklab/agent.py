@@ -28,6 +28,7 @@ from hacklab.providers import (
     BudgetExceeded,
     ModelOutputError,
     ProviderError,
+    jev_usable,
     make_providers,
 )
 from hacklab.toolkit import RESULT_ID, Result, Toolbox, ToolSpec, logfmt, split_items
@@ -493,7 +494,15 @@ def _investigate(
                 candidate, problems = _finalize(decision.result, toolbox, documents)
                 if not problems and jev is not None:
                     # A rejection is feedback for one more attempt, not a verdict.
-                    judgments = _jev_verify(jev, candidate, task, config, toolbox.log)
+                    try:
+                        judgments = _jev_verify(jev, candidate, task, config, toolbox.log)
+                    except ProviderError as exc:
+                        if str(exc) == "cache_miss_in_replay_mode":
+                            raise  # Replay mode promises to fail on a miss.
+                        # Jev is a second opinion. Unreachable, or out of allowance:
+                        # the answer has passed every check of the code and stands.
+                        judgments, jev = {}, None
+                        tracker.event(run_id, "verification", {"status": "jev_unavailable"})
                     trace.add("jev", _json(judgments))
                     doubts = sorted(
                         name for name, value in judgments.items() if value < config.jev.threshold
@@ -635,7 +644,15 @@ def run_task(
             if documents.verify_citations(answer.citations):
                 answer = _abstain("Offline evidence validation failed.")
         else:
-            small, jev = make_providers(config, budget, tracker, run_id, cache_salt)
+            providers = config
+            if config.jev.enabled and not jev_usable(config.jev):
+                # No key in this environment, or Jev failed several times in a
+                # row: the run continues on the small model alone.
+                tracker.event(run_id, "provider", {"status": "jev_unavailable"})
+                providers = config.model_copy(
+                    update={"jev": config.jev.model_copy(update={"enabled": False})}
+                )
+            small, jev = make_providers(providers, budget, tracker, run_id, cache_salt)
             answer = _investigate(
                 task, toolbox, documents, config, budget, small, jev, tracker, run_id
             )

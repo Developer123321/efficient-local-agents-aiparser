@@ -29,6 +29,10 @@ def test_env_override_and_secret_file(tmp_path, monkeypatch):
     path.write_text('[model]\nprovider="openai"\n')
     monkeypatch.setenv("SMALL_MODEL_NAME", "event-model")
     assert load_config(path).model.model == "event-model"
+    # A gateway for Jev inside the container needs no new configuration file.
+    assert load_config(path).jev.base_url == "https://api.typesafe.ai/v1/systemone"
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "http://gateway:8080/v1/systemone")
+    assert load_config(path).jev.base_url == "http://gateway:8080/v1/systemone"
     secret = tmp_path / "key"
     secret.write_text("fake-test-key\n")
     monkeypatch.setenv("EXAMPLE_KEY_FILE", str(secret))

@@ -96,16 +96,12 @@ in
       type = lib.types.ints.between 1 32;
       default = 4;
     };
-    bob.enable = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = "Run the guest variant that contains the unfree IBM Bob Shell package.";
-    };
+    bob.enable = lib.mkEnableOption "the guest variant that contains the unfree IBM Bob Shell package";
     runner = lib.mkOption {
       type = lib.types.package;
       readOnly = true;
       default = self.packages.${system}.${if cfg.bob.enable then "vm-with-bob" else "vm"};
-      defaultText = lib.literalMD "this flake's `vm-with-bob` or `vm` package";
+      defaultText = lib.literalMD "this flake's `vm` package, or `vm-with-bob`";
       description = ''
         The guest runner this host starts. A host that overrides this flake's
         inputs gets a different guest than the one tested here; build this

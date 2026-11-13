@@ -158,6 +158,9 @@ def load_config(path: Path | None = None) -> Config:
     for env, key in [("SMALL_MODEL_BASE_URL", "base_url"), ("SMALL_MODEL_NAME", "model")]:
         if os.environ.get(env):
             model[key] = os.environ[env]
+    # The organizers may route Jev through their own gateway inside the container.
+    if os.environ.get("TYPESAFE_BASE_URL"):
+        data.setdefault("jev", {})["base_url"] = os.environ["TYPESAFE_BASE_URL"]
     if os.environ.get("HACKLAB_CACHE_MODE"):
         data.setdefault("cache", {})["mode"] = os.environ["HACKLAB_CACHE_MODE"]
     return Config.model_validate(data)

@@ -42,6 +42,8 @@ any host machine configuration.
   that can raise out of it or wait without a bound.
 - Jev is a native System One provider, never a chat model. Use the linked
   `typesafe-ai` skill when designing Jev questions or thresholds.
+- Jev is optional at run time. The evaluation container may have no route to
+  it, so no code path may fail a task because Jev is missing or unreachable.
 - Only the models the organizers provide may make run-time decisions. Do not
   add any other model, embedder, reranker or classifier to the agent.
 - Before changing a prompt or a tool because of a failure, read the trace of

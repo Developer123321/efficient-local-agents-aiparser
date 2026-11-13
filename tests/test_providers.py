@@ -14,6 +14,7 @@ from hacklab.providers import (
     ModelOutputError,
     ProviderError,
     SmallModelProvider,
+    jev_usable,
     make_providers,
 )
 from hacklab.tracking import Tracker
@@ -292,6 +293,72 @@ def test_native_jev_contract_batches_noul_questions(receipt):
     assert body["model"] == "jev-1.14.0"
     assert body["questions"] == questions
     assert receipt[0].summary(receipt[1])["total_tokens"] == 58
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://gateway:8080", "http://gateway:8080/v1/", "http://gateway:8080/v1/systemone"],
+)
+def test_a_jev_gateway_is_accepted_as_host_prefix_or_full_path(receipt, base_url):
+    limits = Limits()
+    jev = JevProvider(JevConfig(base_url=base_url), limits, Budget(limits), *receipt)
+    try:
+        assert jev.endpoint == "http://gateway:8080/v1/systemone"
+    finally:
+        jev.close()
+
+
+def test_repeated_jev_failures_open_an_outage_and_a_success_closes_it(receipt):
+    reachable = False
+
+    def handler(request):
+        if not reachable:
+            raise httpx.ConnectError("no route", request=request)
+        answers = {"q": {"type": "noul", "noul": 0.9}}
+        return httpx.Response(200, json={"model": "jev-1.14.0", "answers": answers})
+
+    limits = Limits(max_retries=0, max_calls=20)
+    jev = JevProvider(
+        JevConfig(enabled=True),
+        limits,
+        Budget(limits),
+        *receipt,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    question = {"q": {"type": "noul", "instructions": "`x` is true."}}
+    assert jev_usable(JevConfig(enabled=True)) and not jev_usable(JevConfig())
+    for _ in range(2):
+        with pytest.raises(ProviderError, match="provider_transport_error"):
+            jev.judge({"x": 1}, question)
+    assert jev_usable(JevConfig(enabled=True))
+    reachable = True
+    assert jev.judge({"x": 1}, question) == {"q": 0.9}
+    reachable = False
+    for _ in range(3):
+        with pytest.raises(ProviderError):
+            jev.judge({"x": 1}, question)
+    assert not jev_usable(JevConfig(enabled=True))
+    # Every failed attempt still has its receipt.
+    statuses = [call["status"] for call in receipt[0].calls(receipt[1])]
+    assert statuses.count("transport_error") == 5 and statuses.count("ok") == 1
+
+
+def test_a_replay_miss_is_not_counted_as_a_jev_outage(receipt, tmp_path):
+    limits = Limits()
+    jev = JevProvider(
+        JevConfig(enabled=True),
+        limits,
+        Budget(limits),
+        *receipt,
+        cache=ResponseCache(tmp_path / "cache.sqlite", "replay"),
+    )
+    try:
+        for _ in range(4):
+            with pytest.raises(ProviderError, match="cache_miss_in_replay_mode"):
+                jev.judge({"x": 1}, {"q": {"type": "noul", "instructions": "`x` is true."}})
+    finally:
+        jev.close()
+    assert jev_usable(JevConfig(enabled=True))
 
 
 @pytest.mark.parametrize("payload", [[], ["not-an-envelope"], 5, "text"])

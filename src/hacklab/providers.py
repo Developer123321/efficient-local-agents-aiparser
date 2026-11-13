@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -521,6 +522,37 @@ class SmallModelProvider(_HTTPProvider):
         return self.request(body, parse, output_allowance=self.limits.max_output_tokens)
 
 
+class _Outage:
+    """Consecutive failed Jev requests in this process.
+
+    Jev reviews and filters; the small model answers. If the evaluation gives
+    the container no route to Jev, asking again for every task would only
+    spend the time limit, so after `limit` failures in a row it is left out.
+    """
+
+    limit = 3
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._failures = 0
+
+    def record(self, ok: bool) -> None:
+        with self._lock:
+            self._failures = 0 if ok else self._failures + 1
+
+    def reached(self) -> bool:
+        with self._lock:
+            return self._failures >= self.limit
+
+
+JEV_OUTAGE = _Outage()
+
+
+def jev_usable(config: JevConfig) -> bool:
+    """Whether a task run should ask Jev at all: switched on, a key present, no outage."""
+    return config.enabled and bool(read_secret(config.api_key_env)) and not JEV_OUTAGE.reached()
+
+
 class JevProvider(_HTTPProvider):
     """Native TypeSafe System One Noul adapter; Jev never generates text."""
 
@@ -540,10 +572,14 @@ class JevProvider(_HTTPProvider):
         key = read_secret(config.api_key_env)
         if not key:
             raise ProviderError("typesafe_key_missing")
+        # A gateway may be given as a host or an API prefix instead of the full path.
+        endpoint = config.base_url.rstrip("/")
+        if not endpoint.endswith("/systemone"):
+            endpoint += "/systemone" if endpoint.endswith("/v1") else "/v1/systemone"
         super().__init__(
             provider="jev",
             model=config.model,
-            endpoint=config.base_url,
+            endpoint=endpoint,
             key=key,
             input_rate=config.input_usd_per_million,
             output_rate=config.output_usd_per_million,
@@ -556,6 +592,21 @@ class JevProvider(_HTTPProvider):
             cache_salt=cache_salt,
             spend=spend,
         )
+
+    def request(
+        self, body: dict[str, Any], parse: Callable[[Any], Any], *, output_allowance: int
+    ) -> Any:
+        try:
+            result = super().request(body, parse, output_allowance=output_allowance)
+        except BudgetExceeded:
+            raise  # The task ran out of allowance; that says nothing about Jev.
+        except ProviderError as exc:
+            # A miss in replay mode is a missing recording, not a missing Jev.
+            if str(exc) != "cache_miss_in_replay_mode":
+                JEV_OUTAGE.record(False)
+            raise
+        JEV_OUTAGE.record(True)
+        return result
 
     def choose(self, state: Any, instructions: str, criteria: dict[str, str]) -> tuple[str, float]:
         """One Choice question: the selected option and Jev's confidence in it.

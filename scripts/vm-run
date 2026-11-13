@@ -4,13 +4,13 @@ set -euo pipefail
 # A host service supplies a prebuilt runner and its own state directory.
 state_root=${HACKATHON_VM_STATE:-${XDG_STATE_HOME:-${HOME}/.local/state}/efficient-local-agents/vm}
 runner=${HACKATHON_VM_RUNNER:-}
-variant=vm-with-bob
+variant=vm
 tcg=false
 memory=
 cpus=
 usage() {
-  printf '%s\n' 'Usage: scripts/vm-run [--no-bob] [--memory MiB] [--cpus N] [--tcg]' \
-    '  --no-bob      Start the variant without the unfree IBM Bob Shell package' \
+  printf '%s\n' 'Usage: scripts/vm-run [--bob] [--memory MiB] [--cpus N] [--tcg]' \
+    '  --bob         Start the variant that also contains the unfree IBM Bob Shell package' \
     '  --memory MiB  Guest RAM (default 8192)' \
     '  --cpus N      Guest vCPUs (default 4)' \
     '  --tcg         Slow software emulation when KVM is unavailable' \
@@ -24,7 +24,6 @@ number() {
 while (($#)); do
   case "$1" in
     --bob) variant=vm-with-bob ;;
-    --no-bob) variant=vm ;;
     --tcg) tcg=true ;;
     --memory) number "$1" "${2:-}"; memory=$2; shift ;;
     --cpus) number "$1" "${2:-}"; cpus=$2; shift ;;

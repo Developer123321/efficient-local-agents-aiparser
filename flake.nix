@@ -152,6 +152,9 @@
               grep -F 'ConditionUser=alice' ${unit}
               grep -F '%S/hacklab-vm' ${unit}
               grep -F 'ExecStop=' ${unit}
+              # Bob is opt-in: the default runner is the guest without it.
+              test '${toString hostFixture.config.services.hacklab-vm.bob.enable}' = ""
+              test '${hostFixture.config.services.hacklab-vm.runner}' = '${vm.config.system.build.vm}'
               # Off by default: nothing may pull the VM into a session start.
               ! grep -F 'WantedBy=' ${unit}
               test -x ${command}/bin/hacklab-vm

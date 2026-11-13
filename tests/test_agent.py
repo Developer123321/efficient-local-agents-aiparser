@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from hacklab import agent
+from hacklab import providers as agent_providers
 from hacklab.config import Config, Limits, ModelConfig
 from hacklab.models import Task
 from hacklab.playbooks import Playbooks
@@ -41,6 +42,15 @@ def final(answer="42", evidence=None, actions=None, status="ok"):
 
 def tool(name, **arguments):
     return {"action": name, "arguments": arguments}
+
+
+def events(tracker, run_id, scratch):
+    """(kind, status) of every event of one run, read from the private export."""
+    out = scratch / "export.json"
+    out.unlink(missing_ok=True)
+    tracker.export(out)
+    recorded = json.loads(out.read_text())["events"]
+    return [(e["kind"], e["data"].get("status")) for e in recorded if e["run_id"] == run_id]
 
 
 def live(monkeypatch, decisions, *, limits=None, http_status=200):
@@ -853,6 +863,76 @@ def test_a_jev_doubt_is_feedback_for_one_more_attempt(lab, monkeypatch):
     answer, _ = run([0.2, 0.2], [sample, partial], on_unverified="answer")
     assert answer.status == "ok" and answer.confidence == 0
     assert "reviewer_doubts_complete" in answer.reason
+
+
+def test_an_answer_stands_when_jev_is_enabled_but_out_of_reach(lab, monkeypatch):
+    # The evaluation container may offer no route to Jev. That must never turn
+    # an answer that passed every check of the code into an error.
+    root, tracker = lab
+    task = audit(root)
+    asked = []
+
+    class Unreachable:
+        def judge(self, state, questions):
+            asked.append(state)
+            raise agent.ProviderError("provider_transport_error")
+
+        def close(self):
+            pass
+
+    whole = final("", [])
+    whole["result"]["answer_from"] = "r1"
+    config, _ = live(monkeypatch, [UPLOADS_AFTER, whole])
+    config.jev.enabled = True
+    monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic")
+    small_only = agent.make_providers
+    monkeypatch.setattr(agent, "make_providers", lambda *a: (small_only(*a)[0], Unreachable()))
+    run_id, answer = agent.run_task(task, root, config, tracker)
+    assert answer.status == "ok" and answer.answer == "ds/a1/x1, ds/a2/x2"
+    assert len(asked) == 1
+    assert ("verification", "jev_unavailable") in events(tracker, run_id, root.parent)
+    # Replay mode keeps its promise to fail on a miss.
+    monkeypatch.setattr(
+        Unreachable,
+        "judge",
+        lambda *a: (_ for _ in ()).throw(agent.ProviderError("cache_miss_in_replay_mode")),
+    )
+    config, _ = live(monkeypatch, [UPLOADS_AFTER, whole])
+    config.jev.enabled = True
+    small_only = agent.make_providers
+    monkeypatch.setattr(agent, "make_providers", lambda *a: (small_only(*a)[0], Unreachable()))
+    assert agent.run_task(task, root, config, tracker)[1].status == "error"
+
+
+def test_a_run_without_a_jev_key_or_after_an_outage_uses_the_small_model_alone(lab, monkeypatch):
+    root, tracker = lab
+    task = audit(root)
+    whole = final("", [])
+    whole["result"]["answer_from"] = "r1"
+    built = []
+
+    def run():
+        config, _ = live(monkeypatch, [UPLOADS_AFTER, whole])
+        config.jev.enabled = True
+        small_only = agent.make_providers
+
+        def spy(used, *rest):
+            built.append(used.jev.enabled)
+            return small_only(used, *rest)
+
+        monkeypatch.setattr(agent, "make_providers", spy)
+        run_id, answer = agent.run_task(task, root, config, tracker)
+        assert answer.status == "ok" and config.jev.enabled
+        return events(tracker, run_id, root.parent)
+
+    # Enabled in the configuration, but the environment carries no key.
+    assert ("provider", "jev_unavailable") in run()
+    monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic")
+    assert ("provider", "jev_unavailable") not in run()
+    for _ in range(agent_providers.JEV_OUTAGE.limit):
+        agent_providers.JEV_OUTAGE.record(False)
+    assert ("provider", "jev_unavailable") in run()
+    assert built == [False, True, False]
 
 
 def test_development_trace_is_private_and_off_by_default(lab, monkeypatch, tmp_path):

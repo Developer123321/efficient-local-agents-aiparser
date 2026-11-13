@@ -1,171 +1,135 @@
-# Event facts and what they imply
+# Rules and open questions
 
-Checked on **12 and 13 November 2026** against the organizer's mail to
-participants and the public pages linked below. Details can change; confirm
-them at the opening. Everything under "Our reading" is inference, not fact.
+Sources: the organizers' mail to participants (12 November 2026) and the
+[event page](https://ai-mission.eu/hackathons/2026-11-efficient-local-agents/),
+read again on 13 November. Details can change at the opening.
 
-## What the organizers have said
+## The day
 
-From the [AIM event page](https://ai-mission.eu/hackathons/2026-11-efficient-local-agents/)
-and the participant mail of 12 November:
+| | |
+| --- | --- |
+| When | Saturday 14 November 2026. Doors 09:00, opening and challenge reveal 09:15, lunch 12:00 |
+| Where | IBM Vienna, Obere Donaustraße 95. Bring the ID that matches IBM's invitation |
+| Deadline | **Code submission at 17:00, sharp** |
+| After | The organizers run every agent once on an unseen scenario; leaderboard at 18:00 |
+| Channel | Everything runs over the AIM Slack workspace |
 
-- **Efficient Local Agents Hackathon, Saturday 14 November 2026, IBM Vienna**,
-  Obere Donaustraße 95. Doors 09:00, opening and challenge reveal 09:15, IBM
-  intro 09:30, challenge start about 10:00, lunch 12:00.
-- **Final code submission at 17:00, sharp.** Between 17:00 and 18:00 the
-  organizers run every agent on an unseen scenario; the leaderboard follows at
-  18:00.
-- **The challenge is "The MuggingFace Incident": a hijacked AI agent swarm is
-  attacking a model hub, and the agent is the night shift.** On a fixed small
-  model it has to investigate the incident and contain it, correctly and
-  cheaply. All details come at the opening.
-- The agent **runs in a container with no internet access**. It may be written
-  in any language with its own Dockerfile; the starter kit and its tools are
-  Python (≥ 3.11, uv). Without a local Docker, testing depends on a limited
-  number of test submissions on the organizers' platform.
-- Only the provided models may be used at run time. An own LLM, embedder,
-  reranker, classifier or any other AI model is forbidden, online or offline.
-  Any AI may help to build the agent.
-- Each team has a **limited development budget for LLM requests**.
-- **Scoring is accuracy and cost.** The event page states 50 % each and counts
-  right sources as part of accuracy.
-- The event page names two run-time models: the small language model announced
-  at the opening and **Jev 1.14 by TypeSafe AI**. The mail speaks only of "the
-  models we provide" and of model keys handed out on the day.
-- Building access needs the ID that matches IBM's invitation. All
-  communication on the day runs over the AIM Slack workspace. Free Bob credits
-  need an IBM ID under the invited mail address, created by Friday 13 November.
+## The task
 
-Not published: the task and answer format, the starter kit, the tools the agent
-gets, how the model is reached from inside the container, the prices and the
-formula that combines accuracy and cost, the time limit of the final run, and
-whether a wrong answer costs more than an abstention.
+"The MuggingFace Incident": a hijacked AI agent swarm attacks a model hub. Our
+agent is the night shift. On a fixed small model it must investigate the
+incident and contain it, correctly and cheaply. Details come at the opening.
 
-## Our reading of the scenario
+- Every team gets the same small language model and the same budget, plus
+  **Jev 1.14 by TypeSafe AI** for typed decisions ("supported or not?").
+- **Score: 50 % accuracy (right answers and right sources), 50 % cost.**
+- There is a live benchmark all day with feedback per task.
+- Each team has a limited development budget for model requests.
 
-The title points at a real event. In July 2026 an autonomous agent run inside a
-capability evaluation broke out of its sandbox and intruded into Hugging Face's
-infrastructure. Two public reports describe it in detail:
+## Allowed and forbidden
 
-- [Hugging Face's technical timeline](https://huggingface.co/blog/agent-intrusion-technical-timeline):
-  about 17,600 recovered attacker actions over four and a half days, grouped
-  into phases (recon, remote execution, dropper, exfiltration, command and
-  control, evasion, Kubernetes, supply chain, mesh VPN). Payloads were chunked,
-  compressed and encoded, and a per-campaign key that the agent had leaked in
-  its own logs let the defenders decode them. A first plain scan of the logs
-  found few secrets; repeating the attacker's decoding found about four times
-  as many. Stolen material included platform tokens, cloud keys, a mesh-VPN
-  key and a token-signing key. Staging and exfiltration ran over datasets on
-  the platform itself ("dead drops"), pastebins and a request-capture service,
-  with a small message envelope of type, channel, sequence number and checksum.
-- [METR's investigation report](https://metr.org/hugging-face-incident-report-aug-2026.pdf):
-  roughly 1,200 agents that were meant to be isolated found an unsanctioned
-  message board and exchanged more than 70,000 messages and files; about 700
-  took part in the attack. Some spoofed their own tool calls.
+| Allowed | Forbidden |
+| --- | --- |
+| Any AI to **build** the agent (Claude Code, Codex, Bob, …) | Any own AI model **inside** the agent: LLM, embedder, reranker, classifier, online or offline |
+| The two provided models at run time | Any other model at run time, also through a proxy, a tool or an MCP server |
+| Any language, with our own Dockerfile | Internet access from the agent's container |
+| Any amount of our own code: parsers, rules, tools | |
 
-A parody of this incident plausibly contains: logs of many agents and a hub,
-a message board, encoded and chunked payloads, leaked credentials, datasets
-used as dead drops, and a set of containment actions such as quarantining
-agents, revoking tokens and taking artefacts down. This repository's forensic
-tools and its rehearsal scenario are built for those shapes. **The organizers'
-data may look different**; nothing here was derived from their material.
+The starter kit and its tools are Python (3.11 or newer, uv). No coding
+assistant is mandatory. IBM offers free Bob credits to those who created an
+IBM ID under the invited mail address by Friday 13 November.
 
-The previous AIM hackathon (April 2026, the BitGN "PAC1" benchmark) is the
-second lead. Its [recap](https://ai-mission.eu/blog/hackathon-4/) and the
-write-ups of the [first](https://ai-mission.eu/blog/hackathon-4-winner/) and
-[second](https://ai-mission.eu/blog/hackathon-4-second-place/) place report:
+## "No internet" and the models
 
-- About a third of the tasks carried prompt injections inside the data, also
-  base64-encoded, in HTML comments and as fake authority ("emergency
-  override"). Partial compliance failed the task.
-- Scoring looked at side effects: which actions were taken and which sources
-  were named.
-- What worked: several independent, individually switchable guard layers
-  written in code; tool results formatted like command output instead of JSON;
-  hard caps on free-text fields; reading policy documents automatically before
-  the first model turn; validating that cited sources were actually read;
-  always returning an answer instead of crashing; running tasks in parallel to
-  finish within the time window.
-- One winner's agent acted on a real calendar during testing because a tool
-  connection carried wider permissions than the sandbox. Run the agent only
-  with the organizers' tools.
+The mail says both of these:
 
-A swarm of hijacked agents writes the evidence, so expect instructions aimed at
-the investigating agent inside logs and messages.
+> It will run in a container with no internet access.
+>
+> No GPU or own API keys needed – we hand out the model keys on the day.
 
-## Model interfaces
+Keys mean the models are reached over an API. So the container cannot be
+fully cut off: the organizers must give it a route to the small model. How
+that route looks, and whether it also reaches Jev, is not published.
 
-**Jev** has a native decision API, not chat completions. The
-[System One reference](https://docs.typesafe.ai/api/system-one.md) specifies
-`POST https://api.typesafe.ai/v1/systemone` with Bearer authentication and a
-body of `model`, `state` and a named `questions` map. Question types are
-`noul` (probability of yes), `choice` (one of up to 255 named options, with
-confidence and probabilities) and `score` (rating on an ordered rubric).
-Answers are keyed by question name; the response reports the model and input
-and output token usage. The [model reference](https://docs.typesafe.ai/models)
-lists `jev-1.14.0` at a public price of $0.042 per million input tokens with
-free output. **A list price is not the event's tariff.** Whether Jev's public
-endpoint is reachable from a container without internet is open; the
-organizers must provide a route or Jev is unavailable in the final run. Keep
-it optional (`[jev] enabled`) and measure the agent without it.
+What follows for us:
 
-**The small model is unknown until the opening.** IBM hosts the event, so an
-IBM Granite model is a reasonable guess and nothing more. If it is one of the
-current [Granite 4.2](https://www.ibm.com/granite/docs/models/granite4-2)
-models (3B, 8B, 30B), three documented properties matter for cost:
+- **Jev is provided, not required.** Nothing obliges us to call it. As far as
+  TypeSafe's public documentation shows, Jev exists only as a hosted API;
+  there is nothing to install locally. If the final run has no route to Jev,
+  Jev is simply not available there.
+- **The agent works without Jev.** With `[jev] enabled = true` and no key or
+  no route, it answers on the small model alone instead of failing. After
+  three failed Jev requests in a row it stops asking for the rest of the run.
+- **Both addresses come from the environment**: `SMALL_MODEL_BASE_URL` and
+  `TYPESAFE_BASE_URL`. A gateway inside the container needs no code change.
+- **Measure with and without Jev** and submit the variant that also works
+  when Jev is missing, unless the organizers confirm the route.
 
-- They reason inside `<think>…</think>` by default. Thinking is paid output.
-  The chat template takes `enable_thinking=false` or a low-effort mode; over
-  an OpenAI-compatible server this is usually passed as
-  `chat_template_kwargs`. `[model] extra_body` sets it without a code change.
-- IBM recommends `temperature=1.0, top_p=0.95` for every task including tool
-  calling. A temperature of 0 is this harness's default because it makes
-  replies repeatable and cacheable; test both on the benchmark.
-- The model's own tool-call format is XML-like and parsed by the serving
-  layer. This harness asks for one JSON object as plain content instead, which
-  works on any chat endpoint and needs no tool-call parser.
+`just container-test` proves all of this with a stand-in endpoint and no
+network: both models reachable over a local address, and nine answers without
+an error when Jev is absent.
 
-`hacklab probe` shows within one request whether URL, key header, token
-parameter and reply format fit, and reports cached and reasoning tokens where
-the endpoint returns them.
+## Open questions
 
-For rehearsal, `configs/openrouter.toml` runs Granite 4.2 8B through
-OpenRouter (`ibm-granite/granite-4.2-8b`, the only Granite listed there on 13
-November 2026). Reasoning is set with OpenRouter's `reasoning` field, efforts
-`none`, `low` and `high`. The measured results are in
-[benchmarks.md](benchmarks.md#what-a-real-small-model-did-13-november-2026).
+Ask at the opening and write the answers into the last column. Until then the
+middle column is what the repository assumes.
 
-OpenRouter lists no Jev model. Its `typesafe/jev-router` is a router that
-forwards a request to another model (a test request was answered by an OpenAI
-model); it is not the System One API and was not used. Jev was measured
-through its native API with `configs/openrouter-jev.toml`.
+| # | Question | Our assumption until answered | Setting it changes | Answer |
+| --- | --- | --- | --- | --- |
+| 1 | How does the container reach the small model? Is Jev reachable there too? | A local address from the environment; Jev may be missing | `SMALL_MODEL_BASE_URL`, `TYPESAFE_BASE_URL`, `[jev] enabled` | |
+| 2 | What is billed (input, output, hidden reasoning, cached tokens, requests) and at which price? Does a Jev call cost? | Every token counts | `[model]` prices, `extra_body`, prompt size | |
+| 3 | How are accuracy and cost combined? Against what is cost normalised? | Unknown, so no combined score locally | which variant we submit | |
+| 4 | Does a wrong answer or wrong action cost more than none? Is there partial credit? | Wrong is worse: abstain when unverified | `[agent] on_unverified`, `[guard]` | |
+| 5 | What is the container's input and output, and the time limit of the final run? | JSONL in, JSONL out | `Dockerfile` `CMD`, `submit --workers`, `--deadline-seconds` | |
+| 6 | Which containment actions exist? What must never be touched? | Any type, nothing protected | `[guard] allowed_actions`, `protected_targets` | |
+| 7 | How large is the development budget? How many test submissions? Is the live benchmark charged to it? | Small: replay cache on | `[budget]`, `HACKLAB_CACHE_MODE` | |
+| 8 | May tasks run in parallel? Are there rate limits? | No: one task at a time | `submit --workers` | |
+| 9 | Does the final scenario have the same task types as the live benchmark? | Same types, new data | how much we rely on playbooks | |
+| 10 | What does "right sources" mean exactly: file, line, quote? | Document plus exact quote | citation format in the adapter | |
 
-**IBM Bob** is a coding assistant for building the agent. It is not a run-time
-model. [Bob Shell](https://bob.ibm.com/docs/shell) reads `AGENTS.md` as custom
-rules and project skills from `.bob/skills`; see [VM operation](vm.md#ibm-bob).
+## What we expect in the data
 
-## Questions for the opening
+This is our guess, not a fact. The title points at a real intrusion from July
+2026, described in
+[Hugging Face's timeline](https://huggingface.co/blog/agent-intrusion-technical-timeline)
+and [METR's report](https://metr.org/hugging-face-incident-report-aug-2026.pdf).
+A parody of it plausibly contains:
 
-Ask these first; each one changes a setting.
+- logs of many agents and of a hub, and a message board between agents;
+- payloads that are chunked, compressed and encoded, with a leaked key;
+- stolen tokens and keys, and datasets used as dead drops;
+- containment actions such as quarantining agents and revoking tokens.
 
-1. How does the agent reach the model inside the container, and is Jev
-   reachable there? (`SMALL_MODEL_BASE_URL`, `[jev] enabled`)
-2. What exactly is billed: input tokens, output tokens, hidden reasoning
-   tokens, cached tokens, requests? At which prices? (`[model]` prices,
-   `extra_body`, prompt size)
-3. How are accuracy and cost combined, and against what is cost normalised?
-4. Does a wrong answer or a wrong containment action cost more than none?
-   (`[agent] on_unverified`, `[guard]` strictness)
-5. What is the input and output contract of the container, and the time limit
-   of the final run? (`Dockerfile` `CMD`, `submit --workers`,
-   `--deadline-seconds`)
-6. Which containment actions exist, and is there anything that must never be
-   touched? (`[guard] allowed_actions`, `protected_targets`)
-7. How large is the development budget, how many platform test submissions
-   are there, and does the final scenario share the task types of the
-   development benchmark? (`[budget]`, playbooks)
-8. May tasks run in parallel, and are there rate limits?
+The tools and the rehearsal scenario are built for these shapes. The real data
+may look different.
 
-This repository is preparation. It does not establish that the harness is
-optimal or predict a result before the actual model, scenario and scoring have
-been measured.
+Lessons from the previous AIM hackathon
+([recap](https://ai-mission.eu/blog/hackathon-4/),
+[first](https://ai-mission.eu/blog/hackathon-4-winner/) and
+[second](https://ai-mission.eu/blog/hackathon-4-second-place/) place):
+
+- About a third of the tasks hid instructions in the data, also base64-encoded
+  or as fake authority. Following them even partly failed the task.
+- Scoring looked at side effects: which actions were taken, which sources named.
+- What worked: guards written in code, tool results as plain lines instead of
+  JSON, always returning an answer, running tasks in parallel.
+
+Here the attackers write the evidence, so expect instructions aimed at our
+agent inside logs and messages.
+
+## The models
+
+**Small model.** Unknown until the opening. IBM hosts, so an IBM Granite model
+is a reasonable guess; we rehearsed with Granite 4.2 8B through OpenRouter
+([results](benchmarks.md#results-on-a-real-small-model)). Such models think
+before they answer, and thinking is paid output: set it low or off with
+`[model] extra_body` and measure.
+
+**Jev.** Not a chat model. One request carries a `state` and named questions;
+the answer is a probability, a choice or a score per question
+([API reference](https://docs.typesafe.ai/api/system-one.md)). Public list
+price: $0.042 per million input tokens, output free. The event's tariff may
+differ.
+
+**IBM Bob.** A coding assistant for building. Optional; never a run-time
+model. Setup: [vm.md](vm.md#ibm-bob-optional).
