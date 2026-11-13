@@ -64,6 +64,9 @@ What follows for us:
   `TYPESAFE_BASE_URL`. A gateway inside the container needs no code change.
 - **Measure with and without Jev** and submit the variant that also works
   when Jev is missing, unless the organizers confirm the route.
+  `configs/live.toml` ships with Jev off, because as a judge it lowered
+  accuracy and raised cost on the stand-in model; `configs/jev-select.toml`
+  is the same profile with Jev on.
 
 `just container-test` proves all of this with a stand-in endpoint and no
 network: both models reachable over a local address, and nine answers without

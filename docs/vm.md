@@ -1,19 +1,27 @@
 # VM and Nix setup
 
-**You do not need any of this.** Git, Python, uv and Docker or Podman on your
-own laptop are enough ([README](../README.md#set-up)). This page is for those
-who want the pinned Nix environment or the ready-made VM. Both target x86_64
-Linux only.
+**You do not need any of this.** Git, uv and Docker or Podman on your own
+laptop are enough: `bash scripts/setup` ([README](../README.md#set-up)). This
+page is for those who want the pinned Nix environment or the ready-made VM.
 
-| Option | Command | Gives you |
-| --- | --- | --- |
-| Nix shell | `nix develop` | Python 3.15, uv, Ruff, Just and command-line tools. No container engine |
-| QEMU VM | `bash scripts/vm-run` | The same tools plus rootless Podman, isolated from your machine |
-| NixOS host service | `vm start hacklab-vm` | The VM as an on-demand service (see below) |
+| Option | Command | Runs on | Gives you |
+| --- | --- | --- | --- |
+| Laptop setup | `bash scripts/setup` | Linux, macOS, Windows (Git Bash, WSL 2) | The harness and its checks through uv |
+| Nix shell | `nix develop` | x86_64 Linux with Nix | Python 3.15, uv, Ruff, Just and command-line tools. No container engine |
+| QEMU VM | `bash scripts/vm-run` | x86_64 Linux with Nix and KVM | The same tools plus rootless Podman, isolated from your machine |
+| NixOS host service | `vm start hacklab-vm` | NixOS | The VM as an on-demand service (see below) |
+
+The VM is a NixOS guest for x86_64 and needs hardware virtualization, so it
+does not run on macOS, on Windows outside WSL 2 or on ARM. Nothing in the
+project depends on it: all four options run the same code from the same
+`uv.lock`, and the submission is the container image either way.
 
 ## The VM
 
-Needs Nix with flakes and KVM (`/dev/kvm`).
+Needs Nix and KVM (`/dev/kvm`). On Ubuntu: install Nix from
+[nixos.org/download](https://nixos.org/download), then
+`sudo usermod -aG kvm $USER` and log in again. The script switches flakes on
+for its own call, so a fresh Nix installation needs no configuration.
 
 ```console
 bash scripts/vm-run                        # 4 vCPUs, 8 GiB RAM, 40 GiB disk
@@ -52,6 +60,8 @@ Good to know:
 `bash scripts/vm-smoke` tests the whole VM on a disposable disk: it boots the
 guest and runs `scripts/guest-check` there, including the container test. It
 takes about ten minutes and needs KVM, PyPI and the image registries.
+`PORTABILITY_TEST=1 bash scripts/vm-smoke` also runs the laptop setup inside
+stock Ubuntu and Debian containers (`scripts/portability-test`).
 
 ## The container
 
@@ -60,14 +70,19 @@ work. `just container-test` builds the [Dockerfile](../Dockerfile) and then
 checks, with no network at all:
 
 1. the rehearsal incident is solved by the playbooks;
-2. the agent talks to a stand-in model over a local address;
+2. the candidate profile finds its playbooks and skills inside the image
+   (`doctor --strict`), and the agent answers nine tasks through a stand-in
+   model over a local address, with the baseline and the candidate profile;
 3. Jev works over a local address, and the agent still answers when Jev is
    absent;
 4. the container cannot reach the internet;
 5. the agent runs as an unprivileged user and cannot change its own code.
 
 It uses `docker` when present, else `podman`; `CONTAINER_ENGINE` picks one.
-Only the build needs the registries and PyPI.
+Only the build needs the registries and PyPI. On an ARM laptop,
+`HACKLAB_PLATFORM=linux/amd64` builds and tests the image for an x86_64
+evaluation machine (slower, through emulation). In Git Bash the script keeps
+Windows from rewriting the container paths.
 
 Still to do at the opening: set the Dockerfile's `CMD` to the organizers' run
 contract and add the starter kit to the build. Keys never go into the image;

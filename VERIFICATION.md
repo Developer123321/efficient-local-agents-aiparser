@@ -1,27 +1,32 @@
 # What was actually tested
 
-## 13 November 2026, NixOS x86_64 workstation with KVM
+## 13 November 2026 (evening), NixOS x86_64 workstation with KVM
 
-Nix 2.35.3, uv 0.13.5, Ruff 0.17.3. The checks ran on the tree of the commit
-that made Bob opt-in and Jev optional at run time; only this file was edited
-afterwards.
+Nix 2.35.3, uv 0.13.5, Ruff 0.17.3 on the host and 0.17.4 in the guest and in
+the containers. The checks ran on the tree of the hardening commits; after
+the VM run only documentation and one default argument (`_briefing(room=None)`)
+changed, and the fast gate ran again.
 
 | Check | Result |
 | --- | --- |
-| `project-check fast` (Ruff format and lint, `pytest`) | Passed, **246 tests** on Python 3.15 |
+| `project-check fast` (Ruff format and lint, `pytest`) | Passed, **279 tests** on Python 3.15 |
 | The same tests in the guest | Passed on Python 3.15.2, 3.13.18 and 3.11.18 |
-| `nix fmt -- --ci`, `nix flake check` | Passed, including `vm-contract` and `host-contract` (Bob off by default) |
-| Shellcheck on `container-test` and `vm-run` | Passed |
-| `bash scripts/vm-smoke` | Passed: the default guest, without Bob, booted on a disposable disk and ran `scripts/guest-check` |
-| Default flake outputs without access to the Bob packaging | The Nix shell and the VM evaluated with an unfetchable Bob input; the Bob variants did not |
-| Rehearsal incident, 40 seeds | Playbooks answered all 9 tasks of every seed with 0 model calls (checked on an earlier tree; playbooks unchanged) |
+| `nix fmt -- --ci`, `nix flake check` | Passed, including `vm-contract`, `host-contract` and `ruff-pin` |
+| Shellcheck on every script in `scripts/` | Passed |
+| `PORTABILITY_TEST=1 bash scripts/vm-smoke` | Passed: the default guest booted on a disposable disk and ran `scripts/guest-check` |
+| `scripts/portability-test` inside the guest | `scripts/setup --check` passed in stock `ubuntu:24.04`, `ubuntu:22.04` and `debian:12` containers: uv from the official installer, Python 3.15.2 fetched by uv, Ruff 0.17.4 through uv, 279 tests each |
+| Replay of the recorded model runs (no request sent) | Identical to before the changes: 7, 6 and 5 of 9 on seeds 7, 8, 9 with 31, 30 and 27 calls, all served from the cache |
+| Rehearsal incident, 40 seeds | Playbooks answered all 9 tasks of every seed with 0 model calls; seed 7 is byte-identical to the data generated before |
+| Wheel contents | `hacklab/event/skills/*.md`, `adapter.py` and `playbooks.py` are in the built wheel |
 
 `scripts/container-test` ran inside the guest with rootless Podman:
 
 - the image built from `python:3.13-slim` and `uv.lock` (151 MiB);
 - with `--network none` the playbooks solved 9 of 9 rehearsal tasks;
+- `doctor --strict --config configs/live.toml` found the candidate profile's
+  playbooks and skills inside the image;
 - against a stand-in endpoint on a loopback-only network the agent wrote 9
-  answers;
+  answers with the baseline profile and 9 with the candidate profile;
 - `probe` reached both the stand-in small model and the stand-in Jev over a
   local address;
 - with Jev enabled but no key and no route, the agent wrote 9 answers and no
@@ -32,6 +37,12 @@ afterwards.
 The guest check also saw: no SSH daemon and no network listener, the host's
 loopback out of reach, `just ready`, `just check` and `just practice 7`
 passing, and numpy, pandas, pymupdf and duckdb importing from binary wheels.
+
+What the replay showed about the earlier candidate profile: with its limits
+(`max_total_tokens = 16000`, `max_actions = 20`) the recorded runs lose the
+`secrets` and `contain` tasks to the harness's own budget (7 of 9 became 6,
+6 became 5). No request was needed to see it; `live.toml` now carries the
+measured limits.
 
 ## Against real models
 
@@ -44,8 +55,9 @@ With a temporary OpenRouter key and a TypeSafe key in the ignored `.env`:
   [docs/benchmarks.md](docs/benchmarks.md#results-on-a-real-small-model).
 
 One run per configuration: these numbers show direction, not significance.
-They were measured before the Jev fallback was added; the fallback changes
-nothing while Jev answers.
+They were measured before the Jev fallback and before the hardening of
+13 November; the replay above shows that the hardening sends the same
+requests. Nothing was sent to a model while hardening.
 
 ## Not verified
 
@@ -58,8 +70,17 @@ nothing while Jev answers.
   placeholder.
 - **Jev in the final run.** Whether the container has a route to Jev is
   unknown. The fallback was tested with a stand-in, not with a real outage.
-- **Docker.** The container test ran with rootless Podman, not with Docker or
-  Docker Desktop, and not on macOS, Windows or ARM.
+- **Docker, macOS, Windows, ARM.** The container test ran with rootless
+  Podman on x86_64 Linux. `scripts/setup` ran on NixOS and in Ubuntu and
+  Debian containers. Docker, Docker Desktop, macOS (bash 3.2), Git Bash, WSL 2,
+  Apple Silicon and `HACKLAB_PLATFORM` were written for and shellchecked, not
+  run.
+- **The new seams against a real kit.** `event/adapter.py` (the kit's model
+  function, snapshots, tool calls from playbooks), the tolerant task reader of
+  `submit` and the log formats (logfmt, JSON lines without a suffix,
+  multi-table JSON) are covered by tests on synthetic data only.
+- **Retries against a real rate limit.** The pauses were tested with a fake
+  clock.
 - **The Bob variant on this tree.** `vm-smoke --bob` last passed one commit
   earlier, when Bob was the default. Bob's license step and login were never
   tested.
@@ -69,6 +90,6 @@ nothing while Jev answers.
 
 ## Before travelling
 
-On the laptop you bring: `just ready`, `just check`, `just practice` and
-`just container-test`. The Friday checklist is in
+On the laptop you bring: `bash scripts/setup --check` and
+`bash scripts/container-test`. The Friday checklist is in
 [docs/playbook.md](docs/playbook.md#friday-evening).

@@ -28,28 +28,34 @@ Look up the rest when you need it:
 
 ## Set up
 
-You need Git, Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). For
-the container test you also need Docker or Podman. No GPU and no key.
+One command on any laptop. It checks what is installed, says how to get what
+is missing, installs the dependencies and solves the rehearsal incident
+offline. No GPU, no key, no model request.
 
 ```sh
 git clone https://github.com/timfewi/hacklab-vm.git && cd hacklab-vm
-uv sync --locked
-uv run hacklab doctor          # what is installed and configured
-bash scripts/check             # format, lint and tests
-uv run hacklab practice --seed 7 --out data/practice-7
-uv run hacklab benchmark --config configs/practice.toml \
-  --dataset data/practice-7/cases.jsonl --root data/practice-7/docs \
-  --out results/practice-7.json
+bash scripts/setup             # add --check for format, lint and all tests
 bash scripts/container-test    # builds the image, runs it without network
 ```
 
-The benchmark must report `"accuracy": 1.0` with 0 model calls, and the last
-command must end with `Container test passed.`
+`setup` must end with `Ready.` and the container test with
+`Container test passed.`
 
-Shortcuts with [just](https://just.systems): `just ready`, `just check`,
-`just practice`, `just container-test`. With Nix, `nix develop` provides
-Python, uv, Ruff and Just; a ready-made VM is described in
-[docs/vm.md](docs/vm.md). Neither is required.
+| Your laptop | You need | Container engine |
+| --- | --- | --- |
+| Ubuntu, Debian, Fedora | Git, [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh \| sh`) | `docker.io` or Podman |
+| macOS, Intel or Apple Silicon | Git, uv (`brew install uv`) | Docker Desktop or Colima |
+| Windows | Git for Windows, uv; run the commands in **Git Bash** or in WSL 2 | Docker Desktop |
+| NixOS, or any Linux with Nix | `nix develop`, or the ready-made VM in [docs/vm.md](docs/vm.md) | Podman inside the VM |
+
+uv fetches Python by itself. In PowerShell without Git Bash, the same steps
+are `uv sync --locked`, `uv run hacklab doctor` and
+`uv run python -m pytest -q`. One laptop per team needs a container engine;
+the others can develop without. On an ARM laptop, build the image for the
+evaluation machine with `HACKLAB_PLATFORM=linux/amd64 bash scripts/container-test`.
+
+Shortcuts with [just](https://just.systems): `just laptop`, `just check`,
+`just practice`, `just container-test`.
 
 ## Talk to a model
 
@@ -68,15 +74,18 @@ To rehearse before the event, put an OpenRouter key into `.env` as
 
 | You want to | Look at |
 | --- | --- |
-| Solve a task type in code, without the model | `src/hacklab/playbooks.py`, template `examples/event_playbooks.py` |
-| Give the model a recipe for one task type | `examples/skills/`, setting `[agent] skills` |
-| Plug in the organizers' starter kit | `examples/kit_adapter.py` |
+| Solve a task type in code, without the model | `src/hacklab/event/playbooks.py`, worked example `examples/event_playbooks.py` |
+| Give the model a recipe for one task type | `src/hacklab/event/skills/` |
+| Plug in the organizers' starter kit | `src/hacklab/event/adapter.py` |
 | Change prompt, loop or final checks | `src/hacklab/agent.py` |
-| Change a model or agent setting | `configs/*.toml` |
+| Change a model or agent setting | `configs/live.toml`, the profile that is submitted |
+| See why a run lost points | `hacklab failures REPORT`, then the trace of the task |
 | Decode a payload or list indicators by hand | `hacklab decode FILE`, `hacklab iocs FILE` |
 | Build the submission image | `Dockerfile`, `scripts/container-test` |
 
-All commands: `uv run hacklab --help`.
+`src/hacklab/event/` is the one package made for the day: it is inside the
+image without another line in the Dockerfile. All commands:
+`uv run hacklab --help`.
 
 ## Three rules
 

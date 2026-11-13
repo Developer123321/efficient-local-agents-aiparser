@@ -8,11 +8,14 @@ any host machine configuration.
 
 ## Checks
 
-- Python: `uv sync --locked`, then `just check` (Ruff format and lint, the
-  offline tests). Supported interpreters are Python 3.11 to 3.15; the
+- Python: `bash scripts/check` (Ruff format and lint, the offline tests). It
+  needs uv and nothing else: `scripts/ruff` uses Ruff from PATH or fetches
+  the pinned version. Supported interpreters are Python 3.11 to 3.15; the
   submission image runs 3.13. Do not use syntax newer than 3.11.
 - After touching the image, the agent's entry point or its dependencies:
-  `just container-test`.
+  `bash scripts/container-test`.
+- Scripts must run in bash 3.2 (macOS) and Git Bash: no empty-array
+  expansion under `set -u`, no GNU-only options. Shellcheck them.
 - Nix: `nix flake check` and the VM checks in docs/vm.md.
 - Report the checks actually executed and what stayed untested.
 
@@ -39,7 +42,15 @@ any host machine configuration.
   injection scan and placeholders. Tools that change something are registered
   with `mutating=True`.
 - `run_task` must return an Answer for every input. Do not add a code path
-  that can raise out of it or wait without a bound.
+  that can raise out of it or wait without a bound. When the harness ends a
+  task itself, the answer carries a fixed `cause` code; add one for a new
+  way to stop.
+- What the team writes on the day lives in `src/hacklab/event/` (playbooks,
+  skills, the kit adapter): it ships inside the package, so the image needs
+  no new COPY line. `examples/` holds worked examples only.
+- `configs/live.toml` is what is submitted. Its `[limits]`, `[agent]` and
+  `[guard]` equal the measured profile and the defaults in `config.py`
+  (`tests/test_config.py`); change a value in all three, with a number.
 - Jev is a native System One provider, never a chat model. Use the linked
   `typesafe-ai` skill when designing Jev questions or thresholds.
 - Jev is optional at run time. The evaluation container may have no route to
