@@ -404,6 +404,23 @@ class CampaignStore:
                 (status, _json(safe_config(config)), _json(report), _json(merged), trial),
             )
 
+    def plan_trial(self, trial: int, config: Config, edit: ConfigEdit) -> None:
+        """Commit the validated plan before a measurement can perform effects."""
+        with self.tracker._db() as db:
+            previous = db.execute(
+                "SELECT decision_json FROM optimization_trials WHERE id=? AND status='running'",
+                (trial,),
+            ).fetchone()
+            if previous is None:
+                raise ValueError("trial_not_running")
+            decision = json.loads(previous["decision_json"])
+            decision.update(edit.model_dump(), accepted=False)
+            db.execute(
+                "UPDATE optimization_trials SET config_json=?,decision_json=? "
+                "WHERE id=? AND status='running'",
+                (_json(safe_config(config)), _json(decision), trial),
+            )
+
 
 class ModelProposer:
     def __init__(self, tracker: Tracker, git_head: str):
@@ -501,6 +518,7 @@ def run_campaign(
     holdout_runner: Callable[[Config, float], dict] | None = None,
     holdout_digest: Callable[[], str] | None = None,
     finalize: bool = False,
+    on_start: Callable[[dict], None] | None = None,
 ) -> dict:
     """Testable finite loop. Runner/proposer perform effects; review owns promotion.
 
@@ -583,6 +601,17 @@ def run_campaign(
         )
 
     try:
+        if on_start is not None:
+            # The private parent channel establishes ownership before effects.
+            # It contains no task data, answers, provider bodies or credentials.
+            on_start(
+                {
+                    "id": campaign_id,
+                    "status": "running",
+                    "git_head": git_head,
+                    "starting_known_usd": initial_spend["usd"],
+                }
+            )
         if reserved_development:
             status = "development_is_reserved_holdout"
             trial = store.trial(campaign_id, 0, config, phase="baseline")
@@ -663,6 +692,7 @@ def run_campaign(
                         decision["reason"] = "duplicate_candidate"
                         trial_status = "rejected"
                         continue
+                    store.plan_trial(trial, candidate, edit)
                     seen.add(candidate_digest)
                     reason = stop_reason()
                     if reason:
@@ -831,10 +861,103 @@ def run_campaign(
 
 def _private_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w") as stream:
-        json.dump(value, stream, allow_nan=False)
-        stream.write("\n")
+    if path.is_symlink():
+        raise ValueError("private_json_symlink_refused")
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream, allow_nan=False)
+            stream.write("\n")
+        # A killed writer leaves the previous complete checkpoint available.
+        # Replacing a concurrently introduced symlink replaces only the link.
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _recover_worker_campaign(database: Path, output: Path, expected_head: str) -> dict | None:
+    """Reconcile only this stopped worker's private running checkpoint.
+
+    A terminal output or campaign always wins. Interrupted measurements are
+    uncertain records, never evidence for inventing a provider request.
+    """
+    try:
+        checkpoint = json.loads(output.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(checkpoint, dict):
+        return None
+    campaign_id = checkpoint.get("id")
+    starting = checkpoint.get("starting_known_usd")
+    if (
+        checkpoint.get("status") != "running"
+        or checkpoint.get("git_head") != expected_head
+        or not isinstance(campaign_id, str)
+        or type(starting) not in (int, float)
+        or not math.isfinite(starting)
+        or starting < 0
+        or not database.is_file()
+    ):
+        return None
+    try:
+        if str(uuid.UUID(campaign_id)) != campaign_id:
+            return None
+    except ValueError:
+        return None
+    tracker = Tracker(database)
+    with tracker._db() as db:
+        # The worker has stopped. Serialize the ownership/status check with
+        # updates so a terminal result cannot be overwritten between them.
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT * FROM optimization_campaigns WHERE id=? AND git_head=? AND status='running'",
+            (campaign_id, expected_head),
+        ).fetchone()
+        if row is None:
+            return None
+        spent = max(0.0, tracker.spend()["usd"] - starting)
+        pending = db.execute(
+            "SELECT id,decision_json FROM optimization_trials "
+            "WHERE campaign_id=? AND status='running'",
+            (campaign_id,),
+        ).fetchall()
+        for trial in pending:
+            decision = json.loads(trial["decision_json"])
+            decision.update(
+                accepted=False,
+                reason="worker_interrupted",
+                unobserved_external_attempt_possible=True,
+            )
+            db.execute(
+                "UPDATE optimization_trials SET status='error',report_json=?,decision_json=? "
+                "WHERE id=? AND campaign_id=? AND status='running'",
+                (
+                    _json({"cost_usd": None, "usage_complete": False}),
+                    _json(decision),
+                    trial["id"],
+                    campaign_id,
+                ),
+            )
+        db.execute(
+            "UPDATE optimization_campaigns SET updated_at=?,status='unknown_cost',spent_usd=? "
+            "WHERE id=? AND git_head=? AND status='running'",
+            (_now(), spent, campaign_id, expected_head),
+        )
+        recovered = {
+            "id": campaign_id,
+            "status": "unknown_cost",
+            "git_head": expected_head,
+            "dev_digest": row["dev_digest"],
+            "champion_config": json.loads(row["champion_config_json"]),
+            "champion_report": json.loads(row["champion_report_json"]),
+            "spent_usd": spent,
+            "budget_usd": row["budget_usd"],
+            "max_iterations": row["max_iterations"],
+            "spend_complete": False,
+            "reason": "worker_interrupted",
+        }
+    _private_json(output, recovered)
+    return recovered
 
 
 _OWNED_PROCESSES: dict[subprocess.Popen, float] = {}
@@ -870,6 +993,10 @@ def _cleanup_owned() -> None:
 
 
 def _interrupted(signum, frame) -> None:
+    # A second interrupt must not reenter cleanup or abort the receipt
+    # finalization that runs while this first SystemExit unwinds.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     _cleanup_owned()
     raise SystemExit(128 + signum)
 
@@ -1037,6 +1164,7 @@ def _worker(args, config: Config, tracker: Tracker, git_head: str) -> dict:
         holdout_runner=holdout,
         holdout_digest=holdout_identity if holdout is not None else None,
         finalize=args.finalize,
+        on_start=lambda checkpoint: _private_json(args._out, checkpoint),
     )
 
 
@@ -1177,7 +1305,12 @@ def main(argv=None) -> int:
                         ]
                 _command(command, worktree, env, remaining, shutdown_grace=5)
             finally:
-                _git(checkout, "worktree", "remove", "--force", str(worktree))
+                try:
+                    # _command stops its registered worker group before this
+                    # finally runs, including on timeout, signal or nonzero exit.
+                    _recover_worker_campaign(args.db, output, git_head)
+                finally:
+                    _git(checkout, "worktree", "remove", "--force", str(worktree))
         print(json.dumps(json.loads(output.read_text()), indent=2))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):

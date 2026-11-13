@@ -41,6 +41,8 @@ can exceed a soft cutoff, and missing usage means unknown cost. The loop stops
 new live attempts when cost becomes unknown, including HTTP retries. Existing
 lower team limits still apply. Do not start simultaneous campaigns against one
 shared allowance. Costs incurred on other laptops cannot be measured here.
+Starting another invocation is a separate operator decision; it does not resolve
+unpriced requests retained from an earlier campaign.
 
 The Analyst may change only one of these controls per trial:
 

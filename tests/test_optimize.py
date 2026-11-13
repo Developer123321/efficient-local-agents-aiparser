@@ -242,6 +242,33 @@ def test_unknown_baseline_cost_stops_before_any_proposal(tmp_path):
     assert json.loads(rows(tracker)[0]["report_json"])["cost_usd"] is None
 
 
+def test_validated_candidate_plan_is_durable_before_measurement_error(tmp_path):
+    tracker = Tracker(tmp_path / "state" / "tracking.sqlite")
+    config = Config()
+    config.agent.preload_results = 5
+    edit = ConfigEdit(field="agent.preload_results", value=0, hypothesis="preload_evidence")
+    measured = []
+
+    def runner(candidate, remaining):
+        measured.append(candidate.agent.preload_results)
+        if len(measured) == 1:
+            return report()
+        pending = rows(tracker)[-1]
+        assert pending["status"] == "running"
+        assert json.loads(pending["config_json"])["agent"]["preload_results"] == 0
+        assert json.loads(pending["decision_json"]) == {
+            "phase": "tuning",
+            "accepted": False,
+            **edit.model_dump(),
+        }
+        raise MeasurementUncertain("synthetic_measurement_interrupted", timed_out=False)
+
+    result = campaign(config, tracker, runner, lambda *_: edit, max_iterations=1)
+    assert result["status"] == "unknown_cost" and measured == [5, 0]
+    assert json.loads(rows(tracker)[-1]["config_json"])["agent"]["preload_results"] == 0
+    assert tracker.spend()["calls"] == 0
+
+
 def test_lower_existing_shared_budget_is_preserved_and_stops_next_calls(tmp_path):
     tracker = Tracker(tmp_path / "state" / "tracking.sqlite")
 
@@ -523,6 +550,7 @@ def test_measurement_child_failure_stops_worker_with_uncertainty_without_extra_c
         iterations=3,
         max_usd=0.05,
         max_seconds=60,
+        _out=tmp_path / "state" / "campaign.json",
     )
     monkeypatch.setenv("HACKLAB_OPTIMIZATION_UNKNOWN_BASELINE", "0")
     monkeypatch.delenv("HACKLAB_OPTIMIZATION_DEADLINE", raising=False)
@@ -648,6 +676,7 @@ def test_worker_signal_cleans_registered_nested_groups_before_exiting(monkeypatc
 
     optimize._OWNED_PROCESSES.update({Child(12345): 2, Child(12346): 2})
     monkeypatch.setattr(optimize.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(optimize.signal, "signal", lambda *_: None)
     with pytest.raises(SystemExit) as interrupted:
         optimize._interrupted(signal.SIGTERM, None)
     assert interrupted.value.code == 128 + signal.SIGTERM
@@ -670,6 +699,270 @@ def test_interrupted_baseline_persists_uncertainty_and_reraises(tmp_path):
         assert (
             db.execute("SELECT status FROM optimization_campaigns").fetchone()[0] == "unknown_cost"
         )
+
+
+def test_parent_checkpoint_precedes_first_effect_and_normal_return_is_unchanged(tmp_path):
+    tracker = Tracker(tmp_path / "state" / "tracking.sqlite")
+    checkpoints = []
+
+    def runner(*_):
+        assert len(checkpoints) == 1
+        checkpoint = checkpoints[0]
+        assert checkpoint["status"] == "running" and checkpoint["git_head"] == HEAD
+        assert checkpoint["starting_known_usd"] == 0
+        with tracker._db() as db:
+            assert (
+                db.execute(
+                    "SELECT status FROM optimization_campaigns WHERE id=?", (checkpoint["id"],)
+                ).fetchone()[0]
+                == "running"
+            )
+        return report()
+
+    result = campaign(
+        Config(), tracker, runner, lambda *_: None, max_iterations=0, on_start=checkpoints.append
+    )
+    assert result["status"] == "completed" and result["id"] == checkpoints[0]["id"]
+    assert "starting_known_usd" not in result
+
+
+def test_private_checkpoint_survives_failure_mid_json_write_without_leftover_tempfile(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "private" / "campaign.json"
+    checkpoint = {"id": "synthetic-campaign", "status": "running", "git_head": HEAD}
+    optimize._private_json(output, checkpoint)
+    before = output.read_bytes()
+
+    def incomplete(value, stream, **kwargs):
+        stream.write('{"status":')
+        raise RuntimeError("synthetic_write_failure")
+
+    monkeypatch.setattr(optimize.json, "dump", incomplete)
+    with pytest.raises(RuntimeError, match="synthetic_write_failure"):
+        optimize._private_json(output, {"status": "completed"})
+    assert output.read_bytes() == before
+    assert json.loads(output.read_text()) == checkpoint
+    assert list(output.parent.iterdir()) == [output]
+    assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_private_checkpoint_never_writes_through_a_symlink(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text("synthetic_original_target")
+    output = tmp_path / "linked.json"
+    output.symlink_to(target)
+    with pytest.raises(ValueError, match="private_json_symlink_refused"):
+        optimize._private_json(output, {"status": "running"})
+    assert target.read_text() == "synthetic_original_target" and output.is_symlink()
+
+
+def recovery_state(tmp_path, phase="baseline"):
+    tracker = Tracker(tmp_path / "state" / "tracking.sqlite")
+    store = optimize.CampaignStore(tracker)
+    identifier = store.create(HEAD, DIGEST, 0.05, 3, Config())
+    other = store.create(HEAD, DIGEST, 0.05, 3, Config())
+    completed = store.trial(identifier, 0, Config(), phase="baseline")
+    store.finish_trial(
+        completed,
+        Config(),
+        optimize.safe_report(report()),
+        "baseline",
+        {"reason": "measured_baseline"},
+    )
+    pending = store.trial(identifier, 1, Config(), phase=phase)
+    store.trial(other, 0, Config(), phase="baseline")
+    if phase == "holdout":
+        assert store.claim_holdout("d" * 64, identifier)
+    output = tmp_path / "state" / "campaign.json"
+    checkpoint = {"id": identifier, "status": "running", "git_head": HEAD, "starting_known_usd": 0}
+    optimize._private_json(output, checkpoint)
+    return tracker, store, identifier, other, completed, pending, output, checkpoint
+
+
+@pytest.mark.parametrize("phase", ["baseline", "tuning", "holdout"])
+def test_parent_recovers_only_owned_pending_trials_with_actual_spend_and_no_new_calls(
+    tmp_path, phase
+):
+    tracker, store, identifier, other, completed, pending, output, checkpoint = recovery_state(
+        tmp_path, phase
+    )
+    run_id = tracker.start_run("synthetic-receipts", {}, mode="openai")
+    tracker.record_call(run_id, "openai", "test-model", 10000, 0, 1, "ok", 1, 1)
+    checkpoint["starting_known_usd"] = tracker.spend()["usd"]
+    optimize._private_json(output, checkpoint)
+    tracker.record_call(run_id, "openai", "test-model", 1000, 0, 1, "ok", 1, 1)
+    tracker.record_call(run_id, "openai", "test-model", None, None, 1, "transport_error", 1, 1)
+    before = tracker.calls(run_id)
+    result = optimize._recover_worker_campaign(tracker.path, output, HEAD)
+    assert result["status"] == "unknown_cost" and result["spend_complete"] is False
+    assert result["spent_usd"] == pytest.approx(0.001)
+    assert json.loads(output.read_text()) == result
+    assert tracker.calls(run_id) == before
+    with tracker._db() as db:
+        campaigns = {
+            row["id"]: dict(row) for row in db.execute("SELECT * FROM optimization_campaigns")
+        }
+        trials = {row["id"]: dict(row) for row in db.execute("SELECT * FROM optimization_trials")}
+    assert campaigns[identifier]["status"] == "unknown_cost"
+    assert campaigns[identifier]["spent_usd"] == pytest.approx(0.001)
+    assert campaigns[other]["status"] == "running"
+    assert trials[completed]["status"] == "baseline"
+    assert trials[pending]["status"] == "error"
+    assert json.loads(trials[pending]["report_json"]) == {"cost_usd": None, "usage_complete": False}
+    assert json.loads(trials[pending]["decision_json"]) == {
+        "phase": phase,
+        "accepted": False,
+        "reason": "worker_interrupted",
+        "unobserved_external_attempt_possible": True,
+    }
+    if phase == "holdout":
+        assert store.is_reserved_holdout("d" * 64)
+    assert optimize._recover_worker_campaign(tracker.path, output, HEAD) is None
+
+
+def test_parent_recovery_retains_durable_candidate_and_typed_plan(tmp_path):
+    tracker, store, _, _, _, pending, output, _ = recovery_state(tmp_path, "tuning")
+    config = Config()
+    config.agent.preload_results = 5
+    edit = ConfigEdit(field="agent.preload_results", value=0, hypothesis="preload_evidence")
+    candidate = apply_edit(config, edit)
+    store.plan_trial(pending, candidate, edit)
+    before = next(row for row in rows(tracker) if row["id"] == pending)
+    assert json.loads(before["config_json"])["agent"]["preload_results"] == 0
+    assert optimize._recover_worker_campaign(tracker.path, output, HEAD)["status"] == "unknown_cost"
+    after = next(row for row in rows(tracker) if row["id"] == pending)
+    assert after["config_json"] == before["config_json"] and after["status"] == "error"
+    assert json.loads(after["decision_json"]) == {
+        "phase": "tuning",
+        **edit.model_dump(),
+        "accepted": False,
+        "reason": "worker_interrupted",
+        "unobserved_external_attempt_possible": True,
+    }
+    assert tracker.spend()["calls"] == 0
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "unknown_id",
+        "snapshot_head",
+        "database_head",
+        "terminal_output",
+        "terminal_campaign",
+        "bad_json",
+        "non_object",
+        "missing_fields",
+        "invalid_start",
+        "boolean_start",
+    ],
+)
+def test_parent_recovery_rejects_nonowned_or_terminal_or_malformed_checkpoint(tmp_path, mismatch):
+    tracker, store, identifier, _, _, _, output, checkpoint = recovery_state(tmp_path)
+    if mismatch == "unknown_id":
+        checkpoint["id"] = "00000000-0000-0000-0000-000000000000"
+    elif mismatch == "snapshot_head":
+        checkpoint["git_head"] = "c" * 40
+    elif mismatch == "database_head":
+        with tracker._db() as db:
+            db.execute(
+                "UPDATE optimization_campaigns SET git_head=? WHERE id=?", ("c" * 40, identifier)
+            )
+    elif mismatch == "terminal_output":
+        checkpoint["status"] = "completed"
+    elif mismatch == "terminal_campaign":
+        store.update(identifier, Config(), safe_report(report()), "completed", 0)
+    elif mismatch == "non_object":
+        checkpoint = []
+    elif mismatch == "missing_fields":
+        checkpoint = {"status": "running"}
+    elif mismatch == "invalid_start":
+        checkpoint["starting_known_usd"] = -1
+    elif mismatch == "boolean_start":
+        checkpoint["starting_known_usd"] = False
+    optimize._private_json(output, checkpoint)
+    if mismatch == "bad_json":
+        output.write_text("{bad JSON")
+    original_output = output.read_bytes()
+    with tracker._db() as db:
+        original_campaigns = [
+            dict(row) for row in db.execute("SELECT * FROM optimization_campaigns")
+        ]
+    original_trials = rows(tracker)
+    assert optimize._recover_worker_campaign(tracker.path, output, HEAD) is None
+    assert output.read_bytes() == original_output and rows(tracker) == original_trials
+    with tracker._db() as db:
+        assert [
+            dict(row) for row in db.execute("SELECT * FROM optimization_campaigns")
+        ] == original_campaigns
+    assert tracker.spend()["calls"] == 0
+
+
+def test_cli_parent_finally_recovers_worker_exit_143_after_it_stops(tmp_path, monkeypatch, capsys):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    config = checkout / "config.toml"
+    config.write_text("")
+    tracker = Tracker(tmp_path / "state" / "tracking.sqlite")
+    records = {}
+
+    def git(repo, *arguments):
+        if arguments == ("rev-parse", "--show-toplevel"):
+            return str(checkout)
+        if arguments == ("rev-parse", "HEAD"):
+            return HEAD
+        if arguments[:3] == ("worktree", "add", "--detach"):
+            optimize.Path(arguments[3]).mkdir()
+        if arguments[:2] == ("worktree", "remove"):
+            with tracker._db() as db:
+                assert (
+                    db.execute(
+                        "SELECT status FROM optimization_campaigns WHERE id=?", (records["id"],)
+                    ).fetchone()[0]
+                    == "unknown_cost"
+                )
+        return ""
+
+    def command(argv, *_args, **_kwargs):
+        if argv[:2] == ["bash", "scripts/check"]:
+            return
+        store = optimize.CampaignStore(tracker)
+        identifier = store.create(HEAD, DIGEST, 0.05, 3, Config())
+        records["id"] = identifier
+        store.trial(identifier, 0, Config(), phase="baseline")
+        output = optimize.Path(argv[argv.index("--_out") + 1])
+        optimize._private_json(
+            output,
+            {"id": identifier, "status": "running", "git_head": HEAD, "starting_known_usd": 0},
+        )
+        run_id = tracker.start_run("interrupted", {}, mode="openai")
+        tracker.record_call(run_id, "openai", "test-model", None, None, 1, "transport_error", 1, 1)
+        # A stopped worker can exit 143 without committing its own finally.
+        raise RuntimeError("owned_child_failed 143")
+
+    monkeypatch.setattr(optimize, "_git", git)
+    monkeypatch.setattr(optimize, "_command", command)
+    assert (
+        optimize.main(
+            [
+                "--config",
+                str(config),
+                "--dataset",
+                str(tmp_path / "dev.jsonl"),
+                "--root",
+                str(tmp_path / "docs"),
+                "--state",
+                str(tmp_path / "state"),
+                "--db",
+                str(tracker.path),
+            ]
+        )
+        == 1
+    )
+    assert "optimizer_setup_or_child_failed" in capsys.readouterr().out
+    assert rows(tracker)[0]["status"] == "error"
+    assert tracker.spend()["calls"] == 1 and tracker.spend()["unknown_cost_calls"] == 1
 
 
 @pytest.mark.parametrize("precheck_failure", [False, True])

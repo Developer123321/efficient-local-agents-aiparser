@@ -285,7 +285,7 @@ try {
     truncated: boolean;
     documentResponseBytes: number;
     visualNodeCompactionRatio: number;
-    wireToSourceRatio: number;
+    responseBodyToSourceRatio: number;
     interpretation: string;
   } | null = null;
   const measurements = [];
@@ -343,9 +343,9 @@ try {
         documentResponseBytes: cold.bytes,
         visualNodeCompactionRatio:
           document.metrics.blocks / document.nodes.length,
-        wireToSourceRatio: cold.bytes / sourceBytes,
+        responseBodyToSourceRatio: cold.bytes / sourceBytes,
         interpretation:
-          "Repeated visual nodes are grouped; wire bytes include every timestamp and position. This is not a byte-compression or model-quality result.",
+          "Repeated visual nodes are grouped; decoded response-body bytes include every timestamp and position. HTTP headers, transport overhead and compression are not measured. This is not a byte-compression or model-quality result.",
       };
     }
     for (let warmup = 0; warmup < 10; warmup++) await request(endpoint);
