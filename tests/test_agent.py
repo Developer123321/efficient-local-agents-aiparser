@@ -867,3 +867,17 @@ def test_development_trace_is_private_and_off_by_default(lab, monkeypatch, tmp_p
     text = trace.read_text()
     assert stat.S_IMODE(trace.stat().st_mode) == 0o600
     assert "===== system" in text and "===== model step 1" in text and "-- r1 = these 2" in text
+
+
+def test_two_fruitless_calls_in_a_row_bring_a_nudge_to_finish(lab, monkeypatch):
+    root, tracker = lab
+    task = audit(root)
+    misses = [tool("search", query=f"nothing{i}") for i in range(3)]
+    config, calls = live(monkeypatch, [UPLOADS_AFTER, *misses, final("", status="abstain")])
+    _, answer = agent.run_task(task, root, config, tracker)
+    nudge = "the last two calls found nothing new: answer with final now"
+    shown = [call["messages"][-1]["content"] for call in calls[1:]]
+    # A call that yields a list is progress; one miss alone is not yet a pattern.
+    assert nudge not in shown[0] and nudge not in shown[1]
+    assert nudge in shown[2] and nudge in shown[3]
+    assert answer.status == "abstain"

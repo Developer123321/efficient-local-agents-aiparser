@@ -2,6 +2,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 uv sync --locked
-ruff format --check src tests
-ruff check src tests
+ruff format --check src tests examples
+ruff check src tests examples
 uv run --locked pytest -q

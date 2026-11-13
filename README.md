@@ -63,7 +63,9 @@ assistants build the agent; at run time only the provided models decide.
 
 - **Code-first solving.** [Playbooks](src/hacklab/playbooks.py) answer a
   recognised task type without a model call. The
-  [rehearsal playbooks](src/hacklab/practice.py) show the pattern.
+  [rehearsal playbooks](src/hacklab/practice.py) show the pattern;
+  [examples/](examples) holds the templates to copy on the day, one for
+  playbooks and one for plugging the harness into the starter kit.
 - **Forensic tools** for the model and for playbooks: layered decoding with
   chunk reassembly, indicator extraction, log tables with filters and
   grouping, "what did each actor do after its trigger event", propagation

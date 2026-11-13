@@ -8,8 +8,8 @@ against a real model; only this file was edited after them.
 
 | Check | Observed result |
 | --- | --- |
-| `project-check fast` (`scripts/check`: Ruff format and lint, `pytest`) | Passed; **238 tests** on Python 3.15.0, one skipped there (the real embedder needs ONNX Runtime, which has no CPython 3.15 wheel) |
-| The same tests on other interpreters | 238 passed and one skipped on Python 3.15.2, 3.13.18 and 3.11.18 inside the guest; with the `embeddings` extra on 3.13.18 outside the guest all 239 passed, including the real EmbeddingGemma test |
+| `project-check fast` (`scripts/check`: Ruff format and lint, `pytest`) | Passed; **241 tests** on Python 3.15.0, one skipped there (the real embedder needs ONNX Runtime, which has no CPython 3.15 wheel) |
+| The same tests on other interpreters | 241 passed and one skipped on Python 3.15.2, 3.13.18 and 3.11.18 inside the guest; with the `embeddings` extra on 3.13.18 outside the guest all 242 passed, including the real EmbeddingGemma test |
 | `nix fmt -- --ci` | All Nix source formatted |
 | `nix flake check` | All outputs evaluated; `vm-contract` (now also: rootless Podman on, Docker daemon off) and `host-contract` built and passed |
 | `bash scripts/vm-smoke` | Passed: guest with Bob Shell booted under KVM on a disposable disk and ran `scripts/guest-check` over its console, including the container test |
@@ -70,7 +70,8 @@ With a temporary OpenRouter key and a TypeSafe key, both kept in the ignored
   final judge. Results, costs and what the traces changed are in
   [docs/benchmarks.md](docs/benchmarks.md#what-a-real-small-model-did-13-november-2026):
   18 of 27 incident tasks and 8 of 8 document tasks with reasoning low.
-  About 0.03 USD of OpenRouter credit was used in total.
+  Reasoning high, a visible thought and schema-enforced replies were
+  measured on two seeds each and brought no gain.
 - EmbeddingGemma (official ONNX export, 8-bit) loaded in 1.7 s on CPU,
   reproduced the model card's similarity ranking and ranked three paraphrased
   questions onto the right runbook lines. On the document fixtures it changed
@@ -84,8 +85,7 @@ not significance.
 - **The event's model.** Granite 4.2 8B is a guess at its kind. Prompts, tool
   list, guards and defaults were tuned on this one stand-in and three seeds
   of a scenario written here; they may fit another model or the real data
-  worse. `reasoning high`, `thought_chars`, `response_format = "json_schema"`,
-  temperature 0 and Jev's passage filter were not measured.
+  worse. Jev's passage filter and a temperature above 0 were not measured.
 - **The organizers' side.** The starter kit, its tools, the task and answer
   format, the container's run contract, how the model is reached inside the
   container, prices, score normalisation, rate limits and the platform's

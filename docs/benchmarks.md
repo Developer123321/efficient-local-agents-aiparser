@@ -85,12 +85,18 @@ treat differences of one task as noise.
 | First harness, reasoning off, seed 7 | 4 of 9 | 55 | 176,000 | $0.0109 |
 | Final harness, reasoning off, seed 7 | 6 of 9 | 52 | 121,000 | $0.0077 |
 | Final harness, reasoning off, seed 8 | 5 of 9 | 56 | 156,000 | $0.0100 |
-| Final harness, reasoning low, seed 7 | 7 of 9 | 35 | 66,000 | $0.0050 |
-| Final harness, reasoning low, seed 8 | 6 of 9 | 35 | 64,000 | $0.0045 |
-| Final harness, reasoning low, seed 9 | 5 of 9 | 34 | 71,000 | $0.0049 |
-| Same plus Jev as final judge, seed 7 | 6 of 9 | 44 | 78,000 | $0.0056 |
-| Same plus Jev as final judge, seed 9 | 5 of 9 | 42 | 87,000 | $0.0062 |
+| Final harness, reasoning low, seed 7 | 7 of 9 | 32 | 58,000 | $0.0045 |
+| Final harness, reasoning low, seed 8 | 6 of 9 | 31 | 54,000 | $0.0039 |
+| Final harness, reasoning low, seed 9 | 5 of 9 | 28 | 50,000 | $0.0035 |
+| Reasoning high, seeds 7 and 8 | 6 and 5 of 9 | 43, 47 | 137,000, 155,000 | $0.0215, $0.0180 |
+| Reasoning low with `response_format = "json_schema"`, seeds 7 and 8 | 7 and 6 of 9 | 32, 33 | 57,000, 59,000 | $0.0041, $0.0042 |
+| Reasoning off with `thought_chars = 300`, seeds 7 and 8 | 5 and 5 of 9 | 49, 48 | 148,000, 148,000 | $0.0095, $0.0095 |
+| Reasoning low plus Jev as final judge, seed 7 (before the fruitless-call brake) | 6 of 9 | 44 | 78,000 | $0.0056 |
+| Reasoning low plus Jev as final judge, seed 9 (before the fruitless-call brake) | 5 of 9 | 42 | 87,000 | $0.0062 |
 | Playbooks, any seed | 9 of 9 | 0 | 0 | $0 |
+
+The rows marked "reasoning off" were measured before the fruitless-call brake
+described below; it saves calls on tasks that end in an abstention.
 
 The eight document fixtures: 8 of 8 in 10 calls for $0.0007.
 
@@ -114,7 +120,15 @@ What the traces showed, and what was changed because of it:
   sometimes abstained before using any tool. A step countdown and one
   question back on an abstention without investigation address both.
 - Low reasoning effort used fewer calls, cost less than half and was at least
-  as accurate as reasoning off. High effort was not measured.
+  as accurate as reasoning off. High effort was no more accurate and cost
+  four to five times as much: it thinks for tens of thousands of output
+  tokens. A visible `thought` with reasoning off was worse than low
+  reasoning on both counts. Asking the endpoint to enforce the JSON schema
+  changed neither accuracy nor cost.
+- The task whose honest answer is an abstention was the most expensive one:
+  the model searched until the step limit. After two calls in a row that
+  show no new row, list or number, the observation now tells it to finish.
+  Accuracy stayed the same on all three seeds and cost fell by 10 to 29 %.
 - Jev as judge of the finished answer was harmful when it saw only the quoted
   rows (2 of 9: it rejected correct answers). Given the tool results as
   state it rated correct answers 0.8 to 0.98 and most wrong ones below 0.7.

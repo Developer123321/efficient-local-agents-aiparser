@@ -454,6 +454,7 @@ def _investigate(
     ]
     history: list[tuple[dict[str, str], dict[str, str]]] = []
     repairs = 0
+    fruitless = 0
     allowance = config.limits.max_observation_chars
     trace = _Trace(task.id)
     trace.add("system", base[0]["content"])
@@ -531,11 +532,21 @@ def _investigate(
                 )
             )
             continue
+        known = (len(toolbox.ledger), len(toolbox.results), len(toolbox.numbers))
         observation = toolbox.execute(decision.action, decision.arguments)
+        # A call that shows no new row, list or number has taught the model nothing.
+        new = (len(toolbox.ledger), len(toolbox.results), len(toolbox.numbers)) != known
+        fruitless = 0 if new else fruitless + 1
         left = config.limits.max_steps - step - 1
         shown = observation.text(allowance) + (
             f"\n-- {left} steps left" if left > 1 else "\n-- last step: reply with final now"
         )
+        if fruitless >= 2 and left > 1:
+            # Searching on costs a full prompt per step; an honest abstention is cheaper.
+            shown += (
+                "\n-- the last two calls found nothing new: answer with final now, "
+                'with status "abstain" if the evidence does not say'
+            )
         trace.add("observation", shown)
         tracker.event(
             run_id,

@@ -5,11 +5,11 @@ setup:
     uv sync --locked
 
 fmt:
-    ruff format src tests
-    ruff check --fix src tests
+    ruff format src tests examples
+    ruff check --fix src tests examples
 
 fmt-check:
-    ruff format --check src tests
+    ruff format --check src tests examples
 
 check:
     bash scripts/check

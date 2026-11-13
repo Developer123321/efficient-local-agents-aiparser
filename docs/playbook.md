@@ -51,8 +51,9 @@ The first goal is one valid submission, not a good one.
    in `[model]` until the probe is green; note the token usage it reports.
 3. Decide the integration direction. Either the kit calls
    `hacklab.agent.run_task` for each task with its tools wrapped as
-   `ToolSpec`s, or `hacklab submit` reads the kit's task files. Prefer the
-   one with less glue.
+   `ToolSpec`s ([examples/kit_adapter.py](../examples/kit_adapter.py) is the
+   template, with three places to fill in), or `hacklab submit` reads the
+   kit's task files. Prefer the one with less glue.
 4. Run the kit's own example end to end and make one platform submission of
    the unmodified or minimally adapted agent. This tests the container path
    while a failure is still cheap.
@@ -86,7 +87,9 @@ Levers, in the order they usually pay off:
 
 1. **A playbook per task type.** If code can compute the answer from the
    data, write the solver and register it. It costs no tokens and is immune
-   to injected text. Check it on the hold-out file.
+   to injected text. Start from
+   [examples/event_playbooks.py](../examples/event_playbooks.py) and check
+   every solver on the hold-out file.
 2. **Fewer calls.** Raise `preload_results`, set `preload_documents_under`,
    lower `max_steps`. Look at calls per task in `hacklab failures`.
 3. **Smaller prompts.** Remove unused tools from `[agent] tools`; lower
