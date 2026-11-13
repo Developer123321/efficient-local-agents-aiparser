@@ -98,7 +98,10 @@ def test_structured_logs_become_filterable_tables(box):
     )
     assert count[0] == "value=4 operation=count matched_rows=4"
     groups = lines(box, "table", document="audit.jsonl", operation="group", column="actor")
-    assert groups[0].startswith("agent-1 count=3 first=[e") and groups[-1].startswith("-- ")
+    assert groups[:3] == ["agent-1 count=3", "agent-2 count=2", "agent-3 count=1"]
+    assert groups[3:] == ["-- r1 = these 3 values", "-- matched_rows=6"]
+    assert box.result("r1").values == ("agent-1", "agent-2", "agent-3")
+    assert len(box.result("R1").evidence) == 3 and box.result("r9") is None
     board = lines(box, "table", document="board.json", where={"to": "agent-3"})
     assert "[e" in board[0] and "board.json messages:2 |" in board[0]
 
@@ -172,7 +175,8 @@ def test_graph_reach_origins_and_path_over_a_message_log(box):
     assert reached[0] == "-- reached=3 from=agent-1"
     assert reached[1].startswith("agent-2 at=2026-11-14T01:05:00+00:00 via=[e")
     # agent-3 wrote to agent-4 before anything reached agent-3: not part of the spread.
-    assert [line.split()[0] for line in reached[1:]] == ["agent-2", "all", "agent-3"]
+    assert [line.split()[0] for line in reached[1:4]] == ["agent-2", "all", "agent-3"]
+    assert reached[4] == "-- r1 = these 3 values" and box.result("r1").values[0] == "agent-2"
     origins = lines(
         box,
         "graph",
@@ -208,7 +212,8 @@ def test_phases_summarise_a_command_log(box):
 
 def test_tool_list_is_one_line_per_tool_and_follows_the_configuration(box):
     described = box.describe().splitlines()
-    assert len(described) == 8 and described[0].startswith("search(query, limit=5)")
+    assert len(described) == 9 and described[0].startswith("search(query, limit=5)")
+    assert described[3].startswith("after(document, key, first")
     config = Config()
     config.agent.tools = ["read", "nonexistent"]
     spec = ToolSpec("ping", "ping(host): reachability", lambda host: {"up": True})
@@ -274,3 +279,137 @@ def test_slightly_wrong_document_tool_arguments_are_repaired_not_refused(box):
     )
     assert rows[0].startswith("value=2 ")
     assert box.execute("read", {"document": "audit.jsonl", "limit": "many"}).error
+
+
+def test_after_selects_what_each_actor_did_from_its_trigger_event_on(box):
+    rows = lines(
+        box,
+        "after",
+        document="audit.jsonl",
+        key="actor",
+        first={"action": "exec_payload"},
+        where={"action__ne": "exec_payload"},
+    )
+    # agent-1's login came before its trigger; agent-3 never had one.
+    assert [line.split(" | ")[1].split()[2] for line in rows[:2]] == [
+        "action=read_secret",
+        "action=download_model",
+    ]
+    assert rows[2:] == ["-- matched_rows=2", "-- 2 actor values had a trigger row"]
+    targets = lines(
+        box,
+        "after",
+        document="audit.jsonl",
+        key="actor",
+        first={"action": "exec_payload"},
+        where={"action": ["read_secret", "download_model"]},
+        operation="distinct",
+        column="target",
+    )
+    assert targets[:2] == ["models/hub/base count=1", "secret/ci count=1"]
+    assert box.result("r1").values == ("models/hub/base", "secret/ci")
+    count = lines(
+        box,
+        "after",
+        document="audit.jsonl",
+        key="actor",
+        first={"action": "exec_payload"},
+        where={"action": "read_secret"},
+        operation="count",
+    )
+    assert count[0] == "value=1 operation=count matched_rows=1"
+    for broken in (
+        {"key": "nobody", "first": {"action": "login"}},
+        {"key": "actor"},
+        {"key": "actor", "first": {"action": "login"}, "operation": "distinct"},
+    ):
+        assert box.execute("after", {"document": "audit.jsonl", **broken}).error
+    assert box.execute(
+        "after", {"document": "cmds.csv", "key": "agent", "first": {"cmd": "whoami"}, "time": "x"}
+    ).error
+
+
+def test_filters_accept_the_shapes_models_write(box):
+    def count(where):
+        return lines(box, "table", document="audit.jsonl", operation="count", where=where)[0]
+
+    assert count({"actor": ["agent-1", "agent-3"]}).startswith("value=4 ")
+    assert count({"actor": {"$in": ["agent-2"]}}).startswith("value=2 ")
+    assert count({"actor": {"in": ["agent-2"]}, "action": {"ne": "exec_payload"}}).startswith(
+        "value=1 "
+    )
+    assert count({"actor": "agent-*", "action": "*secret"}).startswith("value=1 ")
+    assert count({"target": "*hub*"}).startswith("value=3 ")
+    assert count({"meta.ip__outside": "10.0.0.0/8"}).startswith("value=1 ")
+    assert count({"meta.ip__within": "10.0.0.0/30"}).startswith("value=5 ")
+    # One underscore too few, or another dialect's operator name.
+    assert count({"meta.ip_outside": "10.0.0.0/8"}).startswith("value=1 ")
+    assert count({"action__startswith": "exec", "actor__not_in": ["agent-1"]}).startswith(
+        "value=1 "
+    )
+    assert count('{"action": "login"}').startswith("value=2 ")
+    assert box.execute("table", {"document": "audit.jsonl", "where": {"actor": {"$near": 1}}}).error
+    assert box.execute("table", {"document": "audit.jsonl", "where": "not json"}).error
+    wrong = box.execute("table", {"document": "audit.jsonl", "limit": "many"})
+    assert wrong.error == (
+        "Invalid arguments (limit); table takes: document, operation, column, where, limit"
+    )
+
+
+def test_rows_come_in_time_order_and_long_lists_are_previewed_not_dumped(tmp_path):
+    lines_out = ['{"ts":"2026-11-14T03:00:00Z","actor":"late","n":0}']
+    lines_out += [
+        f'{{"ts":"2026-11-14T01:{i:02d}:00Z","actor":"a{i:02d}","n":{i}}}' for i in range(40)
+    ]
+    (tmp_path / "log.jsonl").write_text("\n".join(lines_out) + "\n")
+    config = Config()
+    box = Toolbox(ToolRegistry(tmp_path, ["log.jsonl"]), Ledger(config.guard), config)
+    first = lines(box, "table", document="log.jsonl", limit=1)
+    assert "actor=a00" in first[0] and "log.jsonl line:2" in first[0]
+    listed = lines(box, "table", document="log.jsonl", operation="distinct", column="actor")
+    assert len(listed) == 12 + 3 and listed[12] == "… 29 more values, all kept in r1"
+    assert listed[13] == "-- r1 = these 41 values"
+    result = box.result("r1")
+    assert len(result.values) == 41 and len(result.evidence) == 30
+    # Every value of a computed list counts as grounded, also the unprinted ones.
+    assert box.ledger.grounded("a39") and not box.ledger.grounded("a77")
+
+
+def test_tables_are_described_by_their_short_values_and_search_points_to_the_filter(box):
+    described = box.describe_table("audit.jsonl")
+    assert described[0] == "    ts: 2026-11-14T01:00:00Z to 2026-11-14T01:30:00Z"
+    assert described[1] == "    actor: agent-1 3, agent-2 2, agent-3 1"
+    assert described[2].startswith("    action: exec_payload 2, login 2, download_model 1")
+    # Blobs and free text are counted, not printed.
+    board = box.describe_table("board.json")
+    assert any(line.startswith("    payload: ") and "distinct values" in line for line in board)
+    found = lines(box, "search", query="who ran exec_payload first")
+    assert found[-1] == (
+        "-- search shows a sample. audit.jsonl has 2 rows with action=exec_payload: "
+        'table(document="audit.jsonl", where={"action":"exec_payload"}) lists all of them '
+        "in time order"
+    )
+    assert not any("sample" in line for line in lines(box, "search", query="nothing special"))
+
+
+def test_decode_given_several_chunk_rows_decodes_their_whole_series(box):
+    chunks = lines(box, "table", document="board.json", where={"channel": "ops-5"}, limit=2)
+    ids = ",".join(line[1 : line.index("]")] for line in chunks[:2])
+    decoded = lines(box, "decode", evidence=ids)
+    assert len(decoded) == 1 and f"decoded via base64>xor>gzip: {COMMAND}" in decoded[0]
+    payload = box.ledger.get(ids.split(",")[1]).quote
+    part = json.loads(payload)["payload"]
+    again = lines(box, "decode", text=part)
+    assert again[0] == "one chunk of channel ops-5 in board.json; whole series:"
+    assert COMMAND in again[1]
+
+
+def test_tool_results_are_logged_in_brief_for_a_reviewer(box):
+    lines(box, "table", document="audit.jsonl", operation="count", where={"action": "login"})
+    box.execute(
+        "table", {"document": "audit.jsonl", "operation": "count", "where": {"action": "login"}}
+    )
+    box.execute("table", {"document": "missing.jsonl"})
+    assert len(box.log) == 1 and box.used
+    assert box.log[0].startswith('table({"document": "audit.jsonl", "operation": "count"')
+    assert "-> value=2 operation=count" in box.log[0]

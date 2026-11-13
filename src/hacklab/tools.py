@@ -24,7 +24,15 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError
 
-from hacklab.forensics.events import count_by, flatten, matches, where_column
+from hacklab.forensics.events import (
+    count_by,
+    flatten,
+    matches,
+    normalize_where,
+    parse_timestamp,
+    time_field,
+    where_column,
+)
 from hacklab.models import Citation, StrictModel
 
 # Incident logs run to tens of thousands of rows; the limits bound memory, not ambition.
@@ -75,13 +83,13 @@ class ToolError(ValueError):
 
 class SearchArgs(StrictModel):
     query: str = Field(min_length=1, max_length=500)
-    limit: int = Field(default=5, ge=1, le=20, strict=True)
+    limit: int = Field(default=5, ge=1, le=100, strict=True)
 
 
 class ReadArgs(StrictModel):
     document: str = Field(min_length=1, max_length=1000)
     start: int = Field(default=1, ge=1, le=MAX_UNITS, strict=True)
-    limit: int = Field(default=80, ge=1, le=100, strict=True)
+    limit: int = Field(default=30, ge=1, le=100, strict=True)
 
 
 class CalculateArgs(StrictModel):
@@ -92,9 +100,10 @@ class TableArgs(StrictModel):
     document: str = Field(min_length=1, max_length=1000)
     operation: Literal["rows", "count", "sum", "min", "max", "mean", "group", "distinct"] = "rows"
     column: str | None = Field(default=None, max_length=200)
-    # {"col": "v"} tests equality; {"col__gt": 5} uses an operator, see events.matches.
-    where: dict[str, str | int | float | bool | None | list[str | int | float]] | None = None
-    limit: int = Field(default=30, ge=1, le=100, strict=True)
+    # {"col": "v"} tests equality; {"col__gt": 5} uses an operator. The shapes
+    # models write instead are accepted, see events.normalize_where.
+    where: dict[str, Any] | str | None = None
+    limit: int = Field(default=12, ge=1, le=100, strict=True)
 
 
 @dataclass
@@ -110,6 +119,9 @@ class Document:
     units: list[Unit]
     digest: str
     columns: list[str] = field(default_factory=list)
+    # Filled on first use for tables: rows in time order, and what each column holds.
+    ordered: list[Unit] | None = None
+    profile: dict[str, dict[str, Any]] | None = None
 
 
 def _terms(text: str) -> list[str]:
@@ -356,12 +368,58 @@ class ToolRegistry:
             listing.append(entry)
         return listing
 
+    def _ordered(self, loaded: Document) -> list[Unit]:
+        """Table rows in time order when the table has a time column, else in file order."""
+        if loaded.ordered is None:
+            rows = [unit for unit in loaded.units if unit.values is not None]
+            column = time_field(loaded.columns)
+            if column is not None:
+                moments = [parse_timestamp(unit.values.get(column)) for unit in rows]
+                if all(moment is not None for moment in moments):
+                    order = sorted(range(len(rows)), key=lambda index: (moments[index], index))
+                    rows = [rows[index] for index in order]
+            loaded.ordered = rows
+        return loaded.ordered
+
+    def profile(self, document: str) -> dict[str, dict[str, Any]]:
+        """Per column of a table: how many distinct values, the frequent ones, a time range.
+
+        This is the map a reader needs before filtering: which actions exist,
+        how many actors there are, what period the log covers.
+        """
+        loaded = self._load(document)
+        if loaded.profile is None:
+            profile: dict[str, dict[str, Any]] = {}
+            moment_column = time_field(loaded.columns)
+            for column in loaded.columns[:MAX_COLUMNS]:
+                counts = Counter(
+                    "" if unit.values.get(column) is None else str(unit.values[column])
+                    for unit in self._ordered(loaded)
+                )
+                entry: dict[str, Any] = {"distinct": len(counts)}
+                if column == moment_column and counts:
+                    ordered = self._ordered(loaded)
+                    entry["range"] = (
+                        str(ordered[0].values.get(column)),
+                        str(ordered[-1].values.get(column)),
+                    )
+                elif len(counts) <= 40:
+                    entry["values"] = dict(
+                        sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+                    )
+                profile[column] = entry
+            loaded.profile = profile
+        return loaded.profile
+
     def rows(self, document: str, where: dict[str, Any] | None = None) -> list[Unit]:
-        """Structured units of a table or log that satisfy `where`."""
+        """Structured units of a table or log that satisfy `where`, in time order."""
         loaded = self._load(document)
         if not loaded.columns:
             raise ToolError("Table requires a CSV, JSONL, JSON-array or XLSX document")
-        where = where or {}
+        try:
+            where = normalize_where(where, loaded.columns)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
         if len(where) > 20:
             raise ToolError("Filter has more than 20 conditions")
         unknown = sorted({where_column(key) for key in where} - set(loaded.columns))
@@ -369,9 +427,7 @@ class ToolRegistry:
             raise ToolError(
                 f"Unknown column {unknown[0][:60]!r}; columns: {', '.join(loaded.columns[:40])}"
             )
-        return [
-            unit for unit in loaded.units if unit.values is not None and matches(unit.values, where)
-        ]
+        return [unit for unit in self._ordered(loaded) if matches(unit.values, where)]
 
     def units(self, document: str) -> list[Unit]:
         return self._load(document).units
@@ -388,8 +444,14 @@ class ToolRegistry:
                 raise ToolError("Unknown tool; available tools: search, read, calculate, table")
             parsed = self._arguments[name].model_validate(arguments)
             return getattr(self, "_" + name)(**parsed.model_dump())
-        except ValidationError:
-            return {"error": "Invalid arguments; use the tool's declared argument schema"}
+        except ValidationError as exc:
+            # Field names only: values may be document text or secrets.
+            wrong = sorted({str(error["loc"][0]) for error in exc.errors() if error["loc"]})
+            allowed = ", ".join(self._arguments[name].model_fields)
+            return {
+                "error": f"Invalid arguments ({', '.join(wrong) or 'shape'}); "
+                f"{name} takes: {allowed}"
+            }
         except ToolError as exc:
             return {"error": str(exc)}
         except (

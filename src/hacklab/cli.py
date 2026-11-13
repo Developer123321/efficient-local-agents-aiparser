@@ -56,6 +56,10 @@ def doctor(config: Config) -> dict:
         "jev_enabled": config.jev.enabled,
         "jev_key_present": bool(read_secret(config.jev.api_key_env)),
         "cache_mode": config.cache.mode,
+        "embedding": {
+            "enabled": config.embedding.enabled,
+            "model_present": (Path(config.embedding.model_dir) / "tokenizer.json").is_file(),
+        },
         "playbooks": config.agent.playbooks or None,
         "guards": {
             "injection": config.guard.injection,
@@ -196,6 +200,10 @@ def parser() -> argparse.ArgumentParser:
     decode.add_argument("--key", action="append", default=[])
     indicators = commands.add_parser("iocs")
     indicators.add_argument("file", type=Path)
+    embedding = commands.add_parser("embedding-fetch")
+    embedding.add_argument(
+        "--dir", type=Path, default=Path(".state/models/embeddinggemma-300m-onnx")
+    )
     server = commands.add_parser("mock-server")
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8080)
@@ -300,6 +308,11 @@ def main() -> int:
             from hacklab.forensics.iocs import extract
 
             emit(extract(_read_text(args.file)))
+            return 0
+        if args.command == "embedding-fetch":
+            from hacklab.embedding import REPOSITORY, fetch
+
+            emit({"repository": REPOSITORY, "directory": str(args.dir), "sha256": fetch(args.dir)})
             return 0
         if args.command == "mock-server":
             from hacklab.mockserver import serve

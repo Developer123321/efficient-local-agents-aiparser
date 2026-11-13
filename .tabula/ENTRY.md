@@ -25,7 +25,9 @@ on [document, search and table tools](../src/hacklab/tools.py) and on the
 The [evidence ledger](../src/hacklab/evidence.py) gives every shown row an ID
 that answers cite; [guards](../src/hacklab/guard.py) flag instruction-like
 text, replace secrets and blobs with placeholders and check containment
-actions. The [HTTP providers](../src/hacklab/providers.py) count every request
+actions. An [optional embedder](../src/hacklab/embedding.py) re-ranks search
+by meaning and is off unless the event allows it. The
+[HTTP providers](../src/hacklab/providers.py) count every request
 attempt, enforce the task budget and the team's development allowance and can
 replay replies from the [development cache](../src/hacklab/cache.py);
 [tracking](../src/hacklab/tracking.py) keeps usage and cost unknown when

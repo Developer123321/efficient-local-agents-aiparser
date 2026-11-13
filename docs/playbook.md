@@ -12,6 +12,9 @@ The plan assumes a team of up to four. Facts and open questions are in
 - [ ] AIM Slack joined on the laptop you bring.
 - [ ] On that laptop: `git pull`, `just ready`, `just check`, `just practice`.
       All three must pass without a network.
+- [ ] Optional but worth an hour: a rehearsal against a real small model,
+      `just practice-live 7 configs/openrouter.toml` with an OpenRouter key
+      in `.env`, and a look at the traces (`HACKLAB_TRACE_DIR=.state/trace`).
 - [ ] `just container-test` passes with your Docker or Podman. If you have
       neither, you depend on the limited platform submissions.
 - [ ] Coding assistants logged in. If yours has a five-hour usage window, send
@@ -90,7 +93,8 @@ Levers, in the order they usually pay off:
    `max_context_chars`; shorten the system prompt only against measurements.
 4. **Model settings.** Thinking off or low through `extra_body`, the
    documented sampling parameters, `response_format = "json_schema"` if the
-   endpoint enforces schemas.
+   endpoint enforces schemas. In rehearsal, low reasoning beat no reasoning
+   on both accuracy and cost; measure it again on the event's model.
 5. **Guards.** `injection = "withhold"`, `on_unverified`, stricter
    `allowed_actions`. Decide by the scoring rules from the opening.
 6. **Jev**, if it is reachable in the final run: as a filter for preloaded
@@ -100,6 +104,9 @@ Levers, in the order they usually pay off:
 Rules that protect the afternoon:
 
 - A change without a before and after number is not kept.
+- Read traces before changing a prompt: `HACKLAB_TRACE_DIR=.state/trace`
+  shows what the model actually did. In rehearsal every useful change came
+  from a trace, none from guessing.
 - Never tune on the hold-out file; run it before the freeze, once per
   candidate.
 - `hacklab budget` before every live benchmark. Keep a fifth of the allowance

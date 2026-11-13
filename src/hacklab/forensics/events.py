@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from collections import Counter
@@ -23,7 +24,44 @@ _FORMATS = (
     "%Y-%m-%d",
 )
 _SYSLOG = re.compile(r"^([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}:\d{2}:\d{2})$")
-_OPERATORS = ("contains", "prefix", "suffix", "ne", "gte", "lte", "gt", "lt", "in", "re")
+_OPERATORS = (
+    "contains",
+    "not_contains",
+    "prefix",
+    "not_prefix",
+    "suffix",
+    "ne",
+    "gte",
+    "lte",
+    "gt",
+    "lt",
+    "in",
+    "not_in",
+    "re",
+    "within",
+    "outside",
+)
+# How models that know other query languages spell the same operators.
+_ALIASES = {
+    "eq": "eq",
+    "equals": "eq",
+    "is": "eq",
+    "neq": "ne",
+    "not": "ne",
+    "nin": "not_in",
+    "notin": "not_in",
+    "startswith": "prefix",
+    "starts_with": "prefix",
+    "endswith": "suffix",
+    "ends_with": "suffix",
+    "like": "contains",
+    "icontains": "contains",
+    "regex": "re",
+    "match": "re",
+    "cidr": "within",
+    "ge": "gte",
+    "le": "lte",
+}
 
 
 def parse_timestamp(value: Any, default_year: int | None = None) -> datetime | None:
@@ -120,20 +158,96 @@ def where_column(key: str) -> str:
     return column if column and operator in _OPERATORS else key
 
 
+def normalize_where(where: Any, columns: Iterable[str] | None = None) -> dict[str, Any]:
+    """One canonical filter from the shapes models actually write.
+
+    Accepted beside `{"col__op": value}`: a JSON string of the filter, a list
+    as membership, a nested operator object such as `{"col": {"$in": [...]}}`
+    or `{"col": {"gt": 5}}`, and `*` wildcards in an equality value. With the
+    table's `columns`, an operator joined by a single underscore is repaired.
+    """
+    columns = None if columns is None else set(columns)
+    if where is None or where == "":
+        return {}
+    if isinstance(where, str):
+        try:
+            where = json.loads(where)
+        except ValueError as exc:
+            raise ValueError('where must be an object such as {"column": "value"}') from exc
+    if not isinstance(where, Mapping):
+        raise ValueError('where must be an object such as {"column": "value"}')
+    result: dict[str, Any] = {}
+    for key, value in where.items():
+        key = str(key)
+        column, _, suffix = key.rpartition("__")
+        if column and suffix.lower() in _ALIASES:
+            alias = _ALIASES[suffix.lower()]
+            key = column if alias == "eq" else f"{column}__{alias}"
+        elif columns is not None and key not in columns and where_column(key) == key:
+            # `src_ip_outside` for `src_ip__outside`: one underscore too few.
+            for operator in sorted({*_OPERATORS, *_ALIASES}, key=len, reverse=True):
+                if key.lower().endswith("_" + operator) and key[: -len(operator) - 1] in columns:
+                    name = _ALIASES.get(operator, operator)
+                    column = key[: -len(operator) - 1]
+                    key = column if name == "eq" else f"{column}__{name}"
+                    break
+        if isinstance(value, Mapping):
+            for operator, operand in value.items():
+                name = str(operator).lstrip("$").lower()
+                name = _ALIASES.get(name, name)
+                if name == "eq":
+                    result[key] = operand
+                elif name in _OPERATORS:
+                    result[f"{key}__{name}"] = operand
+                else:
+                    raise ValueError(f"unknown filter operator {str(operator)[:30]!r}")
+        elif isinstance(value, (list, tuple)) and where_column(key) == key:
+            result[f"{key}__in"] = list(value)
+        elif isinstance(value, str) and "*" in value and where_column(key) == key:
+            core = value.strip("*")
+            if "*" in core or not core:
+                result[f"{key}__re"] = "^" + ".*".join(map(re.escape, value.split("*"))) + "$"
+            elif value.startswith("*") and value.endswith("*"):
+                result[f"{key}__contains"] = core
+            elif value.endswith("*"):
+                result[f"{key}__prefix"] = core
+            else:
+                result[f"{key}__suffix"] = core
+        else:
+            result[key] = value
+    return result
+
+
+def _in_network(value: Any, network: Any) -> bool | None:
+    try:
+        return ipaddress.ip_address(str(value).strip()) in ipaddress.ip_network(
+            str(network).strip(), strict=False
+        )
+    except ValueError:
+        return None
+
+
 def matches(row: Mapping[str, Any], where: Mapping[str, Any]) -> bool:
     """Conditions are ANDed. `column` tests equality; `column__op` uses an operator.
 
-    Operators: contains, prefix, suffix, ne, gt, gte, lt, lte, in, re. Text
-    comparisons ignore case; ordering compares numbers, then timestamps.
+    Operators: contains, not_contains, prefix, not_prefix, suffix, ne, gt, gte,
+    lt, lte, in, not_in, re, and within / outside for an address against a
+    network such as 10.0.0.0/8. Text comparisons ignore case; ordering
+    compares numbers, then timestamps. Use `normalize_where` on model input.
     """
     for key, expected in where.items():
         column = where_column(key)
         operator = key[len(column) + 2 :] if column != key else "eq"
         actual = row.get(column)
         text = "" if actual is None else str(actual).casefold()
-        if operator == "in":
+        if operator in {"in", "not_in"}:
             options = expected if isinstance(expected, (list, tuple)) else [expected]
-            ok = text in {str(option).casefold() for option in options}
+            ok = (text in {str(option).casefold() for option in options}) == (operator == "in")
+        elif operator in {"within", "outside"}:
+            inside = _in_network(actual, expected)
+            if inside is None:
+                return False
+            ok = inside == (operator == "within")
         elif operator in {"gt", "gte", "lt", "lte"}:
             pair = _ordered(actual, expected)
             if pair is None:
@@ -153,7 +267,9 @@ def matches(row: Mapping[str, Any], where: Mapping[str, Any]) -> bool:
                 "eq": text == wanted,
                 "ne": text != wanted,
                 "contains": wanted in text,
+                "not_contains": wanted not in text,
                 "prefix": text.startswith(wanted),
+                "not_prefix": not text.startswith(wanted),
                 "suffix": text.endswith(wanted),
             }[operator]
         if not ok:

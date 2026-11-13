@@ -45,6 +45,20 @@ class Answer(StrictModel):
     reason: str = Field(default="", max_length=2000)
 
 
+class ActionReply(ModelReply):
+    """A containment step as the model writes it: one target, or a whole list result."""
+
+    type: str = Field(min_length=1, max_length=100)
+    target: str = Field(default="", max_length=500)
+    targets_from: str | None = Field(default=None, max_length=20)
+    reason: str = Field(default="", max_length=500)
+
+    @field_validator("target", "reason", mode="before")
+    @classmethod
+    def _text(cls, value: Any) -> Any:
+        return "" if value is None else str(value)[:500]
+
+
 class FinalResult(ModelReply):
     """The model names evidence by ID; code fills in document, locator and quote.
 
@@ -54,8 +68,10 @@ class FinalResult(ModelReply):
 
     status: Literal["ok", "abstain", "error"] = "ok"
     answer: str = Field(default="", max_length=12000)
+    # A list result such as "r3": code writes all of its values as the answer.
+    answer_from: str | None = Field(default=None, max_length=20)
     evidence: list[str] = Field(default_factory=list, max_length=30)
-    actions: list[Action] = Field(default_factory=list, max_length=2000)
+    actions: list[ActionReply] = Field(default_factory=list, max_length=200)
     confidence: float = Field(default=0.0, ge=0, le=1)
     reason: str = Field(default="", max_length=2000)
 
@@ -99,7 +115,7 @@ class FinalResult(ModelReply):
 
 _ACTION_KEYS = ("action", "tool", "name", "function")
 _ARGUMENT_KEYS = ("arguments", "args", "parameters", "input")
-_RESULT_KEYS = {"status", "answer", "evidence", "actions"}
+_RESULT_KEYS = {"status", "answer", "answer_from", "evidence", "actions"}
 
 
 class Decision(ModelReply):

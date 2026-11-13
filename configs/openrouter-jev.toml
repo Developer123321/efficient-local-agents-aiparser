@@ -1,0 +1,40 @@
+# configs/openrouter.toml plus Jev's native System One API as the final judge.
+# Needs TYPESAFE_API_KEY. Jev's price is the public list price, not the event's.
+[model]
+provider = "openai"
+response_format = "json_object"
+input_usd_per_million = 0.06
+output_usd_per_million = 0.15
+extra_body = { reasoning = { effort = "low" } }
+
+[jev]
+enabled = true
+model = "jev-1.14.0"
+base_url = "https://api.typesafe.ai/v1/systemone"
+input_usd_per_million = 0.042
+output_usd_per_million = 0.0
+threshold = 0.7
+
+[agent]
+preload_results = 5
+inventory = true
+preload_documents_under = 40
+tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
+
+[guard]
+allowed_actions = ["quarantine_agent", "revoke_token", "takedown_dataset"]
+protected_targets = ["hub-scanner"]
+max_actions = 200
+
+[limits]
+max_steps = 8
+max_calls = 14
+max_retries = 1
+timeout_seconds = 60
+task_timeout_seconds = 300
+max_context_chars = 24000
+max_output_tokens = 3000
+max_total_tokens = 60000
+
+[budget]
+max_usd = 2.0

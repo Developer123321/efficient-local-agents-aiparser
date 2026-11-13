@@ -41,19 +41,25 @@ def test_task_refuses_reference_labels():
 
 
 def test_every_shipped_profile_is_valid_and_ships_with_cache_and_allowance_off(monkeypatch):
-    monkeypatch.delenv("HACKLAB_CACHE_MODE", raising=False)
     profiles = sorted((Path(__file__).parents[1] / "configs").glob("*.toml"))
-    assert {path.stem for path in profiles} == {
+    names = {path.stem for path in profiles}
+    assert names == {
         "baseline",
         "jev-select",
         "live",
         "mock",
+        "openrouter",
+        "openrouter-jev",
         "practice",
     }
     for path in profiles:
         config = load_config(path)
-        # What is submitted must neither replay old replies nor stop on a development limit.
         assert config.cache.mode == "off", path.name
+        if path.stem.startswith("openrouter"):
+            # The rehearsal profile guards a small temporary credit.
+            assert config.budget.max_usd is not None
+            continue
+        # What is submitted must neither replay old replies nor stop on a development limit.
         assert config.budget.model_dump() == {
             "max_calls": None,
             "max_tokens": None,

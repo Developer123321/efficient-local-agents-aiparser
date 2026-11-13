@@ -3,21 +3,20 @@
 ## 2026-11-13 on a NixOS x86_64 workstation with KVM
 
 Nix 2.35.3, uv 0.13.5, Ruff 0.17.3 and the Nixpkgs revision in `flake.lock`.
-The checks ran against the tree of the commit that introduced the incident
-harness and renamed the project to hacklab-vm; only this sentence was edited
-after them.
+The checks ran against the tree of the commit that added the measurements
+against a real model; only this file was edited after them.
 
 | Check | Observed result |
 | --- | --- |
-| `project-check fast` (`scripts/check`: Ruff format and lint, `pytest`) | Passed; **218 tests** on Python 3.15.0 |
-| The same tests on other interpreters | All 218 passed on Python 3.15.2, 3.13.18 and 3.11.18 inside the guest |
+| `project-check fast` (`scripts/check`: Ruff format and lint, `pytest`) | Passed; **238 tests** on Python 3.15.0, one skipped there (the real embedder needs ONNX Runtime, which has no CPython 3.15 wheel) |
+| The same tests on other interpreters | 238 passed and one skipped on Python 3.15.2, 3.13.18 and 3.11.18 inside the guest; with the `embeddings` extra on 3.13.18 outside the guest all 239 passed, including the real EmbeddingGemma test |
 | `nix fmt -- --ci` | All Nix source formatted |
 | `nix flake check` | All outputs evaluated; `vm-contract` (now also: rootless Podman on, Docker daemon off) and `host-contract` built and passed |
 | `bash scripts/vm-smoke` | Passed: guest with Bob Shell booted under KVM on a disposable disk and ran `scripts/guest-check` over its console, including the container test |
 | Shellcheck 0.11.0 | `container-test`, `guest-check`, `vm-run`, `vm-smoke` and `vm-skills` passed |
 | `uv build` | Source distribution and wheel built |
 | Rehearsal incident, 40 seeds, 15 to 132 agents, 350 to 6,200 audit events | The code-only playbooks answered all 9 tasks of every seed correctly with 0 model calls |
-| Rehearsal incident with 300 agents and 60,000 audit events | 9 of 9; slowest task about 2 s |
+| Rehearsal incident with 300 agents and 60,000 audit events | 9 of 9; slowest task about 3 s |
 
 Inside the booted guest `scripts/guest-check` observed:
 
@@ -58,14 +57,35 @@ and stop helpers against a disposable guest (the module is unchanged), the
 guest variant without Bob (`bash scripts/vm-smoke --no-bob`), and the
 binary-wheel survey on Python 3.15.
 
+### Against real models
+
+With a temporary OpenRouter key and a TypeSafe key, both kept in the ignored
+`.env`:
+
+- `hacklab probe`: IBM Granite 4.2 8B (`ibm-granite/granite-4.2-8b`) through
+  OpenRouter and Jev 1.14 through `api.typesafe.ai/v1/systemone` both
+  answered; usage, cached and reasoning tokens were recorded.
+- The rehearsal incident without playbooks, seeds 7, 8 and 9, and the eight
+  document fixtures; with reasoning off and low; with and without Jev as
+  final judge. Results, costs and what the traces changed are in
+  [docs/benchmarks.md](docs/benchmarks.md#what-a-real-small-model-did-13-november-2026):
+  18 of 27 incident tasks and 8 of 8 document tasks with reasoning low.
+  About 0.03 USD of OpenRouter credit was used in total.
+- EmbeddingGemma (official ONNX export, 8-bit) loaded in 1.7 s on CPU,
+  reproduced the model card's similarity ranking and ranked three paraphrased
+  questions onto the right runbook lines. On the document fixtures it changed
+  no prompt and therefore no result.
+
+One run per configuration at the provider's default sampling: these numbers
+show direction, not significance.
+
 ### Not verified
 
-- **Any real model.** No request reached the event's small model, Jev or any
-  other language model. Prompts, the tool list, the guards' effect on a
-  model's behaviour, placeholders, evidence IDs, schema-guided thoughts and
-  every default value are untested against a model. Tests use scripted
-  replies; they show that the harness handles those replies, not what a model
-  replies. Whether any of this raises accuracy or lowers cost is unmeasured.
+- **The event's model.** Granite 4.2 8B is a guess at its kind. Prompts, tool
+  list, guards and defaults were tuned on this one stand-in and three seeds
+  of a scenario written here; they may fit another model or the real data
+  worse. `reasoning high`, `thought_chars`, `response_format = "json_schema"`,
+  temperature 0 and Jev's passage filter were not measured.
 - **The organizers' side.** The starter kit, its tools, the task and answer
   format, the container's run contract, how the model is reached inside the
   container, prices, score normalisation, rate limits and the platform's
@@ -74,7 +94,8 @@ binary-wheel survey on Python 3.15.
   were written together from public reports of the July 2026 intrusion. A
   perfect score there shows that the tools work on data built for them.
 - **Docker.** The container test ran with rootless Podman in the guest, not
-  with Docker or Docker Desktop, and not on macOS, Windows or ARM.
+  with Docker or Docker Desktop, and not on macOS, Windows or ARM. The image
+  was tested without the `embeddings` extra and without a baked model.
 - Injection patterns against attacks other than those written for the tests;
   XOR payloads with an unknown key longer than one byte.
 - Bob's license acceptance and login, and whether Bob activates the linked

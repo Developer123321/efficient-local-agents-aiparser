@@ -9,7 +9,7 @@ from pydantic import Field, model_validator
 
 from hacklab.models import StrictModel
 
-DEFAULT_TOOLS = ["search", "read", "table", "calculate", "decode", "iocs", "graph"]
+DEFAULT_TOOLS = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
 
 
 class ModelConfig(StrictModel):
@@ -55,6 +55,9 @@ class Limits(StrictModel):
     timeout_seconds: float = Field(default=25, gt=0, le=120)
     task_timeout_seconds: float = Field(default=180, gt=0, le=1800)
     max_context_chars: int = Field(default=24000, ge=2000, le=200000)
+    # One tool result as the model sees it. Every result is sent again with
+    # each later step, so this is the main lever on input tokens.
+    max_observation_chars: int = Field(default=4000, ge=500, le=20000)
     max_output_tokens: int = Field(default=1400, ge=128, le=8192)
     max_total_tokens: int = Field(default=16000, ge=128)
     max_cost_usd: float | None = Field(default=None, gt=0)
@@ -73,6 +76,9 @@ class AgentConfig(StrictModel):
     # Every listed tool costs prompt tokens on every call; list only what the
     # scenario needs. Tools registered by code are always offered.
     tools: list[str] = Field(default_factory=lambda: list(DEFAULT_TOOLS), max_length=20)
+    # How many values of a list result (distinct, group, reach) are printed. The
+    # full list stays available under its result ID for the final answer.
+    list_preview: int = Field(default=12, ge=1, le=100)
     # Above zero, the model writes a short "thought" before its action
     # (schema-guided reasoning). It costs output tokens; measure before keeping.
     thought_chars: int = Field(default=0, ge=0, le=2000)
@@ -107,6 +113,21 @@ class GuardConfig(StrictModel):
     max_actions: int = Field(default=20, ge=0, le=2000)
 
 
+class EmbeddingConfig(StrictModel):
+    """Local semantic ranking beside the keyword search. Off unless the event allows it.
+
+    The rules forbid an own embedder in the agent. Enable this only if the
+    organizers provide the model or have confirmed that it may be used.
+    """
+
+    enabled: bool = False
+    model_dir: str = ".state/models/embeddinggemma-300m-onnx"
+    # Keyword hits that are re-ranked by meaning, and the share of the semantic rank.
+    candidates: int = Field(default=40, ge=5, le=100)
+    weight: float = Field(default=0.5, ge=0, le=1)
+    max_tokens: int = Field(default=256, ge=16, le=2048)
+
+
 class CacheConfig(StrictModel):
     """Development only: replays identical requests instead of paying again."""
 
@@ -127,6 +148,7 @@ class Config(StrictModel):
     jev: JevConfig = Field(default_factory=JevConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     limits: Limits = Field(default_factory=Limits)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     budget: DevBudget = Field(default_factory=DevBudget)

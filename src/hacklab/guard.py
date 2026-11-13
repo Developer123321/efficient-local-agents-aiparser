@@ -55,10 +55,22 @@ _BARE = re.compile(r"(?<![\w\[:])([a-z][a-z0-9_]*):([0-9a-f]{6,16})(?![\w\]])")
 PREVIEW_CHARS = 240
 
 
+# A policy says "never quarantine the scanner" and a report mentions "the night
+# shift agent" without being an attack. These two patterns count only together
+# or beside a stronger one.
+_WEAK = {"addressed", "coercion"}
+
+
+def _signals(sample: str) -> list[str]:
+    found = [name for name, pattern in INJECTION_PATTERNS.items() if pattern.search(sample)]
+    strong = [name for name in found if name not in _WEAK]
+    return found if strong or len(found) >= 2 else []
+
+
 def scan_injection(text: str, keys: Iterable[bytes | str] = ()) -> list[str]:
     """Names of the instruction-like patterns in the text, also behind an encoding."""
     sample = text[:50_000]
-    found = [name for name, pattern in INJECTION_PATTERNS.items() if pattern.search(sample)]
+    found = _signals(sample)
     if _INVISIBLE.search(sample):
         found.append("invisible_characters")
     known = tuple(keys)
@@ -69,8 +81,8 @@ def scan_injection(text: str, keys: Iterable[bytes | str] = ()) -> list[str]:
             continue
         if decoded is None:
             continue
-        for name, pattern in INJECTION_PATTERNS.items():
-            if pattern.search(decoded[:50_000]) and f"encoded_{name}" not in found:
+        for name in _signals(decoded[:50_000]):
+            if f"encoded_{name}" not in found:
                 found.append(f"encoded_{name}")
     return found
 

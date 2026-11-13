@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hacklab.config import Config
+from hacklab.embedding import Embedder, cosine, fuse
 from hacklab.evidence import Evidence, Ledger
 from hacklab.forensics import decode as decoding
 from hacklab.forensics import iocs as indicators
@@ -28,15 +29,29 @@ from hacklab.tools import ToolError, ToolRegistry, Unit
 MAX_LINES = 60
 MAX_DECODED_CHARS = 1500
 _ENCODED = re.compile(r"[A-Za-z0-9+/_-]{16,}={0,2}")
+# A value that reads as encoded data or a digest rather than as a label.
+_OPAQUE = re.compile(r"(?=.*[0-9])(?=.*[A-Za-z])[A-Za-z0-9+/=_]{16,}")
 # Arguments of a mutating tool that explain the action instead of naming its target.
 _FREE_TEXT = {"reason", "comment", "note", "justification", "message", "description"}
 SIGNATURES = {
     "search": "search(query, limit=5): best-matching evidence lines across the task documents",
-    "read": "read(document, start=1, limit=40): consecutive lines, rows or pages of one document",
+    "read": (
+        "read(document, start=1, limit=30): consecutive lines of a prose document; "
+        "for logs and tables use table or after"
+    ),
     "table": (
         "table(document, operation=rows|count|sum|min|max|mean|group|distinct, column?, where?, "
-        'limit=20): filter and aggregate rows of a CSV/JSONL/XLSX; where={"col":"v","col__gt":5}, '
-        "operators contains|prefix|suffix|ne|gt|gte|lt|lte|in|re"
+        "limit=12): filter and aggregate rows of a CSV/JSONL/XLSX log. "
+        'where={"action":"login","actor":["a","b"],"ts__gte":"2026-11-14T02:00",'
+        '"src_ip__outside":"10.0.0.0/8"}; operators contains|prefix|ne|gt|gte|lt|lte|in|not_in|'
+        "re|within|outside. distinct and group list the values of column"
+    ),
+    "after": (
+        "after(document, key, first, where?, operation=rows|count|distinct|group, column?, "
+        "limit=12): rows matching where whose key value already had a row matching first, "
+        'i.e. what each actor did from its trigger event on. Example: key="actor", '
+        'first={"action":"exec_payload"}, where={"action":"create_token"}, '
+        'operation="distinct", column="target"'
     ),
     "calculate": "calculate(expression): exact decimal arithmetic",
     "decode": (
@@ -54,6 +69,15 @@ SIGNATURES = {
     ),
     "phases": "phases(document, column, time?, where?): rows per kill-chain phase, by rule",
 }
+RESULT_ID = re.compile(r"r\d{1,4}")
+
+
+@dataclass(frozen=True)
+class Result:
+    """A list a tool computed. The final answer can use it whole, without copying."""
+
+    values: tuple[str, ...]
+    evidence: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -124,6 +148,17 @@ class Observation:
         return "\n".join(kept) if kept else "(no results)"
 
 
+def split_items(text: str) -> list[str]:
+    """The entries of a list written as prose, JSON or bullets, in order."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    parts = parsed if isinstance(parsed, list) else re.split(r"[,;\n]|\band\b", text)
+    cleaned = (str(part).strip().strip("\"'`[]()*- .") for part in parts)
+    return [part for part in cleaned if part]
+
+
 def logfmt(value: Any) -> str:
     """A flat record as key=value pairs, a nested or scalar one as compact JSON."""
     if isinstance(value, dict) and all(
@@ -160,13 +195,22 @@ class Toolbox:
         ledger: Ledger,
         config: Config,
         extra: Iterable[ToolSpec] = (),
+        embedder: Embedder | None = None,
     ):
+        self.embedder = embedder
+        self._vectors: dict[str, list[float]] = {}
         self.documents = documents
         self.ledger = ledger
         self.config = config
         self.guard = ActionGuard(config.guard, ledger.grounded)
         self.extra = {spec.name: spec for spec in extra}
         self.builtin = [name for name in config.agent.tools if name in SIGNATURES]
+        self.results: dict[str, Result] = {}
+        # Numbers the tools computed, as written: an answer repeats them exactly.
+        self.numbers: list[str] = []
+        self.used = False  # whether any tool ran for this task
+        # What each call returned, in brief: the facts a reviewer needs beside the quotes.
+        self.log: list[str] = []
         self._memo: dict[str, int] = {}
         self._calls = 0
         self._scanned_keys = False
@@ -194,6 +238,107 @@ class Toolbox:
                 derived = logfmt(flatten(record))
         return self.ledger.add(row["document"], row["locator"], quote, derived)
 
+    def result(self, reference: Any) -> Result | None:
+        match = RESULT_ID.search(str(reference).lower())
+        return self.results.get(match.group()) if match else None
+
+    def _listing(self, entries: list[tuple[str, str, str | None]]) -> list[str]:
+        """Lines for a list of values and a result ID that stands for all of them.
+
+        Only a preview is printed: a long list costs tokens on every later
+        step, and the model should hand the list on by ID, not retype it.
+        """
+        if not entries:
+            return ["(no values)"]
+        name = f"r{len(self.results) + 1}"
+        cited = tuple(evidence for _, _, evidence in entries if evidence)[:30]
+        self.results[name] = Result(tuple(value for value, _, _ in entries), cited)
+        self.ledger.ground(value for value, _, _ in entries)
+        preview = self.config.agent.list_preview
+        lines = [f"{value or '(empty)'} {extra}".rstrip() for value, extra, _ in entries[:preview]]
+        if len(entries) > preview:
+            lines.append(f"… {len(entries) - preview} more values, all kept in {name}")
+        lines.append(f"-- {name} = these {len(entries)} values")
+        return lines
+
+    def _summarize(
+        self, document: str, units: list[Unit], operation: str, column: Any, limit: Any
+    ) -> Observation:
+        """rows, count, distinct or group over units that a filter already selected."""
+        limit = limit if isinstance(limit, int) and 1 <= limit <= 100 else 12
+
+        def cite(unit: Unit) -> Evidence:
+            row = {"document": document, "locator": unit.locator, "quote": unit.text[:2000]}
+            return self._evidence(row)
+
+        if operation == "rows":
+            lines = [cite(unit).line() for unit in units[:limit]]
+            note = f"-- matched_rows={len(units)}" + (
+                " truncated=yes" if len(units) > limit else ""
+            )
+            return Observation(lines + [note])
+        if operation == "count":
+            self.numbers.append(str(len(units)))
+            lines = [f"value={len(units)} operation=count matched_rows={len(units)}"]
+            return Observation(lines + [cite(unit).line() for unit in units[:3]])
+        if operation not in {"distinct", "group"}:
+            return Observation(error="operation must be rows, count, distinct or group")
+        if column not in self.documents.columns(document):
+            names = ", ".join(self.documents.columns(document)[:40])
+            return Observation(error=f"{operation} needs column, one of: {names}")
+        first: dict[str, Unit] = {}
+        counts: dict[str, int] = {}
+        for unit in units:
+            value = unit.values.get(column)
+            text = "" if value is None else str(value)
+            first.setdefault(text, unit)
+            counts[text] = counts.get(text, 0) + 1
+        ranked = sorted(counts, key=lambda value: (-counts[value], value))
+        entries = [
+            (
+                value,
+                f"count={counts[value]}",
+                cite(first[value]).id if position < 30 else None,
+            )
+            for position, value in enumerate(ranked)
+        ]
+        return Observation(self._listing(entries) + [f"-- matched_rows={len(units)}"])
+
+    def _after(self, arguments: dict[str, Any]) -> Observation:
+        document = str(arguments.get("document", ""))
+        columns = self.documents.columns(document)
+        key = str(arguments.get("key", ""))
+        time = arguments.get("time") or time_field(columns)
+        if key not in columns:
+            return Observation(error=f"key must be a column: {', '.join(columns[:40])}")
+        if not time or time not in columns:
+            return Observation(error="no time column found; pass time")
+        if not arguments.get("first"):
+            return Observation(error="first must be a filter for the trigger rows")
+        started: dict[str, Any] = {}
+        for unit in self.documents.rows(document, arguments["first"]):
+            moment = parse_timestamp(unit.values.get(time))
+            who = unit.values.get(key)
+            if moment is None or who in (None, ""):
+                continue
+            who = str(who)
+            started[who] = min(started[who], moment) if who in started else moment
+        selected = []
+        for unit in self.documents.rows(document, arguments.get("where")):
+            moment = parse_timestamp(unit.values.get(time))
+            begin = started.get(str(unit.values.get(key)))
+            if moment is not None and begin is not None and moment >= begin:
+                selected.append(unit)
+        observation = self._summarize(
+            document,
+            selected,
+            str(arguments.get("operation", "rows")),
+            arguments.get("column"),
+            arguments.get("limit"),
+        )
+        observation.lines.append(f"-- {len(started)} {key} values had a trigger row")
+        return observation
+
     def render(self, result: dict[str, Any]) -> Observation:
         """A document tool's result as lines with evidence IDs."""
         if "error" in result:
@@ -207,6 +352,7 @@ class Toolbox:
             }
             if result.get("ambiguous_numbers"):
                 facts["ambiguous_numbers"] = result["ambiguous_numbers"]
+            self.numbers.append(str(result["value"]))
             lines.append(logfmt(facts))
             lines += [self._evidence(row).line() for row in result.get("citations", [])[:5]]
         for row in result.get("results", []) + result.get("rows", []):
@@ -251,45 +397,104 @@ class Toolbox:
         keys = self.ledger.keys
         return ([str(extra)] if extra else []) + keys
 
+    def _channel(self, document: str, wanted: str, keys: list[str]) -> list[str]:
+        """Decode the numbered chunks of one channel of a tabular document."""
+        units = self.documents.rows(document)
+        lines = []
+        for stream in decoding.reassemble((unit.values for unit in units), keys):
+            if stream.channel != wanted:
+                continue
+            first = next(unit for unit in units if unit.values is stream.sources[0])
+            lines.append(
+                self._decoded_line(document, first.locator, first.text, stream.decoded)
+                + f" parts={stream.parts} checksum={stream.checksum}"
+                + (f" missing={list(stream.missing)}" if stream.missing else "")
+            )
+        return lines
+
+    def _chunk_at(self, document: str, locator: str) -> tuple[str, str] | None:
+        """The document and channel if that row is one numbered chunk of a series."""
+        if document.startswith("tool:") or not self.documents.columns(document):
+            return None
+        unit = next((u for u in self.documents.units(document) if u.locator == locator), None)
+        if unit is None or unit.values is None:
+            return None
+        row = {str(key).lower(): value for key, value in unit.values.items()}
+        numbered = any(row.get(key) not in (None, "") for key in ("seq", "sequence", "part"))
+        channel = next((row[k] for k in ("channel", "chan", "ch", "stream") if row.get(k)), None)
+        return (document, str(channel)) if numbered and channel is not None else None
+
+    def _chunk_of(self, text: str) -> tuple[str, str] | None:
+        """The document and channel in which this text is one numbered chunk, if any."""
+        needle = text.strip()
+        if len(needle) < 8:
+            return None
+        for entry in self.documents.inventory():
+            if not entry.get("columns"):
+                continue
+            for unit in self.documents.units(entry["document"]):
+                if unit.values is None or needle not in unit.text:
+                    continue
+                row = {str(key).lower(): value for key, value in unit.values.items()}
+                payload = next(
+                    (row[k] for k in ("payload", "data", "body", "chunk", "blob") if row.get(k)),
+                    None,
+                )
+                channel = next(
+                    (row[k] for k in ("channel", "chan", "ch", "stream") if row.get(k)), None
+                )
+                if payload is not None and channel is not None and needle in str(payload):
+                    return entry["document"], str(channel)
+        return None
+
     def _decode(self, arguments: dict[str, Any]) -> Observation:
         keys = self._keys(arguments.get("key"))
         if arguments.get("document") and "channel" in arguments:
-            document = str(arguments["document"])
-            units = self.documents.rows(document)
             wanted = str(arguments["channel"])
-            streams = decoding.reassemble((unit.values for unit in units), keys)
-            lines = []
-            for stream in streams:
-                if stream.channel != wanted:
-                    continue
-                first = next(unit for unit in units if unit.values is stream.sources[0])
-                lines.append(
-                    self._decoded_line(document, first.locator, first.text, stream.decoded)
-                    + f" parts={stream.parts} checksum={stream.checksum}"
-                    + (f" missing={list(stream.missing)}" if stream.missing else "")
-                )
+            lines = self._channel(str(arguments["document"]), wanted, keys)
             return Observation(lines or [f"no numbered chunks on channel {wanted!r}"])
         if arguments.get("evidence"):
-            evidence = self.ledger.get(str(arguments["evidence"]))
-            if evidence is None:
+            # One ID or several, in whatever punctuation the model used.
+            found = [
+                self.ledger.get(part)
+                for part in re.findall(r"e\d+", str(arguments["evidence"]).lower())
+            ]
+            rows = [evidence for evidence in found if evidence is not None]
+            if not rows:
                 return Observation(error="Unknown evidence ID")
-            blobs = [evidence.quote] + _ENCODED.findall(evidence.quote)
-            best = max(
-                (decoding.peel(blob, keys) for blob in blobs if len(blob) >= 16),
-                key=lambda decoded: (
-                    decoded.text is not None,
-                    len(decoded.layers),
-                    len(decoded.data),
-                ),
-                default=None,
-            )
-            if best is None or not best.layers:
-                return Observation(["nothing to decode in that evidence"])
-            return Observation(
-                [self._decoded_line(evidence.source, evidence.locator, evidence.quote, best)]
-            )
+            lines = []
+            channels: set[tuple[str, str]] = set()
+            for evidence in rows:
+                chunk = self._chunk_at(evidence.source, evidence.locator)
+                if chunk is not None:
+                    channels.add(chunk)
+                    continue
+                blobs = [evidence.quote] + _ENCODED.findall(evidence.quote)
+                best = max(
+                    (decoding.peel(blob, keys) for blob in blobs if len(blob) >= 16),
+                    key=lambda decoded: (
+                        decoded.text is not None,
+                        len(decoded.layers),
+                        len(decoded.data),
+                    ),
+                    default=None,
+                )
+                if best is not None and best.layers:
+                    lines.append(
+                        self._decoded_line(evidence.source, evidence.locator, evidence.quote, best)
+                    )
+            for document, channel in sorted(channels):
+                # A chunk alone is noise: decode the whole series it belongs to.
+                lines += self._channel(document, channel, keys)
+            return Observation(lines or ["nothing to decode in that evidence"])
         if isinstance(arguments.get("text"), str):
             decoded = decoding.peel(arguments["text"], keys)
+            if not decoded.layers and (chunk := self._chunk_of(arguments["text"])) is not None:
+                lines = self._channel(chunk[0], chunk[1], keys)
+                if lines:
+                    return Observation(
+                        [f"one chunk of channel {chunk[1]} in {chunk[0]}; whole series:"] + lines
+                    )
             body = (
                 decoded.text if decoded.text is not None else f"<{len(decoded.data)} binary bytes>"
             )
@@ -380,15 +585,16 @@ class Toolbox:
             if node not in graph.nodes:
                 return Observation(error="node does not occur in source or target")
             reached = graph.reach(node)
-            lines = [
-                f"{name} at={when.isoformat() if when else 'unknown'} via=[{cite(edge)}]"
-                for name, (when, edge) in list(reached.items())[:MAX_LINES]
-            ]
-            if len(reached) > MAX_LINES:
-                lines.append(
-                    f"-- {len(reached) - MAX_LINES} later nodes omitted; narrow with where"
+            entries = [
+                (
+                    name,
+                    f"at={when.isoformat() if when else 'unknown'}"
+                    + (f" via=[{cite(edge)}]" if position < 30 else ""),
+                    cite(edge) if position < 30 else None,
                 )
-            return Observation([f"-- reached={len(reached)} from={node}"] + lines)
+                for position, (name, (when, edge)) in enumerate(reached.items())
+            ]
+            return Observation([f"-- reached={len(reached)} from={node}"] + self._listing(entries))
         if operation == "origins":
             nodes = arguments.get("nodes")
             group = [str(node) for node in nodes] if isinstance(nodes, list) else list(graph.out)
@@ -432,9 +638,18 @@ class Toolbox:
 
     def execute(self, name: str, arguments: dict[str, Any]) -> Observation:
         """Run one tool. Never raises: a failure is an observation the model can react to."""
+        observation = self._execute(name, arguments)
+        repeated = bool(observation.lines) and observation.lines[0].startswith("repeated call")
+        if observation.error is None and not repeated:
+            call = json.dumps(arguments, ensure_ascii=False, default=str)[:300]
+            self.log.append(f"{name}({call}) -> {observation.text(500)}")
+        return observation
+
+    def _execute(self, name: str, arguments: dict[str, Any]) -> Observation:
         self._calls += 1
         if name not in self.names():
             return Observation(error=f"Unknown tool; available: {', '.join(self.names())}")
+        self.used = True
         arguments = self.ledger.compactor.expand(arguments)
         spec = self.extra.get(name) if name not in self.builtin else None
         try:
@@ -453,11 +668,25 @@ class Toolbox:
         try:
             if spec is not None:
                 return self._external(spec, arguments)
-            if name in {"search", "read", "table", "calculate"}:
+            if name == "table" and arguments.get("operation") in {"group", "distinct"}:
+                document = str(arguments.get("document", ""))
+                units = self.documents.rows(document, arguments.get("where"))
+                return self._summarize(
+                    document, units, arguments["operation"], arguments.get("column"), None
+                )
+            if name == "search":
+                tidy = self._tidy(name, arguments)
+                found = self.render(self.search_rows(tidy.get("query", ""), tidy.get("limit", 5)))
+                found.lines += self._search_hints(str(arguments.get("query", "")))
+                return found
+            if name in {"read", "table", "calculate"}:
                 return self.render(self.documents.execute(name, self._tidy(name, arguments)))
-            handler = {"decode": self._decode, "iocs": self._iocs, "graph": self._graph}.get(
-                name, self._phases
-            )
+            handler = {
+                "decode": self._decode,
+                "iocs": self._iocs,
+                "graph": self._graph,
+                "after": self._after,
+            }.get(name, self._phases)
             return handler(arguments)
         except ToolError as exc:
             return Observation(error=str(exc))
@@ -466,6 +695,95 @@ class Toolbox:
         except Exception:
             # Organizer tools and hostile inputs must not end the task.
             return Observation(error="The tool failed on these arguments")
+
+    def search_rows(self, query: Any, limit: Any) -> dict[str, Any]:
+        """Keyword search, re-ranked by meaning when an embedder is configured.
+
+        The candidates are the best keyword hits plus every line of short
+        prose documents, so a paraphrase without a shared word can still be
+        found. Any failure of the embedder leaves the keyword ranking.
+        """
+        if self.embedder is None:
+            return self.documents.execute("search", {"query": query, "limit": limit})
+        pool = self.config.embedding.candidates
+        found = self.documents.execute("search", {"query": query, "limit": pool})
+        if "error" in found or not isinstance(limit, int):
+            return found if "error" in found else {"error": "limit must be a number"}
+        rows = list(found["results"])
+        lexical = list(range(len(rows)))
+        seen = {(row["document"], row["locator"]) for row in rows}
+        for entry in self.documents.inventory():
+            if entry.get("columns") or "error" in entry or entry["units"] > 200:
+                continue
+            for unit in self.documents.units(entry["document"]):
+                key = (entry["document"], unit.locator)
+                if unit.text.strip() and key not in seen and len(rows) < 300:
+                    rows.append({"document": key[0], "locator": key[1], "quote": unit.text[:2000]})
+        try:
+            texts = (row["quote"][:1000] for row in rows)
+            new = list(dict.fromkeys(text for text in texts if text not in self._vectors))
+            for text, vector in zip(new, self.embedder.encode(new), strict=True):
+                self._vectors[text] = vector
+            target = self.embedder.encode([str(query)], query=True)[0]
+            semantic = sorted(
+                range(len(rows)),
+                key=lambda index: (
+                    -cosine(target, self._vectors[rows[index]["quote"][:1000]]),
+                    index,
+                ),
+            )
+        except Exception:
+            # Retrieval quality may drop; the task must not.
+            found["results"] = found["results"][:limit]
+            return found
+        order = fuse(lexical, semantic, self.config.embedding.weight)
+        found["results"] = [rows[index] for index in order[:limit]]
+        found["truncated"] = len(rows) > limit
+        return found
+
+    def describe_table(self, document: str) -> list[str]:
+        """One line per column of a table: its frequent values, or how many it has."""
+        lines = []
+        for column, entry in self.documents.profile(document).items():
+            if "range" in entry:
+                lines.append(f"    {column}: {entry['range'][0]} to {entry['range'][1]}")
+            elif (
+                "values" in entry
+                and entry["distinct"] <= 12
+                and not any(
+                    len(value) > 32 or _OPAQUE.fullmatch(value) for value in entry["values"]
+                )
+            ):
+                # Short labels such as action names; never blobs or free text.
+                shown = ", ".join(
+                    f"{value or '(empty)'} {count}" for value, count in entry["values"].items()
+                )
+                lines.append(f"    {column}: {shown}"[:400])
+            else:
+                lines.append(f"    {column}: {entry['distinct']} distinct values")
+        return lines
+
+    def _search_hints(self, query: str) -> list[str]:
+        """Point from a ranked text search to the exact filter, when the query names a value.
+
+        Search shows the best-ranked lines, not all matches. A model that
+        searches a log for an action name must learn that a complete, ordered
+        answer comes from the table.
+        """
+        terms = {term.casefold() for term in re.findall(r"[\w.:/-]+", query) if len(term) > 2}
+        hints = []
+        for entry in self.documents.inventory():
+            if not entry.get("columns"):
+                continue
+            for column, facts in self.documents.profile(entry["document"]).items():
+                for value, count in facts.get("values", {}).items():
+                    if value.casefold() in terms and len(hints) < 3:
+                        hints.append(
+                            f"-- search shows a sample. {entry['document']} has {count} rows with "
+                            f'{column}={value}: table(document="{entry["document"]}", '
+                            f'where={{"{column}":"{value}"}}) lists all of them in time order'
+                        )
+        return hints
 
     def _tidy(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Repair what a small model commonly gets slightly wrong in tool arguments.

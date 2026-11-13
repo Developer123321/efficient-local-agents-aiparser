@@ -11,7 +11,7 @@ Task (no reference labels)
   -> briefing: document inventory, short runbooks in full,
      search hits for the task text, optional Jev filter
   -> loop: model picks ONE step {"action", "arguments"} or "final"
-        tools: search read table calculate decode iocs graph phases
+        tools: search read table after calculate decode iocs graph phases
                + the organizers' own tools (ToolSpec)
         every row shown gets an evidence ID and passes the guards
   -> final: answer + evidence IDs + containment actions
@@ -33,6 +33,7 @@ Each HTTP attempt -> local private SQLite receipt
 | `tools.py` | Scoped document access, search index, tables, arithmetic |
 | `forensics/` | Decoding, indicators, timestamps and filters, propagation, phases |
 | `evidence.py` | Ledger of every row shown, evidence IDs, citations, grounding |
+| `embedding.py` | Optional local EmbeddingGemma ranking; off unless the event allows it |
 | `guard.py` | Injection scan, secret and blob placeholders, action guard |
 | `providers.py` | HTTP adapters, task budget, development allowance, replay |
 | `cache.py` | Development-only replay of identical requests |
@@ -50,11 +51,19 @@ Cost counts as much as accuracy. In rough order of effect:
   talked out of its answer. `configs/practice.toml` solves the rehearsal
   incident this way. On the day, write one solver per revealed task type; the
   model handles what is left.
-- **Calls per task.** The briefing puts the document inventory with column
-  names, short prose documents in full (`preload_documents_under`) and search
-  hits (`preload_results`) into the first message, so that an answerable task
-  ends in one call. A repeated identical tool call is answered from memory
-  with a nudge instead of a new result.
+- **Calls per task.** The briefing describes every table (frequent values per
+  column, time range), shows short documents and tiny tables in full
+  (`preload_documents_under`) and adds search hits from long prose
+  (`preload_results`), so that an answerable task ends in one call. A repeated
+  identical tool call is answered from memory with a nudge. Every observation
+  ends with the steps left.
+- **List results.** A tool that computes a list (distinct values, reach of a
+  graph) prints a preview and names the list `r3`. The final answer uses it
+  with `"answer_from":"r3"`, an action with `"targets_from":"r3"`; code writes
+  out every value. A model that retypes the preview gets the whole list.
+- **Observation size.** `max_observation_chars` bounds one tool result. Every
+  result is sent again with each later step, so this is the main lever on
+  input tokens.
 - **Prompt size.** Tools are described in one line each, not as JSON schemas,
   and only the tools in `[agent] tools` are listed. Log records reach the
   model as `key=value` pairs. Results are bounded lines; omitted lines are
@@ -71,7 +80,9 @@ Cost counts as much as accuracy. In rough order of effect:
   thought before the action (schema-guided reasoning). Both change accuracy
   and cost; measure them.
 - **Reply recovery.** The parser takes the decision object out of code
-  fences, reasoning tags or surrounding prose, and ignores unknown keys.
+  fences, reasoning tags or surrounding prose, ignores unknown keys and
+  accepts the usual variants: `tool`/`args`, flat arguments, a flat final, a
+  number written as `200.0` where a tool computed `200`.
 
 The system prompt is identical for every task of one configuration and the
 conversation only grows at its end, so a serving layer with prefix caching
@@ -89,7 +100,10 @@ alone.
 2. **Injection scan.** Every row is matched against patterns for overrides,
    role changes, messages addressed to the agent, fake authority, coercion
    about containment, requests to leak, hidden comments and invisible
-   characters. Encoded text is decoded first, with any key leaked so far.
+   characters. Two of them, an address to the agent and a "do not contain",
+   also occur in honest policies and reports; they count only together or
+   beside another pattern. Encoded text is decoded first, with any key leaked
+   so far.
    A hit marks the row `!untrusted-instructions(...)`; `injection = "withhold"`
    hides its text. Such a message is itself a trace of the attack, which is
    why flagging, not hiding, is the default.
@@ -103,7 +117,12 @@ alone.
    message is refused. The count is capped. A mutating tool of the organizers
    (`ToolSpec(..., mutating=True)`) goes through the same guard before it
    runs.
-6. **Optional Jev judgment** of the finished answer against its quotes.
+6. **Optional Jev judgment** of the finished answer. Jev sees the tool
+   results beside the quotes, because a count or a filtered list cannot be
+   confirmed from a few quoted rows. A judgment below the threshold is
+   feedback for one more attempt, not a verdict.
+7. **No abstention without a look.** An abstention before any tool ran is
+   questioned once; repeated, it stands.
 
 `on_unverified` decides what happens when an answer still fails after the
 repair allowance: `abstain`, or `answer` with only the parts that passed every
@@ -127,10 +146,15 @@ All are deterministic, bounded and never execute recovered content.
   tokens, private keys, addresses with their class (private, public, cloud
   metadata), URLs, domains, digests, repositories and service accounts, also
   in defanged form, with counts and the first row.
-- `table` filters and aggregates CSV, TSV, XLSX, JSONL and JSON arrays.
-  Nested fields become dotted columns. Filters take operators
-  (`ts__gte`, `action__in`, `target__contains`, …) and compare numbers and
-  timestamps; `group` and `distinct` count values with a citable first row.
+- `table` filters and aggregates CSV, TSV, XLSX, JSONL and JSON arrays, in
+  time order when the table has a time column. Nested fields become dotted
+  columns. Filters take operators (`ts__gte`, `action__in`,
+  `target__contains`, `src_ip__outside` for an address against a network, …),
+  compare numbers and timestamps, and accept the shapes models write: lists,
+  nested operator objects, `*` wildcards. `group` and `distinct` list a
+  column's values as a list result.
+- `after` selects the rows of each actor from its trigger event on: "what did
+  every compromised agent upload after it was compromised" in one call.
 - `graph` builds "who contacted whom" from two columns. `reach` follows only
   causal chains: a message spreads nothing that its sender received later.
   `origins` finds where a set of affected nodes began.
@@ -183,7 +207,23 @@ invoice.
 Parsers and decoders run in the agent's process and are not preempted by the
 task timer. The container is the boundary for hostile input.
 
-## Development cache
+## Optional embedder
+
+`[embedding] enabled = true` re-ranks keyword hits and every line of short
+prose documents with EmbeddingGemma (300M parameters, ONNX, CPU, no network).
+`hacklab embedding-fetch` downloads the official ONNX export once; the
+original repository is gated behind a licence click. It needs the
+`embeddings` extra and Python 3.11 to 3.14. **The event's rules forbid an own
+embedder in the agent**: leave it off unless the organizers provide this model
+or allow it. A failing or missing embedder falls back to keyword search.
+
+## Development cache and trace
+
+`HACKLAB_TRACE_DIR=.state/trace` writes the conversation of every task as a
+private text file: the prompt, each reply, each observation, Jev's
+judgments. It holds task data and model replies, so it stays in the ignored
+state directory and is never set in the image.
+
 
 `HACKLAB_CACHE_MODE=readwrite` stores every model reply under a hash of the
 request and replays it when the identical request recurs; `replay` never sends

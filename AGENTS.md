@@ -38,7 +38,11 @@ any host machine configuration.
 - Jev is a native System One provider, never a chat model. Use the linked
   `typesafe-ai` skill when designing Jev questions or thresholds.
 - Only the models the organizers provide may make run-time decisions. Do not
-  add any other model, embedder, reranker or classifier to the agent.
+  add any other model, reranker or classifier to the agent. The optional
+  EmbeddingGemma ranking (`[embedding]`) stays off unless the organizers
+  provide that model or allow it.
+- Before changing a prompt or a tool because of a failure, read the trace of
+  the failing task (`HACKLAB_TRACE_DIR=.state/trace`).
   Coding assistants build the solution; they never answer competition tasks.
 
 ## Data and secrets
@@ -50,9 +54,11 @@ any host machine configuration.
   and cache replays. Missing usage or prices means unknown cost. Never infer
   tokens from text length.
 - Keys, private documents, VM disks and run-time state stay out of Git and the
-  Nix store. Model replies exist only in the development cache under
-  `.state/`; the tracking database holds no bodies. Do not add body logging.
-- The submission image runs with the cache off and without `[budget]` limits.
+  Nix store. Model replies exist only in the development cache and in the
+  opt-in development trace, both under `.state/`; the tracking database holds
+  no bodies. Do not add any other body logging.
+- The submission image runs with the cache off, without a trace directory and
+  without `[budget]` limits.
 - Quotes validate provenance, not truth. Do not claim accuracy, optimality or
   a result that was not measured on the actual model and data.
 

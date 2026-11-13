@@ -129,3 +129,15 @@ def test_citations_from_external_tools_are_not_checked_against_files(tmp_path):
         citations=[Citation(document="tool:list_tokens", locator="item:1", quote="token=tok-7a")],
     )
     assert score_answer(answer, Expected(exact_answer="tok-7a"), tools)["score"] == 1
+
+
+def test_numeric_answers_compare_by_value_and_text_answers_by_text(tmp_path):
+    tools = ToolRegistry(tmp_path, [])
+    number = Expected(exact_answer="200")
+    for text in ("200", "200.0", " 200.00 "):
+        assert score_answer(Answer(status="ok", answer=text), number, tools)["score"] == 1
+    for text in ("201", "200 EUR", "two hundred"):
+        assert score_answer(Answer(status="ok", answer=text), number, tools)["score"] == 0
+    label = Expected(exact_answer="agent-007")
+    assert score_answer(Answer(status="ok", answer="Agent-007"), label, tools)["score"] == 1
+    assert score_answer(Answer(status="ok", answer="agent-7"), label, tools)["score"] == 0

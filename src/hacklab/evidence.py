@@ -8,6 +8,7 @@ quoting costs a few output tokens instead of a copied sentence.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from hacklab.config import GuardConfig
@@ -41,6 +42,7 @@ class Ledger:
         self.compactor = Compactor(previews=self.guard.decode_previews)
         self._by_id: dict[str, Evidence] = {}
         self._by_key: dict[tuple[str, str, str], Evidence] = {}
+        self._values: set[str] = set()
 
     def __len__(self) -> int:
         return len(self._by_id)
@@ -94,12 +96,16 @@ class Ledger:
                 cited.append(citation)
         return cited, unknown
 
+    def ground(self, values: Iterable[str]) -> None:
+        """Values a tool read from a structured column: real identifiers of the data."""
+        self._values.update(value.strip().casefold() for value in values if value.strip())
+
     def grounded(self, target: str) -> bool:
         """Does the target occur in the task or in evidence without instruction-like text?"""
         needle = target.strip().casefold()
         if not needle:
             return False
-        if needle in self.task_text.casefold():
+        if needle in self._values or needle in self.task_text.casefold():
             return True
         return any(
             not evidence.flags

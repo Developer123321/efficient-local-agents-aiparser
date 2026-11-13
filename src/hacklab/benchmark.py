@@ -3,7 +3,6 @@
 import hashlib
 import json
 import math
-import re
 import statistics
 import time
 from pathlib import Path
@@ -13,6 +12,7 @@ from pydantic import Field
 
 from hacklab.config import Config
 from hacklab.models import Action, Answer, StrictModel, Task
+from hacklab.toolkit import split_items
 from hacklab.tools import ToolRegistry
 
 
@@ -51,13 +51,7 @@ def load_cases(path: Path) -> list[Case]:
 
 def _items(text: str) -> set[str]:
     """The entries of a list answer, however the model punctuated it."""
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        parsed = None
-    parts = parsed if isinstance(parsed, list) else re.split(r"[,;\n]|\band\b", text)
-    cleaned = (str(part).strip().strip("\"'`[]()*- .").casefold() for part in parts)
-    return {part for part in cleaned if part}
+    return {item.casefold() for item in split_items(text)}
 
 
 def score_answer(answer: Answer, expected: Expected, tools: ToolRegistry) -> dict:
@@ -66,9 +60,13 @@ def score_answer(answer: Answer, expected: Expected, tools: ToolRegistry) -> dic
     conditions = {"status": answer.status == expected.status}
     detail: dict[str, float] = {}
     if expected.exact_answer is not None:
-        conditions["exact_answer"] = normalized == " ".join(
-            expected.exact_answer.casefold().split()
-        )
+        wanted = " ".join(expected.exact_answer.casefold().split())
+        try:
+            # 200, 200.0 and 200.00 are the same answer to a numeric question.
+            same = float(normalized) == float(wanted)
+        except ValueError:
+            same = normalized == wanted
+        conditions["exact_answer"] = same
     if expected.answer_set is not None:
         conditions["answer_set"] = _items(answer.answer) == {
             item.casefold() for item in expected.answer_set

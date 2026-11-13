@@ -66,7 +66,8 @@ assistants build the agent; at run time only the provided models decide.
   [rehearsal playbooks](src/hacklab/practice.py) show the pattern.
 - **Forensic tools** for the model and for playbooks: layered decoding with
   chunk reassembly, indicator extraction, log tables with filters and
-  grouping, propagation graphs, kill-chain phases.
+  grouping, "what did each actor do after its trigger event", propagation
+  graphs, kill-chain phases.
 - **Evidence by ID.** The model cites `e7`; code supplies document, locator
   and exact quote. Secrets and encoded blobs appear as short placeholders
   that code expands again.
@@ -97,6 +98,7 @@ assistants build the agent; at run time only the provided models decide.
 | `hacklab practice --seed N --out DIR` | Write a rehearsal incident with reference answers |
 | `hacklab decode FILE --key K` / `hacklab iocs FILE` | Analyst helpers: peel a payload, list indicators |
 | `hacklab mock-server --port 8080` | Stand-in model endpoint for plumbing tests |
+| `hacklab embedding-fetch` | Download the EmbeddingGemma ONNX files for the optional embedder |
 | `hacklab runs` / `stats` / `export --out FILE` | Inspect local run metadata and usage |
 
 Use `uv run --locked` before `hacklab` outside an activated environment.
@@ -118,5 +120,8 @@ directory.
 The rehearsal incident and the eight document fixtures in `bench/` are
 practice material written for this repository, not the organizers' benchmark.
 A perfect score of the playbooks on the rehearsal shows that the tools work on
-data built for them; it says nothing about the provided model or the real
-scenario.
+data built for them. A stand-in small model (IBM Granite 4.2 8B through
+OpenRouter) solved 18 of 27 rehearsal tasks with the tools alone and all eight
+document fixtures; the numbers and what they changed are in
+[benchmarks.md](docs/benchmarks.md#what-a-real-small-model-did-13-november-2026).
+Neither says how the event's model will do on the real scenario.

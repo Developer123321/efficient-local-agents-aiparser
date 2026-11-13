@@ -129,6 +129,23 @@ models (3B, 8B, 30B), three documented properties matter for cost:
 parameter and reply format fit, and reports cached and reasoning tokens where
 the endpoint returns them.
 
+For rehearsal, `configs/openrouter.toml` runs Granite 4.2 8B through
+OpenRouter (`ibm-granite/granite-4.2-8b`, the only Granite listed there on 13
+November 2026). Reasoning is set with OpenRouter's `reasoning` field, efforts
+`none`, `low` and `high`. The measured results are in
+[benchmarks.md](benchmarks.md#what-a-real-small-model-did-13-november-2026).
+
+OpenRouter lists no Jev model. Its `typesafe/jev-router` is a router that
+forwards a request to another model (a test request was answered by an OpenAI
+model); it is not the System One API and was not used. Jev was measured
+through its native API with `configs/openrouter-jev.toml`.
+
+**EmbeddingGemma** (`google/embeddinggemma-300m`) is gated on Hugging Face
+behind a licence click; the ungated official ONNX export
+`onnx-community/embeddinggemma-300m-ONNX` is what `hacklab embedding-fetch`
+downloads. Whether an embedder may be part of the agent is the organizers'
+decision: their mail forbids an own one.
+
 **IBM Bob** is a coding assistant for building the agent. It is not a run-time
 model. [Bob Shell](https://bob.ibm.com/docs/shell) reads `AGENTS.md` as custom
 rules and project skills from `.bob/skills`; see [VM operation](vm.md#ibm-bob).

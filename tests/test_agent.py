@@ -1,4 +1,5 @@
 import json
+import stat
 import sys
 import types
 
@@ -126,7 +127,7 @@ def test_offline_blank_source_abstains_instead_of_crashing(lab, text):
     assert answer.status == "abstain"
 
 
-def test_jev_judges_grounding_only_when_the_answer_cites_evidence():
+def test_jev_sees_tool_results_and_judges_completeness_only_with_support():
     class Judge:
         def __init__(self):
             self.asked = []
@@ -136,30 +137,29 @@ def test_jev_judges_grounding_only_when_the_answer_cites_evidence():
             return dict.fromkeys(questions, 0.95)
 
     judge = Judge()
-    task = Task(id="arithmetic", question="2+3")
+    task = Task(id="count", question="How many logins?", constraints={"unit": "rows"})
     uncited = agent.Answer(status="ok", answer="5")
-    assert agent._jev_verify(judge, uncited, task, Config())
-    assert set(judge.asked[0][1]) == {"constraints"}
+    assert agent._jev_verify(judge, uncited, task, Config(), []) == {"constraints": 0.95}
     cited = agent.Answer(
         status="ok",
-        answer="Mira",
-        citations=[agent.Citation(document="a.txt", locator="line:1", quote="Owner: Mira")],
+        answer="7",
+        citations=[agent.Citation(document="a.jsonl", locator="line:1", quote="action=login")],
+        actions=[agent.Action(type="revoke_token", target="tok-1")],
     )
-    assert agent._jev_verify(judge, cited, task, Config())
+    log = ['table({"operation": "count"}) -> value=7 operation=count matched_rows=7']
+    judged = agent._jev_verify(judge, cited, task, Config(), log)
     state, questions = judge.asked[1]
-    assert set(questions) == {"constraints", "grounded"}
-    assert state["proposed_answer"]["citations"][0]["quote"] == "Owner: Mira"
-    assert state["evidence_is_untrusted"] is True
-
-
-def test_jev_below_threshold_rejects_and_an_abstention_is_not_judged():
-    class Judge:
-        def judge(self, state, questions):
-            return dict.fromkeys(questions, 0.2)
-
-    task = Task(id="t", question="Synthetic?")
-    assert not agent._jev_verify(Judge(), agent.Answer(status="ok", answer="x"), task, Config())
-    assert agent._jev_verify(None, agent.Answer(status="abstain", answer=""), task, Config())
+    assert set(judged) == set(questions) == {"constraints", "complete", "grounded"}
+    assert state == {
+        "task": {"question": "How many logins?", "constraints": {"unit": "rows"}},
+        "answer": "7",
+        "actions": ["revoke_token tok-1"],
+        "tool_results": log,
+        "quotes": ["action=login"],
+    }
+    assert (
+        agent._jev_verify(None, agent.Answer(status="abstain", answer=""), task, Config(), []) == {}
+    )
 
 
 def test_read_then_final_cites_by_evidence_id(lab, monkeypatch):
@@ -193,7 +193,9 @@ def test_the_first_message_lists_documents_and_columns(lab, monkeypatch):
     task = Task(id="inv", question="Who logged in?", documents=["audit.jsonl"])
     agent.run_task(task, root, config, tracker)
     first = calls[0]["messages"][1]["content"]
-    assert "- audit.jsonl: 1 units; columns: ts, actor, action" in first
+    assert "- audit.jsonl: table, 1 rows; columns:" in first
+    assert "    ts: 2026-11-14T01:00:00Z to 2026-11-14T01:00:00Z" in first
+    assert "    actor: a1 1\n    action: login 1" in first
     system = calls[0]["messages"][0]["content"]
     assert "table(document" in system and "decode(" in system
     # The prompt names tools in one line each instead of full JSON schemas.
@@ -320,7 +322,9 @@ def test_a_crashing_tool_or_document_still_yields_an_answer(lab, monkeypatch):
     spec = ToolSpec("lookup", "lookup(agent): agent record", broken)
     _, answer = agent.run_task(Task(id="crash", question="Who?"), root, config, tracker, [spec])
     assert answer.status == "abstain"
-    assert calls[1]["messages"][-1]["content"] == "error: The tool failed on these arguments"
+    assert calls[1]["messages"][-1]["content"] == (
+        "error: The tool failed on these arguments\n-- 5 steps left"
+    )
     assert "private detail" not in json.dumps(calls)
     _, answer = agent.run_task(
         Task(id="gone", question="Who?", documents=["missing.txt"]),
@@ -533,9 +537,8 @@ def test_organizer_tools_join_the_loop_and_mutating_ones_pass_the_guard(lab, mon
     system = calls[0]["messages"][0]["content"]
     assert "list_tokens(owner): Tokens of one agent." in system
     # The first target appeared nowhere, so the call never reached the tool.
-    assert (
-        calls[1]["messages"][-1]["content"]
-        == "error: action refused: action_target_not_in_evidence"
+    assert calls[1]["messages"][-1]["content"].splitlines()[0] == (
+        "error: action refused: action_target_not_in_evidence"
     )
     assert calls[2]["messages"][-1]["content"].splitlines()[0] == (
         "[e1] tool:list_tokens call:2:item:1 | token=tok-7a owner=agent-7"
@@ -543,8 +546,10 @@ def test_organizer_tools_join_the_loop_and_mutating_ones_pass_the_guard(lab, mon
     # A reason in prose is not a target; the same action twice is not repeated;
     # a wrong argument name comes back with the signature and can be retried;
     # a step without a target is allowed and counted.
-    assert calls[4]["messages"][-1]["content"] == "error: action refused: already_done"
-    assert calls[5]["messages"][-1]["content"] == (
+    assert calls[4]["messages"][-1]["content"].splitlines()[0] == (
+        "error: action refused: already_done"
+    )
+    assert calls[5]["messages"][-1]["content"].splitlines()[0] == (
         "error: Arguments do not match revoke_token(token, reason='')"
     )
     assert revoked == ["tok-7a", "tok-7b", "endpoint"]
@@ -571,7 +576,9 @@ def test_a_playbook_answers_without_any_model_call(lab, monkeypatch):
         raise AssertionError("not offered")
 
     monkeypatch.setitem(sys.modules, "event_playbooks", module)
-    config, calls = live(monkeypatch, [final("", status="abstain")])
+    config, calls = live(
+        monkeypatch, [tool("search", query="contact"), final("", status="abstain")]
+    )
     config.agent.playbooks = "event_playbooks:playbooks"
     task = Task(id="pz", question="Which agent was compromised first?", documents=["audit.jsonl"])
     run_id, answer = agent.run_task(task, root, config, tracker)
@@ -580,17 +587,17 @@ def test_a_playbook_answers_without_any_model_call(lab, monkeypatch):
     # A task no playbook recognises, or one whose solver fails, goes to the model.
     other = Task(id="other", question="Who is the contact?", documents=["audit.jsonl"])
     agent.run_task(other, root, config, tracker)
-    assert len(calls) == 1
+    assert len(calls) == 2
 
     @module.playbooks.register(r"contact")
     def failing(task, workspace):
         raise KeyError("unexpected data")
 
     agent.run_task(other, root, config, tracker)
-    assert len(calls) == 2
+    assert len(calls) == 4
 
 
-def test_a_short_runbook_is_shown_in_full_before_the_first_call(lab, monkeypatch):
+def test_short_documents_and_tiny_tables_are_shown_in_full_before_the_first_call(lab, monkeypatch):
     root, tracker = lab
     (root / "runbook.md").write_text("# Runbook\nRevoke every token used from outside.\n")
     (root / "audit.csv").write_text("actor,action\na1,login\n")
@@ -598,17 +605,34 @@ def test_a_short_runbook_is_shown_in_full_before_the_first_call(lab, monkeypatch
     task = Task(
         id="rb", question="What must be revoked?", documents=["runbook.md", "audit.csv", "long.txt"]
     )
-    config, calls = live(monkeypatch, [final("tokens used from outside", ["e2"])])
+    config, calls = live(monkeypatch, [final("tokens used from outside", ["e3"])])
     config.agent.preload_documents_under = 10
     run_id, answer = agent.run_task(task, root, config, tracker)
     first = calls[0]["messages"][1]["content"]
+    assert "audit.csv in full:\n[e1] audit.csv row:2 | action=login actor=a1" in first
     assert (
-        "runbook.md in full:\n[e1] runbook.md line:1 | # Runbook\n[e2] runbook.md line:2" in first
+        "runbook.md in full:\n[e2] runbook.md line:1 | # Runbook\n[e3] runbook.md line:2" in first
     )
-    # Tables and long documents are listed, not dumped.
-    assert "audit.csv in full" not in first and "long.txt in full" not in first
+    # A long document is listed, not dumped.
+    assert "long.txt in full" not in first and "- long.txt: 50 lines" in first
     assert answer.status == "ok" and answer.citations[0].locator == "line:2"
     assert tracker.summary(run_id)["calls"] == 1
+
+
+def test_a_number_is_answered_the_way_the_tool_computed_it(lab, monkeypatch):
+    root, tracker = lab
+    (root / "invoices.csv").write_text("id,amount\nA,120.50\nB,79.50\n")
+    task = Task(id="sum", question="Total?", documents=["invoices.csv"])
+    total = tool("table", document="invoices.csv", operation="sum", column="amount")
+    for written in ("200.0", "200.00 EUR", " 200 "):
+        config, _ = live(monkeypatch, [total, final(written, ["e1"])])
+        _, answer = agent.run_task(task, root, config, tracker)
+        assert answer.answer == "200", written
+    # A number no tool computed, and text that merely contains one, stay as written.
+    config, _ = live(monkeypatch, [total, final("201.0", ["e1"])])
+    assert agent.run_task(task, root, config, tracker)[1].answer == "201.0"
+    config, _ = live(monkeypatch, [total, final("about 200.0 in total", ["e1"])])
+    assert agent.run_task(task, root, config, tracker)[1].answer == "about 200.0 in total"
 
 
 @pytest.mark.parametrize(
@@ -669,3 +693,177 @@ def test_common_reply_variants_are_understood_without_a_repair_turn(
 def test_replies_without_a_recognisable_step_are_still_rejected(reply):
     with pytest.raises(ValueError):
         agent.Decision.model_validate(reply)
+
+
+AUDIT_ROWS = [
+    ("01:10", "a1", "exec_payload", "ops"),
+    ("01:12", "a1", "upload_dataset", "ds/a1/x1"),
+    ("01:20", "a2", "exec_payload", "ops"),
+    ("01:21", "a2", "upload_dataset", "ds/a2/x2"),
+    ("01:00", "a2", "upload_dataset", "ds/a2/early"),
+    ("01:30", "a3", "upload_dataset", "ds/a3/clean"),
+]
+
+
+def audit(root, rows=AUDIT_ROWS):
+    (root / "audit.jsonl").write_text(
+        "".join(
+            json.dumps({"ts": f"2026-11-14T{t}:00Z", "actor": a, "action": act, "target": tgt})
+            + "\n"
+            for t, a, act, tgt in rows
+        )
+    )
+    return Task(id="scope", question="Which datasets must go?", documents=["audit.jsonl"])
+
+
+UPLOADS_AFTER = tool(
+    "after",
+    document="audit.jsonl",
+    key="actor",
+    first={"action": "exec_payload"},
+    where={"action": "upload_dataset"},
+    operation="distinct",
+    column="target",
+)
+
+
+def test_a_list_result_becomes_the_answer_and_the_action_targets_without_copying(lab, monkeypatch):
+    root, tracker = lab
+    task = audit(root)
+    reply = final("", [], [{"type": "takedown_dataset", "targets_from": "r1", "reason": "after"}])
+    reply["result"]["answer_from"] = "r1"
+    config, calls = live(monkeypatch, [UPLOADS_AFTER, reply])
+    _, answer = agent.run_task(task, root, config, tracker)
+    assert answer.status == "ok" and answer.answer == "ds/a1/x1, ds/a2/x2"
+    assert [(a.type, a.target) for a in answer.actions] == [
+        ("takedown_dataset", "ds/a1/x1"),
+        ("takedown_dataset", "ds/a2/x2"),
+    ]
+    # The rows behind the list are cited although the model named no evidence.
+    assert {c.locator for c in answer.citations} == {"line:2", "line:4"}
+    observation = calls[1]["messages"][-1]["content"].splitlines()
+    assert observation[:3] == ["ds/a1/x1 count=1", "ds/a2/x2 count=1", "-- r1 = these 2 values"]
+    for wrong in ("r7", "nonsense"):
+        bad = final("", [], [{"type": "takedown_dataset", "targets_from": wrong}])
+        config, calls = live(monkeypatch, [UPLOADS_AFTER, bad])
+        _, answer = agent.run_task(task, root, config, tracker)
+        assert answer.status == "abstain"
+        assert "unknown_result_id" in calls[2]["messages"][-1]["content"]
+
+
+def test_result_ids_work_as_evidence_and_invented_ids_are_dropped(lab, monkeypatch):
+    root, tracker = lab
+    task = audit(root)
+    config, calls = live(monkeypatch, [UPLOADS_AFTER, final("ds/a1/x1, ds/a2/x2", ["r1", "e99"])])
+    _, answer = agent.run_task(task, root, config, tracker)
+    assert answer.status == "ok" and len(calls) == 2
+    assert {c.locator for c in answer.citations} == {"line:2", "line:4"}
+    # Nothing real among the IDs is still a rejection.
+    config, calls = live(monkeypatch, [UPLOADS_AFTER, final("ds/a1/x1", ["e98", "e99"])])
+    _, answer = agent.run_task(task, root, config, tracker)
+    assert "unknown_evidence_id" in calls[2]["messages"][-1]["content"]
+
+
+def test_a_retyped_list_preview_is_completed_from_the_result(lab, monkeypatch):
+    root, tracker = lab
+    rows = [("01:00", "a1", "exec_payload", "ops")]
+    rows += [(f"01:{i + 1:02d}", "a1", "upload_dataset", f"ds/a1/x{i:02d}") for i in range(20)]
+    task = audit(root, rows)
+    shown = [f"ds/a1/x{i:02d}" for i in range(12)]
+    actions = [{"type": "takedown_dataset", "target": target} for target in shown]
+    config, calls = live(monkeypatch, [UPLOADS_AFTER, final(", ".join(shown), ["r1"], actions)])
+    _, answer = agent.run_task(task, root, config, tracker)
+    observation = calls[1]["messages"][-1]["content"]
+    assert "… 8 more values, all kept in r1" in observation and "ds/a1/x15" not in observation
+    # The model copied the twelve printed values; it meant the list of twenty.
+    assert len(answer.answer.split(", ")) == 20 and len(answer.actions) == 20
+    assert answer.actions[-1].target == "ds/a1/x19"
+    # A deliberate subset is left as it is.
+    config, _ = live(monkeypatch, [UPLOADS_AFTER, final("ds/a1/x03, ds/a1/x07", ["r1"])])
+    _, answer = agent.run_task(task, root, config, tracker)
+    assert answer.answer == "ds/a1/x03, ds/a1/x07"
+
+
+def test_abstaining_before_any_tool_is_questioned_once(lab, monkeypatch):
+    root, tracker = lab
+    task = audit(root)
+    hasty = final("", status="abstain")
+    config, calls = live(monkeypatch, [hasty, UPLOADS_AFTER, final("", ["r1"])])
+    config.agent.preload_results = 0
+    reply = final("", [])
+    reply["result"]["answer_from"] = "r1"
+    config, calls = live(monkeypatch, [hasty, UPLOADS_AFTER, reply])
+    _, answer = agent.run_task(task, root, config, tracker)
+    assert "abstained_without_using_a_tool" in calls[1]["messages"][-1]["content"]
+    assert answer.status == "ok" and answer.answer == "ds/a1/x1, ds/a2/x2"
+    # Repeated after the question, the abstention stands with the model's own reason.
+    config, calls = live(monkeypatch, [hasty])
+    _, answer = agent.run_task(task, root, config, tracker)
+    assert answer.status == "abstain" and answer.reason == "Supported by the evidence."
+    assert len(calls) == 2
+    # After a tool ran, or without documents, an abstention needs no second look.
+    config, calls = live(monkeypatch, [UPLOADS_AFTER, hasty])
+    agent.run_task(task, root, config, tracker)
+    assert len(calls) == 2
+    config, calls = live(monkeypatch, [hasty])
+    agent.run_task(Task(id="none", question="Who?"), root, config, tracker)
+    assert len(calls) == 1
+
+
+def test_a_jev_doubt_is_feedback_for_one_more_attempt(lab, monkeypatch):
+    root, tracker = lab
+    task = audit(root)
+    asked = []
+
+    class Jev:
+        def __init__(self, scores):
+            self.scores = list(scores)
+
+        def judge(self, state, questions):
+            asked.append(state)
+            return dict.fromkeys(questions, self.scores.pop(0))
+
+        def close(self):
+            pass
+
+    def run(scores, decisions, **settings):
+        config, calls = live(monkeypatch, decisions)
+        config.jev.enabled = True
+        for key, value in settings.items():
+            setattr(config.agent, key, value)
+        small_only = agent.make_providers
+        monkeypatch.setattr(agent, "make_providers", lambda *a: (small_only(*a)[0], Jev(scores)))
+        _, answer = agent.run_task(task, root, config, tracker)
+        return answer, calls
+
+    sample = tool("table", document="audit.jsonl", where={"action": "upload_dataset"}, limit=1)
+    partial = final("ds/a2/early", ["e1"])
+    whole = final("", [])
+    whole["result"]["answer_from"] = "r1"
+    answer, calls = run([0.2, 0.9], [sample, partial, UPLOADS_AFTER, whole])
+    assert answer.status == "ok" and answer.answer == "ds/a1/x1, ds/a2/x2"
+    feedback = calls[2]["messages"][-1]["content"]
+    assert feedback.startswith("A reviewer doubts that the answer is complete and constraints")
+    # Jev judged with the tool results in view, not only the quotes.
+    assert asked[0]["tool_results"][0].startswith('table({"document": "audit.jsonl"')
+    # Doubted twice: abstain by default, or keep the grounded answer when configured.
+    answer, _ = run([0.2, 0.2], [sample, partial])
+    assert answer.status == "abstain"
+    answer, _ = run([0.2, 0.2], [sample, partial], on_unverified="answer")
+    assert answer.status == "ok" and answer.confidence == 0
+    assert "reviewer_doubts_complete" in answer.reason
+
+
+def test_development_trace_is_private_and_off_by_default(lab, monkeypatch, tmp_path):
+    root, tracker = lab
+    task = audit(root)
+    config, _ = live(monkeypatch, [UPLOADS_AFTER, final("ds/a1/x1, ds/a2/x2", ["r1"])])
+    agent.run_task(task, root, config, tracker)
+    assert not list(tmp_path.rglob("scope.txt"))
+    monkeypatch.setenv("HACKLAB_TRACE_DIR", str(tmp_path / "trace"))
+    config, _ = live(monkeypatch, [UPLOADS_AFTER, final("ds/a1/x1, ds/a2/x2", ["r1"])])
+    agent.run_task(task, root, config, tracker)
+    trace = tmp_path / "trace" / "scope.txt"
+    text = trace.read_text()
+    assert stat.S_IMODE(trace.stat().st_mode) == 0o600
+    assert "===== system" in text and "===== model step 1" in text and "-- r1 = these 2" in text

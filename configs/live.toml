@@ -33,7 +33,7 @@ inventory = true
 preload_documents_under = 40
 # Every tool costs prompt tokens on every call. Remove what the scenario does
 # not need; add "phases" if tasks ask about attack stages.
-tools = ["search", "read", "table", "calculate", "decode", "iocs", "graph"]
+tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
 # thought_chars = 300        # Schema-guided reasoning; costs output tokens.
 # on_unverified = "answer"   # If a wrong answer costs no more than an abstention.
 # playbooks = "mypackage.playbooks:playbooks"   # Code-only solvers, tried first.
@@ -55,9 +55,15 @@ max_retries = 1
 timeout_seconds = 25
 task_timeout_seconds = 180
 max_context_chars = 24000
+max_observation_chars = 4000  # One tool result; resent with every later step.
 max_output_tokens = 1400
 max_total_tokens = 16000
 # max_cost_usd = 0.02  # Requires all enabled prices to be explicitly configured.
+
+# Local EmbeddingGemma ranking. Forbidden unless the organizers provide the
+# model or allow it; see docs/architecture.md.
+# [embedding]
+# enabled = true
 
 # The team's development allowance across all runs in this tracking database.
 # [budget]
