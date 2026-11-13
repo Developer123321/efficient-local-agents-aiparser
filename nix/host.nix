@@ -1,7 +1,7 @@
-# Host side of the workbench VM: an on-demand user service and its `hacklab-vm`
-# command. The guest keeps its own pinned package set; nothing of the host's
+# Host side of the workbench VM: an on-demand user service registered with the
+# shared VM manager. The guest keeps its own pinned package set; nothing of the host's
 # home, network configuration or package policy changes.
-{ self }:
+{ self, vmCliModule }:
 {
   config,
   lib,
@@ -56,24 +56,11 @@ let
       echo 'The guest did not power off within a minute; systemd stops it now.' >&2
     '';
   };
-  command = pkgs.writeShellApplication {
-    name = "hacklab-vm";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.socat
-      pkgs.systemd
-    ];
-    text = ''
-      readonly configured_state=${
-        lib.escapeShellArg (if cfg.stateDirectory == null then "" else cfg.stateDirectory)
-      }
-    ''
-    + builtins.readFile ../scripts/hacklab-vm.sh;
-  };
 in
 {
+  imports = [ vmCliModule ];
   options.services.hacklab-vm = {
-    enable = lib.mkEnableOption "the on-demand hacklab workbench VM and its hacklab-vm command";
+    enable = lib.mkEnableOption "the on-demand hacklab workbench VM in the shared VM manager";
     operatorName = lib.mkOption {
       type = lib.types.strMatching "[a-z_][a-z0-9_-]*";
       description = "Existing host account that owns and runs the VM.";
@@ -123,8 +110,20 @@ in
         message = "services.hacklab-vm.operatorName must identify an existing normal host user.";
       }
     ];
-    environment.systemPackages = [ command ];
-    # No wantedBy: the VM runs only after `hacklab-vm start`.
+    programs.vm = {
+      enable = true;
+      vms.hacklab-vm = {
+        unit = "hacklab-vm.service";
+        scope = "user";
+        view = "console";
+        consoleSocket =
+          if cfg.stateDirectory == null then
+            "hacklab-vm/run/console.sock"
+          else
+            "${cfg.stateDirectory}/run/console.sock";
+      };
+    };
+    # No wantedBy: the VM runs only after `vm start hacklab-vm`.
     systemd.user.services.hacklab-vm = {
       description = "Hacklab workbench VM";
       unitConfig.ConditionUser = cfg.operatorName;

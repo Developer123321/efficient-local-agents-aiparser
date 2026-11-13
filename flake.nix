@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    vm-cli = {
+      url = "git+https://github.com/timfewi/vm-cli.git?ref=main";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     bobshell = {
       url = "git+https://github.com/timfewi/bobshell.nix.git?ref=main";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -21,6 +25,7 @@
       nixpkgs,
       bobshell,
       typesafe-skills,
+      vm-cli,
     }:
     let
       system = "x86_64-linux";
@@ -121,7 +126,10 @@
           ;
       };
       # For a machine that hosts the VM; `default` configures a guest.
-      nixosModules.host = import ./nix/host.nix { inherit self; };
+      nixosModules.host = import ./nix/host.nix {
+        inherit self;
+        vmCliModule = vm-cli.nixosModules.default;
+      };
       nixosConfigurations = {
         hackathon = vm;
         hackathon-with-bob = vmWithBob;
@@ -144,23 +152,37 @@
         host-contract =
           let
             unit = hostFixture.config.systemd.user.units."hacklab-vm.service".unit + "/hacklab-vm.service";
-            command = nixpkgs.lib.findFirst (
-              package: nixpkgs.lib.getName package == "hacklab-vm"
+            manager = nixpkgs.lib.findFirst (
+              package: nixpkgs.lib.getName package == "vm-cli"
             ) null hostFixture.config.environment.systemPackages;
+            inventory =
+              pkgs.writeText "hacklab-vm-inventory.json"
+                hostFixture.config.environment.etc."vm-cli/config.json".text;
+            customState =
+              (hostFixture.extendModules {
+                modules = [ { services.hacklab-vm.stateDirectory = "/home/alice/custom-state"; } ];
+              }).config;
           in
+          assert manager != null;
+          assert hostFixture.config.programs.vm.vms.hacklab-vm.scope == "user";
+          assert hostFixture.config.programs.vm.vms.hacklab-vm.unit == "hacklab-vm.service";
+          assert hostFixture.config.programs.vm.vms.hacklab-vm.view == "console";
+          assert hostFixture.config.programs.vm.vms.hacklab-vm.consoleSocket == "hacklab-vm/run/console.sock";
+          assert hostFixture.config.systemd.user.services.hacklab-vm.wantedBy == [ ];
+          assert
+            customState.programs.vm.vms.hacklab-vm.consoleSocket == "/home/alice/custom-state/run/console.sock";
           pkgs.runCommand "hacklab-vm-host-contract" { } ''
-              grep -F 'ConditionUser=alice' ${unit}
-              grep -F '%S/hacklab-vm' ${unit}
-              grep -F 'ExecStop=' ${unit}
-              # Bob is opt-in: the default runner is the guest without it.
-              test '${toString hostFixture.config.services.hacklab-vm.bob.enable}' = ""
-              test '${hostFixture.config.services.hacklab-vm.runner}' = '${vm.config.system.build.vm}'
-              # Off by default: nothing may pull the VM into a session start.
-              ! grep -F 'WantedBy=' ${unit}
-              test -x ${command}/bin/hacklab-vm
-              (${command}/bin/hacklab-vm bogus 2>&1 || true) | grep -F 'Usage: hacklab-vm'
-            ! grep -F ssh ${command}/bin/hacklab-vm
-              touch "$out"
+            grep -F 'ConditionUser=alice' ${unit}
+            grep -F '%S/hacklab-vm' ${unit}
+            grep -F 'ExecStop=' ${unit}
+            # Bob is opt-in: the default runner is the guest without it.
+            test '${toString hostFixture.config.services.hacklab-vm.bob.enable}' = ""
+            test '${hostFixture.config.services.hacklab-vm.runner}' = '${vm.config.system.build.vm}'
+            # Off by default: nothing may pull the VM into a session start.
+            ! grep -F 'WantedBy=' ${unit}
+            printf 'q\n' | ${nixpkgs.lib.getExe manager} --config ${inventory} manage > menu
+            grep -F 'hacklab-vm (user service)' menu
+            touch "$out"
           '';
       };
       formatter.${system} = pkgs.nixfmt-tree;

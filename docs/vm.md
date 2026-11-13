@@ -9,7 +9,7 @@ Linux only.
 | --- | --- | --- |
 | Nix shell | `nix develop` | Python 3.15, uv, Ruff, Just and command-line tools. No container engine |
 | QEMU VM | `bash scripts/vm-run` | The same tools plus rootless Podman, isolated from your machine |
-| NixOS host service | `hacklab-vm start` | The VM as an on-demand service (see below) |
+| NixOS host service | `vm start hacklab-vm` | The VM as an on-demand service (see below) |
 
 ## The VM
 
@@ -90,9 +90,9 @@ Add this repository as a flake input, then:
 
 | Command | Effect |
 | --- | --- |
-| `hacklab-vm start` / `stop` / `restart` | Control the VM; it never starts by itself |
-| `hacklab-vm view` | Attach to the guest console; Ctrl-] detaches |
-| `hacklab-vm status` / `logs` | Service state and boot console |
+| `vm start hacklab-vm` / `stop` / `restart` | Control the VM; it never starts by itself |
+| `vm view hacklab-vm` | Attach to the guest console; Ctrl-] detaches |
+| `vm status hacklab-vm` / `logs` | Service state and boot console |
 
 No sudo and no network listener are involved. Disk and control sockets live
 in `~/.local/state/hacklab-vm`.
