@@ -77,8 +77,8 @@ model. One quick run does not establish a better configuration; use
 Measured with `configs/openrouter.toml`: IBM Granite 4.2 8B through
 OpenRouter, the model alone with the tools, no playbooks. It is a stand-in for
 whatever the event provides. Costs use OpenRouter's list prices of that day
-($0.06 and $0.15 per million tokens). One run per cell at the provider's
-default sampling; treat differences of one task as noise.
+($0.06 and $0.15 per million tokens). One run per cell at temperature 0;
+treat differences of one task as noise.
 
 | Run | Rehearsal incident, 9 tasks per seed | Calls | Input tokens | Cost |
 | --- | --- | --- | --- | --- |
@@ -128,6 +128,12 @@ What the traces showed, and what was changed because of it:
 Still failing with the model alone: the full containment and the two-part
 revocation rule. Both combine several filtered lists under a policy; the
 playbooks solve them. That is the division of labour to expect on the day.
+
+Tried and dropped because the total stayed at 18 of 27 while cost rose by a
+fifth: an example row under every list result, combining several list
+results in one answer, and a prompt sentence on getting one list per rule
+part. The model then planned the right queries but still chose the wrong
+column for created tokens and retyped lists by hand.
 
 To repeat: put a key into `.env`, then `just practice-live 7
 configs/openrouter.toml`. Set `HACKLAB_TRACE_DIR=.state/trace` to get the

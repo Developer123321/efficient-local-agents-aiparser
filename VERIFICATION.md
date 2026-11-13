@@ -76,8 +76,8 @@ With a temporary OpenRouter key and a TypeSafe key, both kept in the ignored
   questions onto the right runbook lines. On the document fixtures it changed
   no prompt and therefore no result.
 
-One run per configuration at the provider's default sampling: these numbers
-show direction, not significance.
+One run per configuration at temperature 0: these numbers show direction,
+not significance.
 
 ### Not verified
 
