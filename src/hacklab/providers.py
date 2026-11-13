@@ -15,6 +15,8 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -26,6 +28,26 @@ from hacklab.cache import ResponseCache
 from hacklab.config import Config, DevBudget, JevConfig, Limits, ModelConfig, read_secret
 
 MAX_RESPONSE_BYTES = 1_000_000
+_REQUEST_STAGE: ContextVar[str | None] = ContextVar("hacklab_request_stage", default=None)
+
+
+@contextmanager
+def provider_stage(stage: str):
+    """Tag every attempt/replay in one role, without changing requests or cache keys.
+
+    Context-local state keeps concurrent task workers from sharing a stage.
+    Bodies still go only to the optional development cache and trace.
+    """
+    token = _REQUEST_STAGE.set(stage)
+    try:
+        yield
+    finally:
+        _REQUEST_STAGE.reset(token)
+
+
+def _stage_metadata() -> dict[str, str]:
+    stage = _REQUEST_STAGE.get()
+    return {"stage": stage} if stage is not None else {}
 
 
 class ProviderError(RuntimeError):
@@ -371,6 +393,7 @@ class _HTTPProvider:
                     attempt=attempt + 1,
                     requested_model=self.model,
                     model_reported=model_reported,
+                    **_stage_metadata(),
                     **_usage_details(payload),
                 )
                 if self.spend is not None:
@@ -428,6 +451,7 @@ class _HTTPProvider:
             input_rate=self.input_rate,
             output_rate=self.output_rate,
             cache_hit=True,
+            **_stage_metadata(),
             **_usage_details(payload),
         )
         self.budget.check_consumed()

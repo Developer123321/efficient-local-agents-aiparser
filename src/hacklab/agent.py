@@ -653,7 +653,10 @@ def run_task(
                     update={"jev": config.jev.model_copy(update={"enabled": False})}
                 )
             small, jev = make_providers(providers, budget, tracker, run_id, cache_salt)
-            answer = _investigate(
+            investigate = _investigate
+            if config.agent.workflow == "pipeline":
+                from hacklab.pipeline import investigate
+            answer = investigate(
                 task, toolbox, documents, config, budget, small, jev, tracker, run_id
             )
     except BudgetExceeded as exc:

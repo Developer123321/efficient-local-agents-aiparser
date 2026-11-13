@@ -42,7 +42,16 @@ _NUMBER_KEYS = {
     "reasoning_tokens",
 }
 _BOOL_KEYS = {"cache_hit", "cached", "usage_complete", "truncated", "verified", "dirty"}
-_LABEL_KEYS = {"status", "action", "tool", "error_type", "reason_code", "provider", "model"}
+_LABEL_KEYS = {
+    "status",
+    "action",
+    "tool",
+    "error_type",
+    "reason_code",
+    "provider",
+    "model",
+    "stage",
+}
 
 
 def _json(value: Any) -> str:
@@ -159,6 +168,8 @@ def _safe_config(config: dict) -> dict:
         safe[section] = output
     selections = {
         "agent": {
+            "workflow",
+            "pipeline_rounds",
             "preload_results",
             "decimal_separator",
             "inventory",
