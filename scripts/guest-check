@@ -41,7 +41,7 @@ just practice 7 | grep -F '"accuracy": 1.0' >/dev/null
 echo "rehearsal incident: solved by the playbooks without a model call"
 # The interpreter of the submission image and the oldest supported one.
 for version in 3.13 3.11; do
-  UV_PROJECT_ENVIRONMENT=.venv-$version UV_PYTHON=$version uv run --locked pytest -q | tail -n 1
+  UV_PROJECT_ENVIRONMENT=.venv-$version UV_PYTHON=$version uv run --locked python -m pytest -q | tail -n 1
 done
 # Binary wheels that need libstdc++ and zlib from the guest.
 uv run --locked --with numpy --with pandas --with pymupdf --with duckdb \
@@ -50,4 +50,8 @@ uv run --locked --with numpy --with pandas --with pymupdf --with duckdb \
 # registries; set SKIP_CONTAINER_TEST=1 where they are unreachable.
 if [[ -z "${SKIP_CONTAINER_TEST:-}" ]]; then
   bash scripts/container-test
+fi
+# The laptop setup on stock Ubuntu and Debian; needs their mirrors and astral.sh.
+if [[ -n "${PORTABILITY_TEST:-}" ]]; then
+  bash scripts/portability-test
 fi

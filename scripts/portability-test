@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Proves the claim "a laptop with uv is enough" on distributions the team
+# uses: copies the tracked source into a stock container, installs uv the
+# documented way and runs scripts/setup --check there. Needs Docker or Podman
+# and the internet (distribution mirrors, astral.sh, PyPI).
+#
+#   bash scripts/portability-test                 # Ubuntu 24.04 and 22.04, Debian 12
+#   bash scripts/portability-test fedora:42       # any image with apt-get or dnf
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+
+engine=${CONTAINER_ENGINE:-}
+if [[ -z "$engine" ]]; then
+  engine=$(command -v docker || command -v podman || true)
+fi
+[[ -n "$engine" ]] || { echo 'Install Docker or Podman, or set CONTAINER_ENGINE.' >&2; exit 1; }
+if (($#)); then images=("$@"); else images=(ubuntu:24.04 ubuntu:22.04 debian:12); fi
+
+# Only what Git tracks: no keys, no state, no virtual environment.
+source=$(mktemp -d "${TMPDIR:-/tmp}/hacklab-portability.XXXXXX")
+trap 'rm -rf -- "$source"' EXIT
+git ls-files -z | tar --null -T - -cf - | tar -xf - -C "$source"
+chmod -R a+rX "$source"
+
+# shellcheck disable=SC2016  # expanded by the shell inside the container
+inside='set -eu
+if command -v apt-get >/dev/null; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq >/dev/null
+  apt-get install -y -qq --no-install-recommends ca-certificates curl git >/dev/null
+else
+  dnf install -y -q ca-certificates curl git tar gzip >/dev/null
+fi
+curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+export PATH="$HOME/.local/bin:$PATH"
+cp -R /source /project
+cd /project
+git init -q . && git add -A . >/dev/null
+bash scripts/setup --check'
+for image in "${images[@]}"; do
+  echo "== $image"
+  "$engine" run --rm -v "$source:/source:ro" "docker.io/library/$image" sh -c "$inside" | tail -n 8
+  echo "portable: $image"
+done
+echo 'Portability test passed.'

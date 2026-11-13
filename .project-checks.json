@@ -1,7 +1,7 @@
 {
   "version": 1,
   "checks": [
-    {"name":"python-fast","argv":["bash","scripts/check"],"requires":["bash","uv","ruff"],"timeout_seconds":300,"profiles":["fast"]},
+    {"name":"python-fast","argv":["bash","scripts/check"],"requires":["bash","uv"],"timeout_seconds":300,"profiles":["fast"]},
     {"name":"nix-format","argv":["nix","fmt","--","--ci"],"requires":["nix"],"timeout_seconds":120,"profiles":["full"]},
     {"name":"flake-check","argv":["nix","flake","check"],"requires":["nix"],"timeout_seconds":900,"profiles":["full"]}
   ],

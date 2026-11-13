@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Ruff from PATH, as in the Nix shell and the VM, else the same version through
+# uv: `bash scripts/ruff format src tests examples`. The flake checks that the
+# version below is the one Nixpkgs is pinned to.
+set -euo pipefail
+version=0.17.4
+if command -v ruff >/dev/null 2>&1; then exec ruff "$@"; fi
+exec uv tool run "ruff@$version" "$@"

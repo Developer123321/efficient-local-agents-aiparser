@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
+# The gate before every commit: format, lint and the offline tests. Needs uv
+# and nothing else; it sends no request.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 uv sync --locked
-ruff format --check src tests examples
-ruff check src tests examples
-uv run --locked pytest -q
+bash scripts/ruff format --check src tests examples
+bash scripts/ruff check src tests examples
+# As a module: a virtual environment whose folder was moved keeps stale script paths.
+uv run --locked python -m pytest -q

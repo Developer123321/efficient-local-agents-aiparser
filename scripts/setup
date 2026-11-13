@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# First run on any laptop (Linux, macOS, Windows with Git Bash or WSL): checks
+# what is installed, says how to get what is missing, installs the Python
+# dependencies and proves the harness works offline. It installs nothing
+# outside this folder, needs no key and sends no model request.
+#
+#   bash scripts/setup            # dependencies, readiness report, offline rehearsal
+#   bash scripts/setup --check    # also format, lint and the whole test suite
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+
+full=false
+case "${1:-}" in
+  "") ;;
+  --check) full=true ;;
+  *) printf 'Usage: bash scripts/setup [--check]\n' >&2; exit 2 ;;
+esac
+
+case "$(uname -s)" in
+  Linux) if grep -qi microsoft /proc/version 2>/dev/null; then os=wsl; else os=linux; fi ;;
+  Darwin) os=macos ;;
+  MINGW* | MSYS* | CYGWIN*) os=windows ;;
+  *) os=other ;;
+esac
+say() { printf '%s\n' "$*"; }
+missing() { printf 'MISSING  %s\n' "$*" >&2; }
+
+command -v git >/dev/null 2>&1 || { missing 'git: https://git-scm.com/downloads'; exit 1; }
+if ! command -v uv >/dev/null 2>&1; then
+  missing 'uv, which installs Python and the dependencies. Then open a new terminal:'
+  case "$os" in
+    windows) say '  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"' >&2 ;;
+    macos) say '  brew install uv      # or: curl -LsSf https://astral.sh/uv/install.sh | sh' >&2 ;;
+    *) say '  curl -LsSf https://astral.sh/uv/install.sh | sh' >&2 ;;
+  esac
+  exit 1
+fi
+say "system: $os $(uname -m), $(uv --version)"
+
+# uv fetches the interpreter named in .python-version when none is installed.
+if ! uv sync --locked; then
+  missing 'the Python dependencies could not be installed. If uv found no matching'
+  say '  interpreter, update it (uv self update) or use the one the image runs:' >&2
+  say '  UV_PYTHON=3.13 bash scripts/setup' >&2
+  exit 1
+fi
+
+if [[ ! -e .env ]]; then
+  cp .env.example .env
+  chmod 600 .env 2>/dev/null || true
+  say 'created .env from .env.example: enter the endpoint, model and key there on the day'
+fi
+
+# Presence checks only; exits non-zero if the candidate profile cannot find
+# its playbooks or skills.
+uv run --locked hacklab doctor --strict --config configs/live.toml >/dev/null
+say 'harness: installed, the candidate profile finds its playbooks and skills'
+
+# The rehearsal incident, generated and solved by code alone.
+scenario=$(mktemp -d "${TMPDIR:-/tmp}/hacklab-setup.XXXXXX")
+trap 'rm -rf -- "$scenario"' EXIT
+uv run --locked hacklab practice --seed 7 --out "$scenario/incident" >/dev/null
+report=$(uv run --locked hacklab --db "$scenario/tracking.sqlite" benchmark \
+  --config configs/practice.toml --dataset "$scenario/incident/cases.jsonl" \
+  --root "$scenario/incident/docs" --out "$scenario/report.json")
+grep -q '"accuracy": 1.0' <<<"$report" || { missing 'the offline rehearsal did not score 9 of 9'; exit 1; }
+say 'rehearsal: 9 of 9 tasks solved offline, no model call'
+
+if "$full"; then
+  bash scripts/check
+fi
+
+engine=
+for candidate in docker podman; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" info >/dev/null 2>&1; then
+    engine=$candidate
+    break
+  fi
+done
+if [[ -n "$engine" ]]; then
+  say "container engine: $engine answers; test the submission image with: bash scripts/container-test"
+else
+  say 'container engine: none answers. The submission runs in a container, so one laptop'
+  say '  per team needs Docker or Podman for: bash scripts/container-test'
+  case "$os" in
+    linux) say "  Ubuntu/Debian: sudo apt install docker.io && sudo usermod -aG docker \$USER, then log in again" ;;
+    wsl) say '  Docker Desktop on Windows with "WSL integration" switched on for this distribution' ;;
+    macos) say '  Docker Desktop, or: brew install colima docker && colima start' ;;
+    windows) say '  Docker Desktop (WSL 2 backend); start it before the test' ;;
+    *) ;;
+  esac
+fi
+command -v just >/dev/null 2>&1 || say 'optional: just (https://just.systems) for the short commands in the Justfile'
+say 'Ready. Next: README.md, then docs/playbook.md.'
