@@ -13,6 +13,8 @@ any host machine configuration.
   submission image runs 3.13. Do not use syntax newer than 3.11.
 - After touching the image, the agent's entry point or its dependencies:
   `just container-test`.
+- Dashboard: `just dashboard-check` (locked Bun dependencies, TypeScript 7,
+  real SQLite API tests and the production frontend build).
 - Nix: `nix flake check` and the VM checks in docs/vm.md.
 - Report the checks actually executed and what stayed untested.
 

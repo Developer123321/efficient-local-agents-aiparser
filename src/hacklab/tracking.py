@@ -170,6 +170,7 @@ def _safe_config(config: dict) -> dict:
         "agent": {
             "workflow",
             "pipeline_rounds",
+            "list_preview",
             "preload_results",
             "decimal_separator",
             "inventory",
@@ -211,6 +212,7 @@ def _safe_config(config: dict) -> dict:
         "timeout_seconds",
         "task_timeout_seconds",
         "max_context_chars",
+        "max_observation_chars",
         "max_output_tokens",
         "max_total_tokens",
         "max_cost_usd",
@@ -277,6 +279,7 @@ class Tracker:
                 );
                 CREATE INDEX IF NOT EXISTS calls_run ON calls(run_id);
                 CREATE INDEX IF NOT EXISTS events_run ON events(run_id);
+                CREATE INDEX IF NOT EXISTS runs_started ON runs(started_at DESC, id DESC);
             """)
 
     @contextmanager

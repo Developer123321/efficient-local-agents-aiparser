@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import threading
 import time
@@ -155,12 +156,25 @@ class DevSpend:
 
     def __init__(self, budget: DevBudget, tracker: Any):
         self.budget = budget
+        self.tracker = tracker
         spent = tracker.spend()
         self.calls: int = spent["calls"]
         self.tokens: int = spent["tokens"]
         self.usd: float = spent["usd"]
 
     def check(self) -> None:
+        # Development campaigns opt into stopping after the first request whose
+        # cost is unknown. Recheck before HTTP retries as well as new role calls.
+        unknown_baseline = os.environ.get("HACKLAB_OPTIMIZATION_UNKNOWN_BASELINE")
+        if unknown_baseline is not None:
+            try:
+                allowed_unknown = int(unknown_baseline)
+            except ValueError:
+                raise BudgetExceeded("optimization_cost_guard_invalid") from None
+            if allowed_unknown < 0:
+                raise BudgetExceeded("optimization_cost_guard_invalid")
+            if self.tracker.spend()["unknown_cost_calls"] > allowed_unknown:
+                raise BudgetExceeded("optimization_cost_unknown")
         limits = (
             (self.budget.max_calls, self.calls),
             (self.budget.max_tokens, self.tokens),
