@@ -19,7 +19,7 @@ from hacklab.evidence import Evidence, Ledger
 from hacklab.forensics import decode as decoding
 from hacklab.forensics import iocs as indicators
 from hacklab.forensics import phases as killchain
-from hacklab.forensics.events import flatten, parse_timestamp, time_field
+from hacklab.forensics.events import flatten, parse_timestamp
 from hacklab.forensics.graph import Edge, Graph
 from hacklab.guard import ActionGuard
 from hacklab.models import Action
@@ -314,29 +314,10 @@ class Toolbox:
 
     def _after(self, arguments: dict[str, Any]) -> Observation:
         document = str(arguments.get("document", ""))
-        columns = self.documents.columns(document)
         key = str(arguments.get("key", ""))
-        time = arguments.get("time") or time_field(columns)
-        if key not in columns:
-            return Observation(error=f"key must be a column: {', '.join(columns[:40])}")
-        if not time or time not in columns:
-            return Observation(error="no time column found; pass time")
-        if not arguments.get("first"):
-            return Observation(error="first must be a filter for the trigger rows")
-        started: dict[str, Any] = {}
-        for unit in self.documents.rows(document, arguments["first"]):
-            moment = parse_timestamp(unit.values.get(time))
-            who = unit.values.get(key)
-            if moment is None or who in (None, ""):
-                continue
-            who = str(who)
-            started[who] = min(started[who], moment) if who in started else moment
-        selected = []
-        for unit in self.documents.rows(document, arguments.get("where")):
-            moment = parse_timestamp(unit.values.get(time))
-            begin = started.get(str(unit.values.get(key)))
-            if moment is not None and begin is not None and moment >= begin:
-                selected.append(unit)
+        selected, triggered = self.documents.after(
+            document, key, arguments.get("first"), arguments.get("where"), arguments.get("time")
+        )
         observation = self._summarize(
             document,
             selected,
@@ -344,7 +325,7 @@ class Toolbox:
             arguments.get("column"),
             arguments.get("limit"),
         )
-        observation.lines.append(f"-- {len(started)} {key} values had a trigger row")
+        observation.lines.append(f"-- {triggered} {key} values had a trigger row")
         return observation
 
     def render(self, result: dict[str, Any]) -> Observation:
@@ -570,7 +551,7 @@ class Toolbox:
             return Observation(
                 error=f"source and target must be columns: {', '.join(columns[:40])}"
             )
-        time = arguments.get("time") or time_field(columns)
+        time = arguments.get("time") or self.documents.time_column(document)
         edges = [
             Edge(
                 str(unit.values[source]),
@@ -626,7 +607,7 @@ class Toolbox:
         columns = self.documents.columns(document)
         if column not in columns:
             return Observation(error=f"column must be one of: {', '.join(columns[:40])}")
-        time = arguments.get("time") or time_field(columns)
+        time = arguments.get("time") or self.documents.time_column(document)
         summary = killchain.summarize((unit.values for unit in units), column, time)
         return Observation(
             [
@@ -769,26 +750,33 @@ class Toolbox:
                 pass
         return tidy
 
+    def authorize(self, spec: ToolSpec, arguments: dict[str, Any]) -> tuple[list[Action], str]:
+        """The actions a mutating call stands for, or the fixed code of why it is refused."""
+        # Identifier-like arguments are the targets; prose such as a reason is not.
+        targets = [
+            value
+            for key, value in arguments.items()
+            if isinstance(value, str)
+            and key.casefold() not in _FREE_TEXT
+            and value.strip()
+            and " " not in value.strip()
+        ]
+        actions = [Action(type=spec.name, target=target) for target in targets[:5]]
+        if not actions:
+            # A step without a target, such as closing an endpoint: only
+            # its type and the action count can be checked.
+            actions = [Action(type=spec.name, target=spec.name)]
+        accepted, problems = self.guard.check(actions, targeted=bool(targets))
+        if problems or not accepted:
+            return [], (problems or ["already_done"])[0]
+        return accepted, ""
+
     def _external(self, spec: ToolSpec, arguments: dict[str, Any]) -> Observation:
         accepted: list[Action] = []
         if spec.mutating:
-            # Identifier-like arguments are the targets; prose such as a reason is not.
-            targets = [
-                value
-                for key, value in arguments.items()
-                if isinstance(value, str)
-                and key.casefold() not in _FREE_TEXT
-                and value.strip()
-                and " " not in value.strip()
-            ]
-            actions = [Action(type=spec.name, target=target) for target in targets[:5]]
-            if not actions:
-                # A step without a target, such as closing an endpoint: only
-                # its type and the action count can be checked.
-                actions = [Action(type=spec.name, target=spec.name)]
-            accepted, problems = self.guard.check(actions, targeted=bool(targets))
-            if problems or not accepted:
-                return Observation(error=f"action refused: {(problems or ['already_done'])[0]}")
+            accepted, refusal = self.authorize(spec, arguments)
+            if refusal:
+                return Observation(error=f"action refused: {refusal}")
         try:
             result = spec.handler(**arguments)
         except TypeError:

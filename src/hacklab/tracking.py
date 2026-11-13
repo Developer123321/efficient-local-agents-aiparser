@@ -197,6 +197,7 @@ def _safe_config(config: dict) -> dict:
         "max_steps",
         "max_calls",
         "max_retries",
+        "http_retries",
         "timeout_seconds",
         "task_timeout_seconds",
         "max_context_chars",
@@ -223,7 +224,8 @@ def _private_file(path: Path) -> None:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError("Tracking files must be regular files")
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):  # Not on Windows, where the mode means little.
+            os.fchmod(fd, 0o600)
     finally:
         os.close(fd)
 
@@ -472,7 +474,7 @@ class Tracker:
         # Open first, compare actual inode identities, then truncate. This also
         # protects against a destination that is a hardlink to a SQLite file.
         fd = os.open(destination, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "w") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
             opened = os.fstat(stream.fileno())
             for item in storage:
                 if item.exists():
@@ -494,3 +496,37 @@ class Tracker:
                 }
             stream.truncate(0)
             stream.write(json.dumps(payload, sort_keys=True, indent=2, allow_nan=False) + "\n")
+
+
+class NoReceipts:
+    """Stands in for the tracker where nothing can be written.
+
+    An evaluation container may have no writable place at all. Receipts serve
+    our own measurements; the answers must still be produced.
+    """
+
+    path = None
+
+    def start_run(self, *args: Any, **kwargs: Any) -> str:
+        return str(uuid.uuid4())
+
+    def event(self, *args: Any, **kwargs: Any) -> None:
+        return
+
+    def record_call(self, *args: Any, **kwargs: Any) -> None:
+        return
+
+    def finish_run(self, *args: Any, **kwargs: Any) -> None:
+        return
+
+    def calls(self, run_id: str) -> list[dict]:
+        return []
+
+    def runs(self, limit: int = 50) -> list[dict]:
+        return []
+
+    def spend(self) -> dict:
+        return {"calls": 0, "tokens": 0, "usd": 0.0, "unknown_cost_calls": 0}
+
+    def summary(self, run_id: str | None = None) -> dict:
+        return Tracker._summary([], 0)

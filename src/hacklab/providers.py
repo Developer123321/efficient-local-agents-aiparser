@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -26,6 +27,10 @@ from hacklab.cache import ResponseCache
 from hacklab.config import Config, DevBudget, JevConfig, Limits, ModelConfig, read_secret
 
 MAX_RESPONSE_BYTES = 1_000_000
+# Pause before the first, second, ... retry of a request that failed for a
+# reason that passes: a rate limit, a server error, a lost connection. A longer
+# Retry-After from the server wins.
+RETRY_PAUSES = (0.5, 1.0, 2.0, 4.0)
 
 
 class ProviderError(RuntimeError):
@@ -55,18 +60,29 @@ class Budget:
     locally and remains unknown in the tracking database.
     """
 
-    def __init__(self, limits: Limits, *, clock: Callable[[], float] = time.monotonic):
+    def __init__(
+        self,
+        limits: Limits,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        deadline: float | None = None,
+    ):
         self.limits = limits
         self.clock = clock
         self.started = clock()
+        # The end of the whole run on the same clock: no task may outlive it.
+        self.deadline = deadline
         self.calls = 0
         self.tokens = 0
         self.cost_usd = 0.0
 
     def remaining_seconds(self) -> float:
-        return self.limits.task_timeout_seconds - (self.clock() - self.started)
+        left = self.limits.task_timeout_seconds - (self.clock() - self.started)
+        return left if self.deadline is None else min(left, self.deadline - self.clock())
 
     def check_time(self) -> None:
+        if self.deadline is not None and self.clock() >= self.deadline:
+            raise BudgetExceeded("run_deadline_reached")
         if self.remaining_seconds() <= 0:
             raise BudgetExceeded("task_time_budget_exhausted")
 
@@ -280,7 +296,10 @@ class _HTTPProvider:
                 return self._replay(body, cached, parse, output_allowance)
             if self.cache.mode == "replay":
                 raise ProviderError("cache_miss_in_replay_mode")
-        for attempt in range(self.limits.max_retries + 1):
+        retries = self.limits.http_retries
+        if retries is None:
+            retries = self.limits.max_retries
+        for attempt in range(retries + 1):
             if self.spend is not None:
                 self.spend.check()
             reservation = self.budget.reserve(
@@ -332,6 +351,12 @@ class _HTTPProvider:
                             self.cache.put(key, self.provider, payload)
                         result = parse(payload)
                         status = "ok"
+            except httpx.TimeoutException:
+                # The request may have been served and billed. A slow endpoint
+                # gets one more try, not a full timeout per allowed retry.
+                error = ProviderError("provider_timeout")
+                status = "timeout"
+                retry = attempt == 0
             except httpx.TransportError:
                 error = ProviderError("provider_transport_error")
                 retry = True
@@ -386,8 +411,9 @@ class _HTTPProvider:
             self.budget.check_consumed()
             if error is None:
                 return result
-            if not retry or attempt >= self.limits.max_retries:
+            if not retry or attempt >= retries:
                 raise error
+            retry_delay = max(retry_delay, RETRY_PAUSES[min(attempt, len(RETRY_PAUSES) - 1)])
             if retry_delay:
                 self.budget.check_time()
                 if retry_delay >= self.budget.remaining_seconds():
@@ -436,6 +462,39 @@ class _HTTPProvider:
         return result
 
 
+def chat_endpoint(base_url: str) -> str:
+    """The URL requests go to: the API prefix plus /chat/completions.
+
+    A URL that already names a chat route, or carries a query string such as
+    an API version, is complete and used as given.
+    """
+    parts = urlsplit(base_url.strip())
+    path = parts.path.rstrip("/")
+    if parts.query or path.endswith(("/chat/completions", "/chat")):
+        return base_url.strip()
+    return urlunsplit(parts._replace(path=path + "/chat/completions"))
+
+
+def _reply(payload: Any) -> dict[str, Any]:
+    """The decision inside a chat completion, whichever client produced it."""
+    choice = payload["choices"][0]
+    if not isinstance(choice, dict):
+        raise ModelOutputError("model_choice_must_be_object")
+    if choice.get("finish_reason") == "length":
+        raise ModelOutputError("model_output_truncated")
+    message = choice["message"]
+    content = message["content"]
+    if isinstance(content, list):
+        # Some gateways return the reply as typed parts.
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    if not isinstance(content, str) or not content.strip():
+        if message.get("reasoning_content") or message.get("reasoning"):
+            # The whole allowance went into hidden thinking.
+            raise ModelOutputError("model_returned_reasoning_only")
+        raise ModelOutputError("model_content_must_be_json_text")
+    return decision_object(content)
+
+
 class SmallModelProvider(_HTTPProvider):
     """An explicitly selected OpenAI-compatible Chat Completions adapter."""
 
@@ -457,14 +516,11 @@ class SmallModelProvider(_HTTPProvider):
         key = read_secret(config.api_key_env)
         if not key:
             raise ProviderError("small_model_key_missing")
-        endpoint = config.base_url.rstrip("/")
-        if not endpoint.endswith("/chat/completions"):
-            endpoint += "/chat/completions"
         self.config = config
         super().__init__(
             provider="openai",
             model=config.model,
-            endpoint=endpoint,
+            endpoint=chat_endpoint(config.base_url),
             key=key,
             input_rate=config.input_usd_per_million,
             output_rate=config.output_usd_per_million,
@@ -499,27 +555,181 @@ class SmallModelProvider(_HTTPProvider):
                 "json_schema": {"name": "agent_decision", "schema": schema, "strict": False},
             }
 
-        def parse(payload: Any) -> dict[str, Any]:
-            choice = payload["choices"][0]
-            if not isinstance(choice, dict):
-                raise ModelOutputError("model_choice_must_be_object")
-            if choice.get("finish_reason") == "length":
-                raise ModelOutputError("model_output_truncated")
-            message = choice["message"]
-            content = message["content"]
-            if isinstance(content, list):
-                # Some gateways return the reply as typed parts.
-                content = "".join(
-                    part.get("text", "") for part in content if isinstance(part, dict)
-                )
-            if not isinstance(content, str) or not content.strip():
-                if message.get("reasoning_content") or message.get("reasoning"):
-                    # The whole allowance went into hidden thinking.
-                    raise ModelOutputError("model_returned_reasoning_only")
-                raise ModelOutputError("model_content_must_be_json_text")
-            return decision_object(content)
+        return self.request(body, _reply, output_allowance=self.limits.max_output_tokens)
 
-        return self.request(body, parse, output_allowance=self.limits.max_output_tokens)
+
+def _within(seconds: float, call: Callable[..., Any], *arguments: Any) -> Any:
+    """`call(*arguments)`, but stop waiting after `seconds` and raise TimeoutError.
+
+    A foreign client may have no timeout of its own, and a task must never
+    wait without a bound. The abandoned call runs on in a daemon thread and
+    its result is dropped.
+    """
+    outcome: list[tuple[bool, Any]] = []
+
+    def run() -> None:
+        try:
+            outcome.append((True, call(*arguments)))
+        except BaseException as exc:  # Handed to the caller below.
+            outcome.append((False, exc))
+
+    worker = threading.Thread(target=run, daemon=True, name="kit-model-call")
+    worker.start()
+    worker.join(max(0.001, seconds))
+    if not outcome:
+        raise TimeoutError
+    ok, value = outcome[0]
+    if not ok:
+        raise value
+    return value
+
+
+class FunctionModel:
+    """The small model behind a function of the organizers' kit instead of our HTTP client.
+
+    `call(messages)` returns the reply text, or a chat completion as a dict or
+    as an SDK object. Budgets, receipts, the development allowance, the
+    request timeout and the replay cache work as for the HTTP adapter; usage
+    is recorded when the completion reports it and stays unknown otherwise.
+    """
+
+    def __init__(
+        self,
+        call: Callable[[list[dict[str, str]]], Any],
+        config: ModelConfig,
+        limits: Limits,
+        budget: Budget,
+        tracker: Any,
+        run_id: str,
+        *,
+        cache: ResponseCache | None = None,
+        cache_salt: str = "",
+        spend: DevSpend | None = None,
+    ):
+        self.call = call
+        self.config = config
+        self.limits = limits
+        self.budget = budget
+        self.tracker = tracker
+        self.run_id = run_id
+        self.cache = cache
+        self.cache_salt = cache_salt
+        self.spend = spend
+        self.rates = (config.input_usd_per_million, config.output_usd_per_million)
+
+    def close(self) -> None:
+        return
+
+    def _receipt(
+        self,
+        reservation: Reservation,
+        payload: Any,
+        started: float | None,
+        status: str,
+        **extra: Any,
+    ) -> None:
+        """Settle one attempt against the task budget and write its receipt."""
+        input_tokens, output_tokens = _usage(payload, "openai")
+        self.budget.settle(reservation, input_tokens, output_tokens, *self.rates)
+        self.tracker.record_call(
+            self.run_id,
+            provider="openai",
+            model=self.config.model or "kit",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=0.0 if started is None else (time.monotonic() - started) * 1000,
+            status=status,
+            input_rate=self.rates[0],
+            output_rate=self.rates[1],
+            **extra,
+            **_usage_details(payload),
+        )
+        if self.spend is not None and not extra.get("cache_hit"):
+            known = None not in (input_tokens, output_tokens, self.rates[0])
+            self.spend.add(
+                input_tokens,
+                output_tokens,
+                (input_tokens * self.rates[0] + output_tokens * (self.rates[1] or 0.0)) / 1_000_000
+                if known
+                else None,
+            )
+        self.budget.check_consumed()
+
+    @staticmethod
+    def _decision(payload: dict[str, Any]) -> dict[str, Any]:
+        if "choices" in payload:
+            return _reply(payload)
+        return decision_object(str(payload.get("content") or ""))
+
+    def complete(self, messages: list[dict[str, str]], schema: dict[str, Any]) -> dict[str, Any]:
+        body = {"model": self.config.model, "messages": messages}
+        key = None
+        if self.cache is not None:
+            key = self.cache.key("openai", "kit", body, self.cache_salt)
+            cached = self.cache.get(key)
+            if cached is not None:
+                reservation = self.budget.reserve(body, self.limits.max_output_tokens, *self.rates)
+                self._receipt(reservation, cached, None, "cache_hit", cache_hit=True)
+                return self._decision(cached)
+            if self.cache.mode == "replay":
+                raise ProviderError("cache_miss_in_replay_mode")
+        retries = self.limits.http_retries
+        if retries is None:
+            retries = self.limits.max_retries
+        for attempt in range(retries + 1):
+            if self.spend is not None:
+                self.spend.check()
+            reservation = self.budget.reserve(body, self.limits.max_output_tokens, *self.rates)
+            started = time.monotonic()
+            payload: Any = None
+            error: ProviderError | None = None
+            result: dict[str, Any] = {}
+            status = "ok"
+            try:
+                wait = min(self.limits.timeout_seconds, self.budget.remaining_seconds())
+                reply = _within(wait, self.call, messages)
+            except TimeoutError:
+                # As for the HTTP adapter: a slow model gets one more try.
+                reply = None
+                error, status = ProviderError("provider_timeout"), "timeout"
+            except Exception:
+                # The kit's client failed: a rate limit, a lost connection, a bug.
+                reply = None
+                error, status = ProviderError("kit_model_call_failed"), "transport_error"
+            if error is None:
+                try:
+                    if hasattr(reply, "model_dump"):
+                        reply = reply.model_dump()
+                    if isinstance(reply, str):
+                        reply = {"content": reply}
+                    if not isinstance(reply, dict):
+                        raise ModelOutputError("model_content_must_be_json_text")
+                    payload = reply
+                    result = self._decision(payload)
+                except ModelOutputError as exc:
+                    error, status = exc, "invalid_response"
+                except (KeyError, TypeError, IndexError, AttributeError, ValueError):
+                    error = ModelOutputError("provider_response_schema_invalid")
+                    status = "invalid_response"
+                if self.cache is not None and key is not None and isinstance(payload, dict):
+                    try:
+                        # Stored whether or not it parsed: a reply that needs a
+                        # repair turn replays as the same reply.
+                        self.cache.put(key, "openai", payload)
+                    except (TypeError, ValueError):
+                        pass  # Not plain JSON: this reply is simply not replayable.
+            self._receipt(reservation, payload, started, status, attempt=attempt + 1)
+            if error is None:
+                return result
+            if isinstance(error, ModelOutputError) or attempt >= retries:
+                raise error
+            if status == "timeout" and attempt > 0:
+                raise error
+            pause = RETRY_PAUSES[min(attempt, len(RETRY_PAUSES) - 1)]
+            if pause >= self.budget.remaining_seconds():
+                raise BudgetExceeded("task_time_budget_exhausted_before_retry")
+            time.sleep(pause)
+        raise ProviderError("request_failed")  # pragma: no cover
 
 
 class _Outage:
@@ -672,8 +882,14 @@ class JevProvider(_HTTPProvider):
 
 
 def make_providers(
-    config: Config, budget: Budget, tracker: Any, run_id: str, cache_salt: str = ""
-) -> tuple[SmallModelProvider, JevProvider | None]:
+    config: Config,
+    budget: Budget,
+    tracker: Any,
+    run_id: str,
+    cache_salt: str = "",
+    model: Callable[[list[dict[str, str]]], Any] | None = None,
+) -> tuple[SmallModelProvider | FunctionModel, JevProvider | None]:
+    """The generator and, if enabled, Jev. `model` replaces our HTTP client for the generator."""
     cache = (
         ResponseCache(Path(config.cache.path), config.cache.mode)
         if config.cache.mode != "off"
@@ -688,7 +904,12 @@ def make_providers(
         "cache_salt": cache_salt,
         "spend": DevSpend(config.budget, tracker) if limited else None,
     }
-    small = SmallModelProvider(config.model, config.limits, budget, tracker, run_id, **shared)
+    arguments = (config.model, config.limits, budget, tracker, run_id)
+    small: SmallModelProvider | FunctionModel = (
+        SmallModelProvider(*arguments, **shared)
+        if model is None
+        else FunctionModel(model, *arguments, **shared)
+    )
     try:
         jev = (
             JevProvider(config.jev, config.limits, budget, tracker, run_id, **shared)

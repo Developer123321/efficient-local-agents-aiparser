@@ -49,17 +49,30 @@ class JevConfig(StrictModel):
 
 
 class Limits(StrictModel):
-    max_steps: int = Field(default=6, ge=1, le=30)
-    max_calls: int = Field(default=10, ge=1, le=100)
+    """Per-task bounds. The defaults are the measured candidate profile, configs/live.toml:
+
+    a profile written from scratch on the day starts from values that were
+    run, not from ones that cut multi-step tasks short.
+    """
+
+    max_steps: int = Field(default=8, ge=1, le=30)
+    max_calls: int = Field(default=16, ge=1, le=100)
+    # Repair turns after an invalid model reply, which cost tokens.
     max_retries: int = Field(default=1, ge=0, le=3)
-    timeout_seconds: float = Field(default=25, gt=0, le=120)
-    task_timeout_seconds: float = Field(default=180, gt=0, le=1800)
+    # Attempts after a rate limit, a server error or a lost connection, with a
+    # growing pause. Waiting is nearly free and a failed task scores nothing,
+    # so this may exceed max_retries. Unset, it equals max_retries.
+    http_retries: int | None = Field(default=None, ge=0, le=6)
+    timeout_seconds: float = Field(default=60, gt=0, le=120)
+    task_timeout_seconds: float = Field(default=300, gt=0, le=1800)
     max_context_chars: int = Field(default=24000, ge=2000, le=200000)
     # One tool result as the model sees it. Every result is sent again with
     # each later step, so this is the main lever on input tokens.
     max_observation_chars: int = Field(default=4000, ge=500, le=20000)
-    max_output_tokens: int = Field(default=1400, ge=128, le=8192)
-    max_total_tokens: int = Field(default=16000, ge=128)
+    max_output_tokens: int = Field(default=3000, ge=128, le=8192)
+    # Checked before each request against the request's size in bytes plus the
+    # output allowance, so it must hold several whole prompts.
+    max_total_tokens: int = Field(default=120000, ge=128)
     max_cost_usd: float | None = Field(default=None, gt=0)
 
 
@@ -88,6 +101,8 @@ class AgentConfig(StrictModel):
     # Directory of skill files: short recipes for one kind of task each. A file
     # starts with "match: <regex>"; when the task text matches, the rest is
     # added to the first prompt. Code picks the skill, never the evidence.
+    # Either a path, or "package:folder" for a folder inside an installed
+    # package, which is found wherever the working directory is.
     skills: str = ""
     # "package.module:attribute" of a hacklab.playbooks.Playbooks instance:
     # deterministic solvers that answer a recognised task without a model call.
@@ -113,8 +128,9 @@ class GuardConfig(StrictModel):
     allowed_actions: list[str] = Field(default_factory=list, max_length=100)
     protected_targets: list[str] = Field(default_factory=list, max_length=200)
     require_grounded_targets: bool = True
-    # A brake against runaway containment; raise it for a large incident.
-    max_actions: int = Field(default=20, ge=0, le=2000)
+    # A brake against runaway containment. A swarm incident needs one action
+    # per compromised agent, token and dataset.
+    max_actions: int = Field(default=200, ge=0, le=2000)
 
 
 class CacheConfig(StrictModel):
@@ -153,7 +169,7 @@ class Config(StrictModel):
 
 
 def load_config(path: Path | None = None) -> Config:
-    data = tomllib.loads(path.read_text()) if path else {}
+    data = tomllib.loads(path.read_text(encoding="utf-8")) if path else {}
     model = data.setdefault("model", {})
     for env, key in [("SMALL_MODEL_BASE_URL", "base_url"), ("SMALL_MODEL_NAME", "model")]:
         if os.environ.get(env):
@@ -169,5 +185,5 @@ def load_config(path: Path | None = None) -> Config:
 def read_secret(env_name: str) -> str:
     """Support secret-file channels without placing secret values in Nix or arguments."""
     if file_name := os.environ.get(env_name + "_FILE"):
-        return Path(file_name).read_text().strip()
+        return Path(file_name).read_text(encoding="utf-8").strip()
     return os.environ.get(env_name, "").strip()

@@ -5,6 +5,7 @@ import json
 import math
 import statistics
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -38,9 +39,8 @@ class Case(StrictModel):
 def load_cases(path: Path) -> list[Case]:
     if path.stat().st_size > 8_000_000:
         raise ValueError("Benchmark dataset exceeds 8 MB")
-    cases = [
-        Case.model_validate_json(line) for line in path.read_text().splitlines() if line.strip()
-    ]
+    lines = path.read_text(encoding="utf-8").splitlines()
+    cases = [Case.model_validate_json(line) for line in lines if line.strip()]
     if not cases or len(cases) > 1000:
         raise ValueError("Benchmark must contain 1..1000 cases")
     ids = [case.task.id for case in cases]
@@ -108,36 +108,52 @@ def _percentile(values: list[float], q: float) -> float:
     return sorted(values)[max(0, math.ceil(len(values) * q) - 1)]
 
 
-def benchmark(dataset: Path, root: Path, config: Config, tracker, repeat: int = 1) -> dict:
+def benchmark(
+    dataset: Path, root: Path, config: Config, tracker, repeat: int = 1, workers: int = 1
+) -> dict:
+    """Run every case and score it. `workers` cases run side by side.
+
+    Parallel runs send the same requests and score the same; only the elapsed
+    times differ, so compare latencies between runs of equal `workers`.
+    """
     from hacklab.agent import run_task
 
     if not 1 <= repeat <= 10:
         raise ValueError("repeat must be 1..10")
+    if not 1 <= workers <= 32:
+        raise ValueError("workers must be 1..32")
     cases = load_cases(dataset)
     digest = dataset_digest(dataset, root, cases)
-    records = []
-    for repetition in range(repeat):
-        for case in cases:
-            started = time.monotonic()
-            # The runner receives ONLY Task, never Case, Expected, category or reference labels.
-            # Repetitions measure variance, so each gets its own cache entries.
-            run_id, answer = run_task(
-                case.task, root, config, tracker, cache_salt=str(repetition) if repetition else ""
-            )
-            scored = score_answer(answer, case.expected, ToolRegistry(root, case.task.documents))
-            tracker.finish_run(run_id, answer.status, answer.model_dump(), scored["score"])
-            records.append(
-                {
-                    "run_id": run_id,
-                    "task_id": case.task.id,
-                    "category": case.category,
-                    "repetition": repetition,
-                    "status": answer.status,
-                    **scored,
-                    "elapsed_ms": (time.monotonic() - started) * 1000,
-                    "usage": tracker.summary(run_id),
-                }
-            )
+
+    def run(job: tuple[int, Case]) -> dict:
+        repetition, case = job
+        started = time.monotonic()
+        # The runner receives ONLY Task, never Case, Expected, category or reference labels.
+        # Repetitions measure variance, so each gets its own cache entries.
+        run_id, answer = run_task(
+            case.task, root, config, tracker, cache_salt=str(repetition) if repetition else ""
+        )
+        scored = score_answer(answer, case.expected, ToolRegistry(root, case.task.documents))
+        tracker.finish_run(run_id, answer.status, answer.model_dump(), scored["score"])
+        return {
+            "run_id": run_id,
+            "task_id": case.task.id,
+            "category": case.category,
+            "repetition": repetition,
+            "status": answer.status,
+            # Set when the harness, not the model, ended the task.
+            "cause": answer.cause or None,
+            **scored,
+            "elapsed_ms": (time.monotonic() - started) * 1000,
+            "usage": tracker.summary(run_id),
+        }
+
+    jobs = [(repetition, case) for repetition in range(repeat) for case in cases]
+    if workers == 1:
+        records = [run(job) for job in jobs]
+    else:
+        with ThreadPoolExecutor(workers) as pool:
+            records = list(pool.map(run, jobs))  # In input order, whoever finishes first.
     costs = [r["usage"]["cost_usd"] for r in records]
     durations = [r["elapsed_ms"] for r in records]
     return {
@@ -199,18 +215,23 @@ def failures(report: dict) -> dict:
 
     A failed `required_documents` or `grounded_quotes` points at retrieval, a
     failed answer check with sources present at the model or a rule, and a
-    status mismatch at the abstention policy or a provider error.
+    status mismatch at the abstention policy or a provider error. `causes`
+    names what the harness itself stopped: a limit in `[limits]` that is too
+    tight, a provider failure, a setup error. Fix those before any prompt.
     """
     grouped: dict[str, dict] = {}
     for record in report["records"]:
         entry = grouped.setdefault(
-            record["category"], {"tasks": 0, "failed": 0, "checks": {}, "statuses": {}}
+            record["category"],
+            {"tasks": 0, "failed": 0, "checks": {}, "statuses": {}, "causes": {}},
         )
         entry["tasks"] += 1
         if record["score"] >= 1:
             continue
         entry["failed"] += 1
         entry["statuses"][record["status"]] = entry["statuses"].get(record["status"], 0) + 1
+        if record.get("cause"):
+            entry["causes"].setdefault(record["cause"], []).append(record["task_id"])
         for check, passed in record["checks"].items():
             if not passed:
                 entry["checks"].setdefault(check, []).append(record["task_id"])
