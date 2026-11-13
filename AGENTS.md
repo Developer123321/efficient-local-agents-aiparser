@@ -21,6 +21,11 @@ any host machine configuration.
 - Code owns control flow, arithmetic, parsing, decoding and validation. The
   model makes small typed decisions. If code can compute an answer from the
   data, write a playbook (`hacklab.playbooks`) instead of a longer prompt.
+- Between the two sits a skill (`[agent] skills`): a few lines for one kind of
+  task, with the data's real file and column names and one example of the
+  right tool calls. Write one when a trace shows the model taking a wrong
+  turn that a hint would prevent; keep it short, it is paid for on every
+  matching task.
 - A playbook checks what it relies on (files, columns, counts) and returns
   `None` when the data looks different, so that the model takes over. It must
   work on a seed or case it has not seen.
@@ -38,9 +43,7 @@ any host machine configuration.
 - Jev is a native System One provider, never a chat model. Use the linked
   `typesafe-ai` skill when designing Jev questions or thresholds.
 - Only the models the organizers provide may make run-time decisions. Do not
-  add any other model, reranker or classifier to the agent. The optional
-  EmbeddingGemma ranking (`[embedding]`) stays off unless the organizers
-  provide that model or allow it.
+  add any other model, embedder, reranker or classifier to the agent.
 - Before changing a prompt or a tool because of a failure, read the trace of
   the failing task (`HACKLAB_TRACE_DIR=.state/trace`).
   Coding assistants build the solution; they never answer competition tasks.

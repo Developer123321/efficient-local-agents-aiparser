@@ -85,6 +85,10 @@ class AgentConfig(StrictModel):
     # What happens to an answer whose evidence or actions still fail validation
     # after the repair allowance: abstain, or return what is verifiable.
     on_unverified: Literal["abstain", "answer"] = "abstain"
+    # Directory of skill files: short recipes for one kind of task each. A file
+    # starts with "match: <regex>"; when the task text matches, the rest is
+    # added to the first prompt. Code picks the skill, never the evidence.
+    skills: str = ""
     # "package.module:attribute" of a hacklab.playbooks.Playbooks instance:
     # deterministic solvers that answer a recognised task without a model call.
     playbooks: str = Field(default="", pattern=r"^([A-Za-z_][\w.]*:[A-Za-z_]\w*)?$")
@@ -113,21 +117,6 @@ class GuardConfig(StrictModel):
     max_actions: int = Field(default=20, ge=0, le=2000)
 
 
-class EmbeddingConfig(StrictModel):
-    """Local semantic ranking beside the keyword search. Off unless the event allows it.
-
-    The rules forbid an own embedder in the agent. Enable this only if the
-    organizers provide the model or have confirmed that it may be used.
-    """
-
-    enabled: bool = False
-    model_dir: str = ".state/models/embeddinggemma-300m-onnx"
-    # Keyword hits that are re-ranked by meaning, and the share of the semantic rank.
-    candidates: int = Field(default=40, ge=5, le=100)
-    weight: float = Field(default=0.5, ge=0, le=1)
-    max_tokens: int = Field(default=256, ge=16, le=2048)
-
-
 class CacheConfig(StrictModel):
     """Development only: replays identical requests instead of paying again."""
 
@@ -148,7 +137,6 @@ class Config(StrictModel):
     jev: JevConfig = Field(default_factory=JevConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
-    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     limits: Limits = Field(default_factory=Limits)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     budget: DevBudget = Field(default_factory=DevBudget)

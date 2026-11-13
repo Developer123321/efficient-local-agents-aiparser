@@ -166,6 +166,7 @@ def _safe_config(config: dict) -> dict:
             "thought_chars",
             "on_unverified",
             "playbooks",
+            "skills",
             "tools",
         },
         "guard": {
@@ -176,7 +177,6 @@ def _safe_config(config: dict) -> dict:
             "max_actions",
         },
         "cache": {"mode"},
-        "embedding": {"enabled", "candidates"},
     }
     for section, allowed in selections.items():
         values = config.get(section, {})

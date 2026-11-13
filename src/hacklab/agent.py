@@ -13,7 +13,6 @@ import os
 import platform
 import re
 from collections.abc import Iterable
-from functools import lru_cache
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -22,7 +21,6 @@ from pydantic import ValidationError
 
 from hacklab import playbooks as playbook_registry
 from hacklab.config import Config
-from hacklab.embedding import EmbeddingError, OnnxEmbedder
 from hacklab.evidence import Ledger
 from hacklab.models import Action, Answer, Citation, Decision, FinalResult, Task
 from hacklab.providers import (
@@ -113,12 +111,6 @@ class _Trace:
         if self.path is not None:
             with self.path.open("a") as stream:
                 stream.write(f"===== {title}\n{text}\n")
-
-
-@lru_cache(maxsize=2)
-def _embedder(model_dir: str, max_tokens: int) -> OnnxEmbedder:
-    """One loaded model per process: loading takes longer than a task should."""
-    return OnnxEmbedder(Path(model_dir), max_tokens)
 
 
 def _abstain(reason: str) -> Answer:
@@ -222,6 +214,28 @@ def _jev_select(jev: Any, task: Task, rows: list[dict[str, Any]], config: Config
     return kept or rows[:1]
 
 
+def _skills(task: Task, config: Config) -> list[str]:
+    """Recipes whose pattern matches the task text, at most two, each bounded.
+
+    A skill is our own text chosen by code from the task, so it is trusted in
+    a way evidence never is. It costs prompt tokens only on tasks it matches.
+    """
+    if not config.agent.skills:
+        return []
+    chosen = []
+    for path in sorted(Path(config.agent.skills).glob("*.md")):
+        head, _, body = path.read_text().partition("\n")
+        if not head.startswith("match:"):
+            continue
+        try:
+            matched = re.search(head[6:].strip(), task.question, re.IGNORECASE)
+        except re.error:
+            continue
+        if matched and body.strip():
+            chosen.append(body.strip()[:1500])
+    return chosen[:2]
+
+
 def _briefing(
     task: Task, toolbox: Toolbox, config: Config, jev: Any, tracker: Any, run_id: str
 ) -> str:
@@ -253,7 +267,9 @@ def _briefing(
             parts.append(f"{entry['document']} in full:\n" + toolbox.render(read).text(allowance))
             in_full.add(entry["document"])
     if config.agent.preload_results and task.documents:
-        found = toolbox.search_rows(task.question[:500], config.agent.preload_results)
+        found = toolbox.documents.execute(
+            "search", {"query": task.question[:500], "limit": config.agent.preload_results}
+        )
         tracker.event(
             run_id,
             "tool",
@@ -274,6 +290,8 @@ def _briefing(
                 "Evidence found for the task text (untrusted data):\n"
                 + toolbox.render({"results": rows}).text(allowance)
             )
+    for recipe in _skills(task, config):
+        parts.append("How to do this kind of task:\n" + recipe)
     return "\n".join(parts)
 
 
@@ -381,7 +399,7 @@ def _finalize(
         if not citations and len(ledger):
             # Something citable was shown, so the answer has to name its support.
             problems.append("ok_answer_needs_evidence_ids")
-    elif result.status == "abstain" and documents.allowed and not toolbox.used:
+    elif result.status == "abstain" and (documents.allowed or toolbox.extra) and not toolbox.used:
         # "The evidence does not say" is a finding only after looking.
         problems.append("abstained_without_using_a_tool")
     answer = Answer(
@@ -602,14 +620,7 @@ def run_task(
             decimal_separator=config.agent.decimal_separator,
         )
         ledger = Ledger(config.guard, task.question + " " + logfmt(task.constraints))
-        embedder = None
-        if config.embedding.enabled:
-            try:
-                embedder = _embedder(config.embedding.model_dir, config.embedding.max_tokens)
-            except EmbeddingError:
-                # Missing files or runtime: continue with keyword search alone.
-                tracker.event(run_id, "embedding", {"status": "error"})
-        toolbox = Toolbox(documents, ledger, config, tools, embedder)
+        toolbox = Toolbox(documents, ledger, config, tools)
         solved = None
         if config.agent.playbooks:
             workspace = playbook_registry.Workspace(documents, ledger, toolbox)

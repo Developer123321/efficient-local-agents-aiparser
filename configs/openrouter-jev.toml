@@ -19,6 +19,7 @@ threshold = 0.7
 preload_results = 5
 inventory = true
 preload_documents_under = 40
+skills = "examples/skills"
 tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
 
 [guard]

@@ -50,13 +50,19 @@ class ActionReply(ModelReply):
 
     type: str = Field(min_length=1, max_length=100)
     target: str = Field(default="", max_length=500)
-    targets_from: str | None = Field(default=None, max_length=20)
+    # One list result or several: "r2", "r2, r3" or ["r2", "r3"].
+    targets_from: str | None = Field(default=None, max_length=200)
     reason: str = Field(default="", max_length=500)
 
     @field_validator("target", "reason", mode="before")
     @classmethod
     def _text(cls, value: Any) -> Any:
         return "" if value is None else str(value)[:500]
+
+    @field_validator("targets_from", mode="before")
+    @classmethod
+    def _references(cls, value: Any) -> Any:
+        return ", ".join(map(str, value)) if isinstance(value, list) else value
 
 
 class FinalResult(ModelReply):
@@ -69,11 +75,16 @@ class FinalResult(ModelReply):
     status: Literal["ok", "abstain", "error"] = "ok"
     answer: str = Field(default="", max_length=12000)
     # A list result such as "r3": code writes all of its values as the answer.
-    answer_from: str | None = Field(default=None, max_length=20)
+    answer_from: str | None = Field(default=None, max_length=200)
     evidence: list[str] = Field(default_factory=list, max_length=30)
     actions: list[ActionReply] = Field(default_factory=list, max_length=200)
     confidence: float = Field(default=0.0, ge=0, le=1)
     reason: str = Field(default="", max_length=2000)
+
+    @field_validator("answer_from", mode="before")
+    @classmethod
+    def _answer_references(cls, value: Any) -> Any:
+        return ", ".join(map(str, value)) if isinstance(value, list) else value
 
     @field_validator("answer", mode="before")
     @classmethod

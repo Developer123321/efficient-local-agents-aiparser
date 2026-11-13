@@ -8,8 +8,8 @@ against a real model; only this file was edited after them.
 
 | Check | Observed result |
 | --- | --- |
-| `project-check fast` (`scripts/check`: Ruff format and lint, `pytest`) | Passed; **241 tests** on Python 3.15.0, one skipped there (the real embedder needs ONNX Runtime, which has no CPython 3.15 wheel) |
-| The same tests on other interpreters | 241 passed and one skipped on Python 3.15.2, 3.13.18 and 3.11.18 inside the guest; with the `embeddings` extra on 3.13.18 outside the guest all 242 passed, including the real EmbeddingGemma test |
+| `project-check fast` (`scripts/check`: Ruff format and lint, `pytest`) | Passed; **239 tests** on Python 3.15.0 |
+| The same tests on other interpreters | All 239 passed on Python 3.15.2, 3.13.18 and 3.11.18 inside the guest |
 | `nix fmt -- --ci` | All Nix source formatted |
 | `nix flake check` | All outputs evaluated; `vm-contract` (now also: rootless Podman on, Docker daemon off) and `host-contract` built and passed |
 | `bash scripts/vm-smoke` | Passed: guest with Bob Shell booted under KVM on a disposable disk and ran `scripts/guest-check` over its console, including the container test |
@@ -72,10 +72,11 @@ With a temporary OpenRouter key and a TypeSafe key, both kept in the ignored
   18 of 27 incident tasks and 8 of 8 document tasks with reasoning low.
   Reasoning high, a visible thought and schema-enforced replies were
   measured on two seeds each and brought no gain.
-- EmbeddingGemma (official ONNX export, 8-bit) loaded in 1.7 s on CPU,
-  reproduced the model card's similarity ranking and ranked three paraphrased
-  questions onto the right runbook lines. On the document fixtures it changed
-  no prompt and therefore no result.
+- Two example skills raised the containment task from an abstention to
+  about 0.9 precision and 0.85 recall on three seeds; the count of exactly
+  right tasks did not change.
+- A local embedder (EmbeddingGemma) was built, measured without effect on
+  the fixtures, and removed again; the rules forbid an own embedder.
 
 One run per configuration at temperature 0: these numbers show direction,
 not significance.
@@ -94,8 +95,7 @@ not significance.
   were written together from public reports of the July 2026 intrusion. A
   perfect score there shows that the tools work on data built for them.
 - **Docker.** The container test ran with rootless Podman in the guest, not
-  with Docker or Docker Desktop, and not on macOS, Windows or ARM. The image
-  was tested without the `embeddings` extra and without a baked model.
+  with Docker or Docker Desktop, and not on macOS, Windows or ARM.
 - Injection patterns against attacks other than those written for the tests;
   XOR payloads with an unknown key longer than one byte.
 - Bob's license acceptance and login, and whether Bob activates the linked

@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hacklab.config import Config
-from hacklab.embedding import Embedder, cosine, fuse
 from hacklab.evidence import Evidence, Ledger
 from hacklab.forensics import decode as decoding
 from hacklab.forensics import iocs as indicators
@@ -195,10 +194,7 @@ class Toolbox:
         ledger: Ledger,
         config: Config,
         extra: Iterable[ToolSpec] = (),
-        embedder: Embedder | None = None,
     ):
-        self.embedder = embedder
-        self._vectors: dict[str, list[float]] = {}
         self.documents = documents
         self.ledger = ledger
         self.config = config
@@ -239,8 +235,16 @@ class Toolbox:
         return self.ledger.add(row["document"], row["locator"], quote, derived)
 
     def result(self, reference: Any) -> Result | None:
-        match = RESULT_ID.search(str(reference).lower())
-        return self.results.get(match.group()) if match else None
+        """The list behind "r2", or the union of several such as "r2, r3"."""
+        names = RESULT_ID.findall(str(reference).lower())
+        found = [self.results[name] for name in names if name in self.results]
+        if not names or len(found) != len(names):
+            return None
+        if len(found) == 1:
+            return found[0]
+        values = tuple(dict.fromkeys(value for listed in found for value in listed.values))
+        evidence = tuple(dict.fromkeys(item for listed in found for item in listed.evidence))
+        return Result(values, evidence[:30])
 
     def _listing(self, entries: list[tuple[str, str, str | None]]) -> list[str]:
         """Lines for a list of values and a result ID that stands for all of them.
@@ -302,7 +306,11 @@ class Toolbox:
             )
             for position, value in enumerate(ranked)
         ]
-        return Observation(self._listing(entries) + [f"-- matched_rows={len(units)}"])
+        lines = self._listing(entries) + [f"-- matched_rows={len(units)}"]
+        if units:
+            # Which column holds what is easier to see in a row than in a name.
+            lines.append("example row: " + cite(units[0]).line())
+        return Observation(lines)
 
     def _after(self, arguments: dict[str, Any]) -> Observation:
         document = str(arguments.get("document", ""))
@@ -675,8 +683,7 @@ class Toolbox:
                     document, units, arguments["operation"], arguments.get("column"), None
                 )
             if name == "search":
-                tidy = self._tidy(name, arguments)
-                found = self.render(self.search_rows(tidy.get("query", ""), tidy.get("limit", 5)))
+                found = self.render(self.documents.execute(name, self._tidy(name, arguments)))
                 found.lines += self._search_hints(str(arguments.get("query", "")))
                 return found
             if name in {"read", "table", "calculate"}:
@@ -695,51 +702,6 @@ class Toolbox:
         except Exception:
             # Organizer tools and hostile inputs must not end the task.
             return Observation(error="The tool failed on these arguments")
-
-    def search_rows(self, query: Any, limit: Any) -> dict[str, Any]:
-        """Keyword search, re-ranked by meaning when an embedder is configured.
-
-        The candidates are the best keyword hits plus every line of short
-        prose documents, so a paraphrase without a shared word can still be
-        found. Any failure of the embedder leaves the keyword ranking.
-        """
-        if self.embedder is None:
-            return self.documents.execute("search", {"query": query, "limit": limit})
-        pool = self.config.embedding.candidates
-        found = self.documents.execute("search", {"query": query, "limit": pool})
-        if "error" in found or not isinstance(limit, int):
-            return found if "error" in found else {"error": "limit must be a number"}
-        rows = list(found["results"])
-        lexical = list(range(len(rows)))
-        seen = {(row["document"], row["locator"]) for row in rows}
-        for entry in self.documents.inventory():
-            if entry.get("columns") or "error" in entry or entry["units"] > 200:
-                continue
-            for unit in self.documents.units(entry["document"]):
-                key = (entry["document"], unit.locator)
-                if unit.text.strip() and key not in seen and len(rows) < 300:
-                    rows.append({"document": key[0], "locator": key[1], "quote": unit.text[:2000]})
-        try:
-            texts = (row["quote"][:1000] for row in rows)
-            new = list(dict.fromkeys(text for text in texts if text not in self._vectors))
-            for text, vector in zip(new, self.embedder.encode(new), strict=True):
-                self._vectors[text] = vector
-            target = self.embedder.encode([str(query)], query=True)[0]
-            semantic = sorted(
-                range(len(rows)),
-                key=lambda index: (
-                    -cosine(target, self._vectors[rows[index]["quote"][:1000]]),
-                    index,
-                ),
-            )
-        except Exception:
-            # Retrieval quality may drop; the task must not.
-            found["results"] = found["results"][:limit]
-            return found
-        order = fuse(lexical, semantic, self.config.embedding.weight)
-        found["results"] = [rows[index] for index in order[:limit]]
-        found["truncated"] = len(rows) > limit
-        return found
 
     def describe_table(self, document: str) -> list[str]:
         """One line per column of a table: its frequent values, or how many it has."""

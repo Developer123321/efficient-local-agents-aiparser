@@ -66,6 +66,9 @@ assistants build the agent; at run time only the provided models decide.
   [rehearsal playbooks](src/hacklab/practice.py) show the pattern;
   [examples/](examples) holds the templates to copy on the day, one for
   playbooks and one for plugging the harness into the starter kit.
+- **Skills for the small model.** Short recipes with example tool calls that
+  code adds to the prompt only for the kind of task they match
+  ([examples/skills/](examples/skills)).
 - **Forensic tools** for the model and for playbooks: layered decoding with
   chunk reassembly, indicator extraction, log tables with filters and
   grouping, "what did each actor do after its trigger event", propagation
@@ -100,7 +103,6 @@ assistants build the agent; at run time only the provided models decide.
 | `hacklab practice --seed N --out DIR` | Write a rehearsal incident with reference answers |
 | `hacklab decode FILE --key K` / `hacklab iocs FILE` | Analyst helpers: peel a payload, list indicators |
 | `hacklab mock-server --port 8080` | Stand-in model endpoint for plumbing tests |
-| `hacklab embedding-fetch` | Download the EmbeddingGemma ONNX files for the optional embedder |
 | `hacklab runs` / `stats` / `export --out FILE` | Inspect local run metadata and usage |
 
 Use `uv run --locked` before `hacklab` outside an activated environment.

@@ -33,7 +33,6 @@ Each HTTP attempt -> local private SQLite receipt
 | `tools.py` | Scoped document access, search index, tables, arithmetic |
 | `forensics/` | Decoding, indicators, timestamps and filters, propagation, phases |
 | `evidence.py` | Ledger of every row shown, evidence IDs, citations, grounding |
-| `embedding.py` | Optional local EmbeddingGemma ranking; off unless the event allows it |
 | `guard.py` | Injection scan, secret and blob placeholders, action guard |
 | `providers.py` | HTTP adapters, task budget, development allowance, replay |
 | `cache.py` | Development-only replay of identical requests |
@@ -51,6 +50,13 @@ Cost counts as much as accuracy. In rough order of effect:
   talked out of its answer. `configs/practice.toml` solves the rehearsal
   incident this way. On the day, write one solver per revealed task type; the
   model handles what is left.
+- **Skills.** `[agent] skills` names a directory of recipes, one per kind of
+  task: a first line `match: <regex>`, then a few lines of how to go about
+  it with example tool calls. When the task text matches, code adds the
+  recipe to the first prompt, at most two per task. A skill costs tokens only
+  on the tasks it matches, leaves the system prompt cacheable, and is chosen
+  from the task text, never from evidence. It is the cheap middle between a
+  longer prompt for every task and a playbook in code.
 - **Calls per task.** The briefing describes every table (frequent values per
   column, time range), shows short documents and tiny tables in full
   (`preload_documents_under`) and adds search hits from long prose
@@ -60,7 +66,9 @@ Cost counts as much as accuracy. In rough order of effect:
 - **List results.** A tool that computes a list (distinct values, reach of a
   graph) prints a preview and names the list `r3`. The final answer uses it
   with `"answer_from":"r3"`, an action with `"targets_from":"r3"`; code writes
-  out every value. A model that retypes the preview gets the whole list.
+  out every value, and `"r2, r3"` joins two lists for a rule with two parts.
+  A model that retypes the preview gets the whole list. Under each list one
+  example row shows which column holds what.
 - **Observation size.** `max_observation_chars` bounds one tool result. Every
   result is sent again with each later step, so this is the main lever on
   input tokens.
@@ -206,16 +214,6 @@ invoice.
 
 Parsers and decoders run in the agent's process and are not preempted by the
 task timer. The container is the boundary for hostile input.
-
-## Optional embedder
-
-`[embedding] enabled = true` re-ranks keyword hits and every line of short
-prose documents with EmbeddingGemma (300M parameters, ONNX, CPU, no network).
-`hacklab embedding-fetch` downloads the official ONNX export once; the
-original repository is gated behind a licence click. It needs the
-`embeddings` extra and Python 3.11 to 3.14. **The event's rules forbid an own
-embedder in the agent**: leave it off unless the organizers provide this model
-or allow it. A failing or missing embedder falls back to keyword search.
 
 ## Development cache and trace
 

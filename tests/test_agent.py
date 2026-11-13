@@ -2,6 +2,7 @@ import json
 import stat
 import sys
 import types
+from pathlib import Path
 
 import httpx
 import pytest
@@ -881,3 +882,67 @@ def test_two_fruitless_calls_in_a_row_bring_a_nudge_to_finish(lab, monkeypatch):
     assert nudge not in shown[0] and nudge not in shown[1]
     assert nudge in shown[2] and nudge in shown[3]
     assert answer.status == "abstain"
+
+
+def test_a_matching_skill_is_added_to_the_first_prompt_and_only_then(lab, monkeypatch, tmp_path):
+    root, tracker = lab
+    task = audit(root)
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "a-datasets.md").write_text("match: datasets must go\nUse after with distinct.\n")
+    (skills / "b-other.md").write_text("match: quarterly report\nNot for this task.\n")
+    (skills / "c-broken.md").write_text("match: (unclosed\nNever shown.\n")
+    (skills / "d-no-head.md").write_text("No match line.\n")
+    (skills / "e-second.md").write_text("match: which\nSecond recipe.\n")
+    (skills / "f-third.md").write_text("match: which\nThird recipe.\n")
+    config, calls = live(monkeypatch, [UPLOADS_AFTER, final("", ["r1"])])
+    config.agent.skills = str(skills)
+    agent.run_task(task, root, config, tracker)
+    first = calls[0]["messages"][1]["content"]
+    assert "How to do this kind of task:\nUse after with distinct." in first
+    # At most two skills, in file order; a broken or headless file is skipped.
+    assert "Second recipe." in first and "Third recipe." not in first
+    assert "Not for this task." not in first and "Never shown." not in first
+    assert "No match line." not in first
+    # The system prompt stays the same with and without skills: the prefix is cacheable.
+    plain, plain_calls = live(monkeypatch, [UPLOADS_AFTER, final("", ["r1"])])
+    agent.run_task(task, root, plain, tracker)
+    assert plain_calls[0]["messages"][0] == calls[0]["messages"][0]
+    assert "How to do this kind of task" not in plain_calls[0]["messages"][1]["content"]
+
+
+def test_a_rule_with_two_parts_is_answered_from_two_list_results(lab, monkeypatch):
+    root, tracker = lab
+    task = audit(root)
+    early = tool(
+        "table",
+        document="audit.jsonl",
+        operation="distinct",
+        column="target",
+        where={"ts__lt": "2026-11-14T01:05:00Z"},
+    )
+    reply = final("", [], [{"type": "takedown_dataset", "targets_from": ["r1", "r2"]}])
+    reply["result"]["answer_from"] = "r1, r2"
+    config, _ = live(monkeypatch, [UPLOADS_AFTER, early, reply])
+    _, answer = agent.run_task(task, root, config, tracker)
+    assert answer.answer == "ds/a1/x1, ds/a2/x2, ds/a2/early"
+    assert [a.target for a in answer.actions] == ["ds/a1/x1", "ds/a2/x2", "ds/a2/early"]
+
+
+def test_shipped_example_skills_match_the_tasks_they_are_written_for():
+    from hacklab.config import Config as Settings
+
+    config = Settings()
+    config.agent.skills = str(Path(__file__).parents[1] / "examples" / "skills")
+    contain = Task(id="c", question="Contain the incident according to the runbook.")
+    listing = Task(id="l", question="Which tokens must be revoked under the runbook?")
+    single = Task(id="s", question="Which agent was compromised first?")
+    assert (
+        len(agent._skills(contain, config)) == 1
+        and "targets_from" in agent._skills(contain, config)[0]
+    )
+    assert (
+        len(agent._skills(listing, config)) == 1
+        and "answer_from" in agent._skills(listing, config)[0]
+    )
+    assert agent._skills(single, config) == []

@@ -91,6 +91,7 @@ treat differences of one task as noise.
 | Reasoning high, seeds 7 and 8 | 6 and 5 of 9 | 43, 47 | 137,000, 155,000 | $0.0215, $0.0180 |
 | Reasoning low with `response_format = "json_schema"`, seeds 7 and 8 | 7 and 6 of 9 | 32, 33 | 57,000, 59,000 | $0.0041, $0.0042 |
 | Reasoning off with `thought_chars = 300`, seeds 7 and 8 | 5 and 5 of 9 | 49, 48 | 148,000, 148,000 | $0.0095, $0.0095 |
+| Reasoning low with the two example skills, seeds 7, 8, 9 | 7, 6, 5 of 9 | 31, 30, 27 | 53,000, 52,000, 46,000 | $0.0037, $0.0036, $0.0032 |
 | Reasoning low plus Jev as final judge, seed 7 (before the fruitless-call brake) | 6 of 9 | 44 | 78,000 | $0.0056 |
 | Reasoning low plus Jev as final judge, seed 9 (before the fruitless-call brake) | 5 of 9 | 42 | 87,000 | $0.0062 |
 | Playbooks, any seed | 9 of 9 | 0 | 0 | $0 |
@@ -135,19 +136,26 @@ What the traces showed, and what was changed because of it:
   A rejection now triggers one more attempt. The net effect was mixed: wrong
   answers became abstentions, and once a correct answer did too. Use it if a
   wrong answer costs more than an abstention.
-- EmbeddingGemma changed nothing on these fixtures: short documents are shown
-  in full, so search is not what decides them. It ranks paraphrases correctly
-  in a direct test; it can only matter for long prose documents.
+- A local embedder (EmbeddingGemma, re-ranking the keyword search) was tried
+  and removed again. It changed no prompt on these fixtures, because short
+  documents are shown in full, and the rules forbid an own embedder anyway.
 
 Still failing with the model alone: the full containment and the two-part
 revocation rule. Both combine several filtered lists under a policy; the
 playbooks solve them. That is the division of labour to expect on the day.
 
-Tried and dropped because the total stayed at 18 of 27 while cost rose by a
-fifth: an example row under every list result, combining several list
-results in one answer, and a prompt sentence on getting one list per rule
-part. The model then planned the right queries but still chose the wrong
-column for created tokens and retyped lists by hand.
+**Skills.** A skill is a short recipe for one kind of task, with example
+tool calls, that code adds to the first prompt when the task text matches its
+pattern (`[agent] skills`, examples in `examples/skills/`). With two generic
+skills, one for containment and one for "list all …" questions, the full
+containment went from an abstention or a quarter of the actions to 0.86 to
+0.94 precision and 0.83 to 0.86 recall on all three seeds, in four or five
+calls, and the whole run got cheaper. The count of exactly right tasks stayed
+at 18 of 27: the model still took created tokens from the column named
+`token` instead of `target`. A skill that knows the data's columns would
+close that, and can only be written once the real data is known. A general
+sentence in the system prompt to the same effect had changed nothing; the
+worked example in a matched skill did.
 
 To repeat: put a key into `.env`, then `just practice-live 7
 configs/openrouter.toml`. Set `HACKLAB_TRACE_DIR=.state/trace` to get the

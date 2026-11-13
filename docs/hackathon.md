@@ -140,12 +140,6 @@ forwards a request to another model (a test request was answered by an OpenAI
 model); it is not the System One API and was not used. Jev was measured
 through its native API with `configs/openrouter-jev.toml`.
 
-**EmbeddingGemma** (`google/embeddinggemma-300m`) is gated on Hugging Face
-behind a licence click; the ungated official ONNX export
-`onnx-community/embeddinggemma-300m-ONNX` is what `hacklab embedding-fetch`
-downloads. Whether an embedder may be part of the agent is the organizers'
-decision: their mail forbids an own one.
-
 **IBM Bob** is a coding assistant for building the agent. It is not a run-time
 model. [Bob Shell](https://bob.ibm.com/docs/shell) reads `AGENTS.md` as custom
 rules and project skills from `.bob/skills`; see [VM operation](vm.md#ibm-bob).

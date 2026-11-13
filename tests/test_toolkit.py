@@ -99,7 +99,9 @@ def test_structured_logs_become_filterable_tables(box):
     assert count[0] == "value=4 operation=count matched_rows=4"
     groups = lines(box, "table", document="audit.jsonl", operation="group", column="actor")
     assert groups[:3] == ["agent-1 count=3", "agent-2 count=2", "agent-3 count=1"]
-    assert groups[3:] == ["-- r1 = these 3 values", "-- matched_rows=6"]
+    assert groups[3:5] == ["-- r1 = these 3 values", "-- matched_rows=6"]
+    # One row shows which column holds what; names alone mislead.
+    assert groups[5].startswith("example row: [e") and "actor=agent-1 action=login" in groups[5]
     assert box.result("r1").values == ("agent-1", "agent-2", "agent-3")
     assert len(box.result("R1").evidence) == 3 and box.result("r9") is None
     board = lines(box, "table", document="board.json", where={"to": "agent-3"})
@@ -367,7 +369,7 @@ def test_rows_come_in_time_order_and_long_lists_are_previewed_not_dumped(tmp_pat
     first = lines(box, "table", document="log.jsonl", limit=1)
     assert "actor=a00" in first[0] and "log.jsonl line:2" in first[0]
     listed = lines(box, "table", document="log.jsonl", operation="distinct", column="actor")
-    assert len(listed) == 12 + 3 and listed[12] == "… 29 more values, all kept in r1"
+    assert len(listed) == 12 + 4 and listed[12] == "… 29 more values, all kept in r1"
     assert listed[13] == "-- r1 = these 41 values"
     result = box.result("r1")
     assert len(result.values) == 41 and len(result.evidence) == 30
@@ -413,3 +415,30 @@ def test_tool_results_are_logged_in_brief_for_a_reviewer(box):
     assert len(box.log) == 1 and box.used
     assert box.log[0].startswith('table({"document": "audit.jsonl", "operation": "count"')
     assert "-> value=2 operation=count" in box.log[0]
+
+
+def test_several_list_results_combine_without_repeats(box):
+    lines(
+        box,
+        "table",
+        document="audit.jsonl",
+        operation="distinct",
+        column="actor",
+        where={"action": "exec_payload"},
+    )
+    lines(
+        box,
+        "table",
+        document="audit.jsonl",
+        operation="distinct",
+        column="actor",
+        where={"action": "login"},
+    )
+    assert box.result("r1").values == ("agent-1", "agent-2")
+    assert box.result("r2").values == ("agent-1", "agent-3")
+    union = box.result("r1, r2")
+    assert union.values == ("agent-1", "agent-2", "agent-3")
+    assert box.result("r2 and r1").values == ("agent-1", "agent-3", "agent-2")
+    assert len(union.evidence) == len(set(union.evidence)) == 4
+    # One unknown ID makes the whole reference unknown instead of a silent subset.
+    assert box.result("r1, r9") is None and box.result("") is None

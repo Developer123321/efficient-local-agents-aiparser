@@ -37,6 +37,7 @@ tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "gra
 # thought_chars = 300        # Schema-guided reasoning; costs output tokens.
 # on_unverified = "answer"   # If a wrong answer costs no more than an abstention.
 # playbooks = "mypackage.playbooks:playbooks"   # Code-only solvers, tried first.
+# skills = "skills"   # Directory of recipes added to the prompt for matching tasks.
 # decimal_separator = "comma"  # Fix once the data's convention is known; default "auto".
 
 [guard]
@@ -59,11 +60,6 @@ max_observation_chars = 4000  # One tool result; resent with every later step.
 max_output_tokens = 1400
 max_total_tokens = 16000
 # max_cost_usd = 0.02  # Requires all enabled prices to be explicitly configured.
-
-# Local EmbeddingGemma ranking. Forbidden unless the organizers provide the
-# model or allow it; see docs/architecture.md.
-# [embedding]
-# enabled = true
 
 # The team's development allowance across all runs in this tracking database.
 # [budget]

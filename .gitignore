@@ -20,4 +20,4 @@ dist/
 vendor/
 .agents/skills/
 .bob/skills/
-.tabula/state.json
+.tabula/

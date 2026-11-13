@@ -90,17 +90,22 @@ Levers, in the order they usually pay off:
    to injected text. Start from
    [examples/event_playbooks.py](../examples/event_playbooks.py) and check
    every solver on the hold-out file.
-2. **Fewer calls.** Raise `preload_results`, set `preload_documents_under`,
+2. **A skill per task type that code cannot solve outright.** Five lines with
+   the real file and column names and one example of the right tool calls,
+   in a file under the `skills` directory (`examples/skills/` shows the
+   form). In rehearsal this turned a failing containment into one that was
+   about 90 % right, at lower cost.
+3. **Fewer calls.** Raise `preload_results`, set `preload_documents_under`,
    lower `max_steps`. Look at calls per task in `hacklab failures`.
-3. **Smaller prompts.** Remove unused tools from `[agent] tools`; lower
+4. **Smaller prompts.** Remove unused tools from `[agent] tools`; lower
    `max_context_chars`; shorten the system prompt only against measurements.
-4. **Model settings.** Thinking off or low through `extra_body`, the
+5. **Model settings.** Thinking off or low through `extra_body`, the
    documented sampling parameters, `response_format = "json_schema"` if the
    endpoint enforces schemas. In rehearsal, low reasoning beat no reasoning
    on both accuracy and cost; measure it again on the event's model.
-5. **Guards.** `injection = "withhold"`, `on_unverified`, stricter
+6. **Guards.** `injection = "withhold"`, `on_unverified`, stricter
    `allowed_actions`. Decide by the scoring rules from the opening.
-6. **Jev**, if it is reachable in the final run: as a filter for preloaded
+7. **Jev**, if it is reachable in the final run: as a filter for preloaded
    evidence, as the final judgment, or as a `choose` router in a playbook.
    Keep it only if the benchmark shows a gain after its cost.
 
