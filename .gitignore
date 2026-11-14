@@ -16,7 +16,8 @@ dist/
 submission.tar.gz
 *.egg-info/
 vendor/
-.agents/skills/
+.agents/skills/*
+!.agents/skills/hacklab-attack-audit/
 .bob/skills/
 .tabula/
 .env
