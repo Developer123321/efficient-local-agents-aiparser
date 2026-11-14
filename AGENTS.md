@@ -94,8 +94,7 @@ any host machine configuration.
   tokens from text length. Keep the cost a provider reports
   (`reported_cost_usd`) apart from the estimate (`cost_usd`); a missing
   reported cost is unknown, never zero, and a replay is not new spend.
-- Keys, private documents, VM disks and run-time state stay out of Git and the
-  Nix store. Model replies exist only in the development cache and in the
+- Model replies exist only in the development cache and in the
   opt-in development trace, both under `.state/`; the tracking database holds
   no bodies. Do not add any other body logging.
 - The submission image runs with the cache off, without a trace directory and
