@@ -152,20 +152,49 @@ def aimed_at_agents(text: str) -> bool:
     return False
 
 
-def column(rows: list[dict[str, str]], *names: str, where: Any = None) -> str:
-    """The name of a column: the first candidate that exists, else the one whose values fit."""
+def is_time(value: str) -> bool:
+    try:
+        parse_time(value)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def column(
+    rows: list[dict[str, str]],
+    *names: str,
+    where: Any = None,
+    whole: Any = None,
+    first: bool = False,
+) -> str:
+    """The name of a column: a candidate name that exists, else the one whose values fit.
+
+    `where` must hold for every filled cell, `whole` for the list of all
+    cells; `first` falls back to the first column. Headers differ between
+    runs, the content does not.
+    """
     if not rows:
         raise Unreadable("empty table")
-    keys = list(rows[0].keys())
+    keys = [key for key in rows[0] if not key.startswith("_")]
     for name in names:
         if name in keys:
             return name
-    if where is not None:
-        for key in keys:
-            values = [row.get(key) or "" for row in rows]
-            if values and all(where(value) for value in values if value) and any(values):
-                return key
+    for key in keys:
+        values = [row.get(key) or "" for row in rows]
+        filled = [value for value in values if value]
+        if where is not None and filled and all(where(value) for value in filled):
+            return key
+        if whole is not None and filled and whole(values):
+            return key
+    if first and keys:
+        return keys[0]
     raise Unreadable(f"no column like {names[:1]}")
+
+
+def canon(rows: list[dict[str, str]], **spec: tuple[tuple[str, ...], dict[str, Any]]) -> list[dict]:
+    """Rows with the columns this code needs under fixed names, whatever the header says."""
+    mapping = {name: column(rows, *names, **how) for name, (names, how) in spec.items()}
+    return [{**row, **{name: row[key] for name, key in mapping.items()}} for row in rows]
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:

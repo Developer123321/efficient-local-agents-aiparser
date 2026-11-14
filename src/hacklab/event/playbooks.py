@@ -28,8 +28,10 @@ from hacklab.event.incident import (
     Source,
     Unreadable,
     aimed_at_agents,
+    canon,
     column,
     domain_of,
+    is_time,
     parse_time,
     stamp,
 )
@@ -134,20 +136,23 @@ def dispatch(task: Task, workspace: Workspace) -> Answer | None:
 
 def keys_of(request: str) -> list[str]:
     """The keys of the JSON object the request asks for, in its order."""
-    template = re.search(r"\{[^{}]*\}", request)
-    return re.findall(r'"(\w+)"', template[0]) if template else []
+    for template in re.findall(r"\{[^{}]*\}", request):
+        keys = re.findall(r'"(\w+)"\s*:', template) or re.findall(r'"(\w+)"', template)
+        if keys:
+            return keys
+    return []
 
 
 # -- who was compromised ---------------------------------------------------------
 
 
-@solver(
-    r"\bagents?\b.*(compromised|attacker-directed)|(compromised|attacker-directed).*\bagents?\b"
-)
+@solver(r"compromised|attacker-directed|attacker-controlled|hijacked")
 def compromised(incident: Incident, request: str) -> Solved | None:
     if not re.search(r"\b(array|list)\b", request, re.IGNORECASE):
         return None
-    if re.search(r"trifecta|access request|still running|as of now|right now", request, re.I):
+    if keys_of(request) or re.search(
+        r"trifecta|access request|still running|claims?|token|domain", request, re.IGNORECASE
+    ):
         return None
     found = incident.compromised
     if not found:
@@ -158,7 +163,7 @@ def compromised(incident: Incident, request: str) -> Solved | None:
 # -- where it started --------------------------------------------------------------
 
 
-@solver(r"(where .{0,40}started|entry point|patient zero)")
+@solver(r"artifact")
 def entry(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     if set(keys) != {"artifact", "agent", "at"}:
@@ -171,7 +176,7 @@ def entry(incident: Incident, request: str) -> Solved | None:
 # -- what left the building -----------------------------------------------------------
 
 
-@solver(r"how many customer records were exfiltrated")
+@solver(r"exfiltrat")
 def exfiltrated(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     if set(keys) != {"records", "domains"}:
@@ -184,7 +189,7 @@ def exfiltrated(incident: Incident, request: str) -> Solved | None:
     return {key: value[key] for key in keys}, [transfer.source for transfer in counted]
 
 
-@solver(r"largest share of exfiltrated")
+@solver(r"exfiltrat")
 def largest_share(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     if set(keys) != {"agent", "owner_email"}:
@@ -214,7 +219,7 @@ def largest_share(incident: Incident, request: str) -> Solved | None:
 # -- secrets -----------------------------------------------------------------------
 
 
-@solver(r"first secret|token was read first|read first within the attack")
+@solver(r"token|secret")
 def first_secret(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     if set(keys) != {"token", "service", "owner_agent", "owner_email"}:
@@ -224,9 +229,10 @@ def first_secret(incident: Incident, request: str) -> Solved | None:
         return None
     read = reads[0]
     tokens = incident.table("fleet/tokens.csv")
-    token_id = column(tokens, "secret_id", "token_id", "token", "id")
+    agents = {row[incident.roster_id] for row in incident.roster}
+    token_id = column(tokens, "secret_id", "token_id", "token", first=True)
     service = column(tokens, "svc", "service")
-    owner = column(tokens, "owner_agent", "owner", "agent")
+    owner = column(tokens, "owner_agent", "owner", where=lambda value: value in agents)
     row = next(r for r in tokens if r[token_id] == read.target)
     contact = incident.owner_contact(row[owner])
     agent_row = next(r for r in incident.roster if r[incident.roster_id] == row[owner])
@@ -251,7 +257,7 @@ def leaked_tokens(incident: Incident, request: str) -> Solved | None:
     if not re.search(r"\btoken", request, re.IGNORECASE):
         return None
     prints = incident.table("fleet/token_fingerprints.csv")
-    token_id = column(prints, "token_id", "secret_id", "token", "id")
+    token_id = column(prints, "token_id", "secret_id", "token", first=True)
     digest = column(prints, "sha256_12", where=lambda v: re.fullmatch(r"[0-9a-f]{12}", v))
     by_digest = {row[digest]: row for row in prints}
     materials: list[tuple[str, int | None, str]] = []
@@ -297,17 +303,53 @@ def access_violations(incident: Incident, request: str) -> Solved | None:
     name = next((n for n in re.findall(r"/[\w./-]+requests\.csv", request)), None)
     if name is None or not re.search(r"violat", request, re.IGNORECASE):
         return None
-    rows = incident.table(name)
-    for needed in ("request_id", "ts", "actor", "action", "resource", "scope_class", "result"):
-        column(rows, needed)
+    scope = re.compile(r"[a-z_]+:[a-z_]+")
+    change = re.compile(r"[A-Z]+-\d+")
+    rows = canon(
+        incident.table(name),
+        request_id=(("request_id", "id"), {"first": True}),
+        ts=(("ts", "time", "timestamp"), {"where": is_time}),
+        actor=(
+            ("actor", "principal"),
+            {"whole": lambda v: any(x.startswith("external:") for x in v)},
+        ),
+        action=(
+            ("action", "verb", "operation"),
+            {"whole": lambda v: "read" in v and len(set(v)) < 15},
+        ),
+        resource=(("resource", "scope"), {"where": scope.fullmatch}),
+        scope_class=(
+            ("scope_class", "class"),
+            {"whole": lambda v: "private" in v and len(set(v)) < 9},
+        ),
+        ticket=(
+            ("ticket", "chg", "change_ticket"),
+            {"whole": lambda v: "" in v and all(change.fullmatch(x) for x in v if x)},
+        ),
+        result=(("result", "outcome", "status"), {"whole": lambda v: "denied" in v}),
+    )
     folder = name.rsplit("/", 1)[0]
     policy = incident.text(folder + "/POLICY.md") if incident.has(folder + "/POLICY.md") else ""
     spelled = bool(re.search(r"ticket field is empty", request, re.IGNORECASE))
     tickets: list[dict[str, str]] = []
     if not spelled and "change_tickets.csv" in policy:
-        tickets = incident.table(folder + "/change_tickets.csv")
-        for needed in ("ticket", "status", "actor", "resource", "valid_from", "valid_until"):
-            column(tickets, needed)
+        tickets = canon(
+            incident.table(folder + "/change_tickets.csv"),
+            ticket=(("ticket", "ticket_id", "id", "chg"), {"first": True}),
+            status=(("status", "state"), {"whole": lambda v: "approved" in v}),
+            actor=(
+                ("actor", "principal"),
+                {"whole": lambda v: any(x.startswith("external:") for x in v)},
+            ),
+            resource=(("resource", "scope"), {"where": scope.fullmatch}),
+            valid_from=(("valid_from", "from", "start", "starts_at"), {}),
+            valid_until=(("valid_until", "until", "to", "end", "expires_at"), {}),
+        )
+        revoked_key = (
+            next((k for k in tickets[0] if "revok" in k.lower()), None) if tickets else None
+        )
+        if "revoked_at" in policy and revoked_key is None:
+            return None
     elif not spelled and policy:
         return None  # A policy this code has not read.
 
@@ -324,7 +366,7 @@ def access_violations(incident: Incident, request: str) -> Solved | None:
                 continue
             if not parse_time(ticket["valid_from"]) <= moment < parse_time(ticket["valid_until"]):
                 continue
-            revoked = ticket.get("revoked_at", "")
+            revoked = ticket.get(revoked_key, "") if revoked_key else ""
             if revoked and moment >= parse_time(revoked):
                 continue
             return True
@@ -371,15 +413,16 @@ def _moment(incident: Incident, phrase: str) -> tuple[Any, Source] | None:
         return (found[0].ts, found[0].source) if found else None
     if "siem" in text and "secret" in text:
         sheet, rows = incident.alerts
-        when = column(rows, "timestamp_utc", "timestamp", "time", "raised_at")
-        what = column(rows, "detector", "rule", "alert")
         readers = {e.agent for e in incident.secret_reads}
-        found = [r for r in rows if "secret" in r[what].lower()]
-        found = [r for r in found if r.get("subject") in readers] or found
+        found = [r for r in rows if any("secret" in str(v).lower() for v in r.values())]
+        found = [r for r in found if readers & set(r.values())] or found
         if len(found) != 1:
             return None
-        local = "utc" not in when.lower() and not found[0][when].endswith("Z")
-        moment = parse_time(found[0][when], incident.local_offset if local else 0.0)
+        when = next((k for k, v in found[0].items() if not k.startswith("_") and is_time(v)), None)
+        if when is None:
+            return None
+        zoned = bool(re.search(r"Z$|[+-]\d\d:\d\d$", found[0][when])) or "utc" in when.lower()
+        moment = parse_time(found[0][when], 0.0 if zoned else incident.local_offset)
         path = incident.find("security/siem_alerts.xlsx")[0]
         return moment, {"path": path, "sheet": sheet, "row": int(found[0]["_row"])}
     if "approved transfer" in text:
@@ -410,7 +453,7 @@ def _moment(incident: Incident, phrase: str) -> tuple[Any, Source] | None:
     return None
 
 
-@solver(r"(chronological|earliest (first|to latest)|order these events)")
+@solver(r"chronolog|earliest|\\border\\b|sequence|timeline")
 def timeline(incident: Incident, request: str) -> Solved | None:
     items = re.findall(r"\b([A-H]):\s*(.+?)(?=;\s*[A-H]:|\.\s+[A-Z]|\.?\s*$)", request, re.DOTALL)
     if len(items) < 2 or len({letter for letter, _ in items}) != len(items):
@@ -460,9 +503,12 @@ def mcp_servers(incident: Incident, request: str) -> Solved | None:
         return None
     approved: dict[str, dict[str, str]] = {}
     if hashes:
-        rows = incident.table(folder + "/approved.csv")
-        for needed in ("server", "sha256", "approved_at"):
-            column(rows, needed)
+        rows = canon(
+            incident.table(folder + "/approved.csv"),
+            server=(("server", "name"), {"first": True}),
+            sha256=(("sha256", "hash"), {"where": re.compile(r"[0-9a-fA-F]{64}").fullmatch}),
+            approved_at=(("approved_at", "approved"), {"where": is_time}),
+        )
         for row in sorted(rows, key=lambda r: parse_time(r["approved_at"])):
             approved[row["server"]] = row  # The newest approval wins.
     disabled: dict[str, list[Source]] = {}
@@ -491,15 +537,19 @@ def mcp_servers(incident: Incident, request: str) -> Solved | None:
 # -- permissions ---------------------------------------------------------------------------
 
 
-@solver(r"lethal trifecta")
+@solver(r"trifecta|private data.{0,60}untrusted input.{0,60}outbound")
 def trifecta(incident: Incident, request: str) -> Solved | None:
     if re.search(r"access request|pending", request, re.IGNORECASE):
         return None
+    exported = bool(
+        re.search(
+            r"only the registry export|export time|according to the registry export", request, re.I
+        )
+    )
     current = bool(re.search(r"\b(now|current(ly)?)\b", request, re.IGNORECASE))
-    exported = bool(re.search(r"export time|registry export", request, re.IGNORECASE))
-    if current == exported and not (exported and not re.search(r"right now|as of now", request)):
-        return None
-    state, sources = incident.permissions(current and not exported)
+    if exported == current:
+        return None  # Neither or both: which state is meant is not ours to guess.
+    state, sources = incident.permissions(current)
     found = incident.trifecta(state)
     return (sorted(found), sources) if found else None
 
@@ -523,15 +573,23 @@ def access_review(incident: Incident, request: str) -> Solved | None:
     ):
         if needed not in policy:
             return None
-    rows = incident.table(name)
-    for needed in ("request_id", "filed_by", "agent", "change", "value"):
-        column(rows, needed)
+    agents = {row[incident.roster_id] for row in incident.roster}
+    kinds = {"grant_scope", "revoke_scope", "add_delegation", "remove_delegation"}
+    rows = canon(
+        incident.table(name),
+        request_id=(("request_id", "id"), {"first": True}),
+        filed_by=(("filed_by", "requested_by", "requester", "by"), {}),
+        agent=(("agent", "agent_id", "for_agent"), {"where": lambda value: value in agents}),
+        change=(("change", "kind", "type"), {"where": lambda value: value in kinds}),
+        value=(("value", "scope", "target"), {}),
+    )
+    state_key = next((k for k in rows[0] if k in ("status", "state")), None) if rows else None
     state, sources = incident.permissions(True)
     before = incident.trifecta(state)
     gone = set(incident.quarantined) | set(incident.compromised)
     approve, deny, cited = [], [], []
     for row in rows:
-        if row.get("status", "open").lower() != "open":
+        if state_key and row[state_key].lower() != "open":
             continue  # Withdrawn or decided: not ours to decide.
         agent, kind, value = row["agent"], row["change"], row["value"]
         roster = next((r for r in incident.roster if r[incident.roster_id] == agent), None)
@@ -560,7 +618,7 @@ def access_review(incident: Incident, request: str) -> Solved | None:
 # -- an agent's own report against the log ------------------------------------------------------
 
 
-@solver(r"numbered claims")
+@solver(r"claims?")
 def status_claims(incident: Incident, request: str) -> Solved | None:
     name = next(iter(re.findall(r"/[\w./-]+\.md", request)), None)
     if name is None or not re.search(r"contradict", request, re.IGNORECASE):
@@ -622,7 +680,7 @@ def status_claims(incident: Incident, request: str) -> Solved | None:
     return sorted(wrong), sources
 
 
-@solver(r"still valid or revoked")
+@solver(r"valid.{0,80}revoked|revoked.{0,80}valid")
 def token_status(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     token = re.search(r"\bTOK-[A-Z0-9]+-\d+\b", request)
@@ -639,6 +697,39 @@ def token_status(incident: Incident, request: str) -> Solved | None:
     used = [e for e in mine if e.action == "auth_token"]
     value = {"status": "valid", "at": stamp(used[-1].ts) if used else None}
     return {key: value[key] for key in keys}, [used[-1].source] if used else []
+
+
+@solver(r"board")
+def board_origin(incident: Incident, request: str) -> Solved | None:
+    """The board message an agent acted on, its poster and what started the poster's trace."""
+    keys = keys_of(request)
+    agent = re.search(r"\b([a-z]+-\d+)\b", request)
+    if set(keys) != {"message", "poster", "artifact"} or not agent:
+        return None
+    acted = [
+        e for e in incident.attack_events if e.agent == agent[1] and e.parent.startswith("board:")
+    ]
+    if not acted:
+        return None
+    message = acted[0].parent.removeprefix("board:")
+    posts = [e for e in incident.attack_events if e.action == "post_board" and e.target == message]
+    if not posts:
+        return None
+    start = incident.traces[posts[0].trace][0]
+    if start.action != "read_artifact" or start.target not in incident.hostile_artifacts:
+        return None
+    value = {
+        "message": message,
+        "poster": posts[0].agent,
+        "artifact": incident.hostile_artifacts[start.target],
+    }
+    sources = [acted[0].source]
+    for name in incident.find("board/*.jsonl"):
+        for number, line in enumerate(incident.text(name).splitlines(), 1):
+            if f'"{message}"' in line:
+                sources.append({"path": name, "line": number})
+    sources.append(start.source)
+    return {key: value[key] for key in keys}, sources
 
 
 __all__ = ["domain_of", "playbooks"]
