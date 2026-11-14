@@ -1,5 +1,57 @@
 # What was actually tested
 
+## 14 November 2026 (noon), after reading the starter kit again
+
+Compared with the kit at revision `f160529`. Added: a task's files are read
+again after a tool that changes something (`Mirror.refresh`,
+`Toolbox.changed`); such a call is sent once and a lost reply is an open
+outcome; a submission that did not arrive is kept, sent again and handed in
+from its record after a restart; the cost OpenRouter reports per reply is
+stored beside the estimate; model requests are retried after 408 and after
+402 with `Retry-After`; an `image` tool behind a switch that is off
+(`configs/image-read.toml`). Already there and left as it was: the client,
+the mirror by content hash, the run, typed answers and outcomes, sources,
+the five variables, the run's `meta`.
+
+| Check | Result |
+| --- | --- |
+| `bash scripts/check` (Ruff format and lint, `pytest`) | Passed, **357 tests** on Python 3.15 |
+| Shellcheck on `scripts/container-test` | Passed |
+| `bash scripts/vm-smoke` at commit `7f08923`, from a clean worktree (disposable guest, rootless Podman) | Passed: 357 tests each on Python 3.15, 3.13 and 3.11; `scripts/container-test` with the two-task run (every answer arrived, every model call carried a reported cost, the run finished, a second start had nothing left), the image probe of `configs/image-read.toml`, no egress, uid 10001, image 151 MiB |
+| `nix flake check` | Not run: no Nix file changed; the VM above was built from the flake |
+
+The first VM run failed in the container test: the new check named two
+model calls with a reported cost where the stand-in run makes four. The
+check was wrong, not the run; it now requires a cost on every call.
+
+Everything above ran against our own stand-ins: a platform written from the
+documentation, scripted model replies in the tests, and `hacklab mock-server`
+in the container. No request went to the arena, to OpenRouter or to a model.
+
+Not verified:
+
+- **The per-task manifest and what a tool changes.** That
+  `GET /runs/{id}/tasks/{task}/manifest` shows a draft after `write` or a
+  rewritten state file after `containment` is from the kit's README; the
+  shape of the real reply and the delay until a change shows are untested.
+- **`usage.cost` through the organizers' gateway.** The field is read where
+  OpenRouter puts it. Whether the gateway passes it on, and how
+  `local_spent_usd` compares with the platform's `cost_usd`, shows on the
+  first dev run.
+- **408 and 402 from the real gateway.** Tested with scripted replies and a
+  fake clock.
+- **Pictures.** Whether the gateway accepts an image for Gemma 4, what one
+  costs in tokens and how well it is read. The stand-in answers with a fixed
+  sentence. `hacklab probe --config configs/image-read.toml` answers the
+  first question for one small request; the tool stays off until a same-seed
+  dev run has compared `configs/live.toml` with `configs/image-read.toml`.
+- **A restart by the organizers' runner.** `arena run` ends with 1 while
+  answers of a final are still on our side. That the runner then starts the
+  container again is documented for a crash, not for this exit code.
+- **A lost reply on a real action.** That the model, told the outcome is
+  open, looks at the state before acting again is a prompt-level hope and
+  was not measured.
+
 ## 14 November 2026, the Harness Arena API (same workstation)
 
 The organizers published the Task API and the starter kit. Added: the client
