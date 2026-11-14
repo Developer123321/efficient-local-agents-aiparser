@@ -19,3 +19,4 @@ vendor/
 .agents/skills/
 .bob/skills/
 .tabula/
+.env
