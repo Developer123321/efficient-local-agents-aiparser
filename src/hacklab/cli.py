@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -120,6 +121,26 @@ def doctor(config: Config) -> dict:
     }
 
 
+def blank_png(side: int = 16) -> bytes:
+    """A small white PNG made here: the probe's picture, with nothing in it to read."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        )
+
+    rows = (b"\x00" + b"\xff" * (3 * side)) * side
+    header = struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
 def probe(config: Config, tracker: Tracker) -> dict:
     """One small tracked request to each configured model: is the contract right?"""
     from hacklab.providers import Budget, ProviderError, make_embedder, make_providers
@@ -140,6 +161,14 @@ def probe(config: Config, tracker: Tracker) -> dict:
                 ),
             )
         ]
+        if "image" in config.agent.tools:
+            # Does the endpoint take a picture at all? One more small request.
+            checks.append(
+                (
+                    "image",
+                    lambda: {"read": small.describe(blank_png(), "image/png")[:200]},
+                )
+            )
         if jev is not None:
             checks.append(
                 (
@@ -182,6 +211,7 @@ def probe(config: Config, tracker: Tracker) -> dict:
         "output_tokens",
         "latency_ms",
         "cost_usd",
+        "reported_cost_usd",
         "metadata",
     )
     return {
@@ -206,7 +236,10 @@ def budget_report(config: Config, tracker: Tracker) -> dict:
             key: None if limit is None else max(0, limit - spent[key])
             for key, limit in limits.items()
         },
-        "note": "Counts live requests recorded here; replays and other laptops are not included.",
+        "note": (
+            "Counts live requests recorded here, at the cost the provider reported or else "
+            "the estimate from the configured prices; replays and other laptops are not included."
+        ),
     }
 
 
@@ -293,6 +326,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--seed", type=int, help="Replay the tasks of an earlier dev run")
     run.add_argument("--tasks", help="Only these task ids, comma-separated, e.g. t01,t03")
     run.add_argument("--level", help="Only these levels, comma-separated, e.g. 1 or 1,2")
+    run.add_argument("--match", help="Only tasks whose instruction matches this regex")
     run.add_argument("--limit", type=int, help="At most this many of the selected tasks")
     run.add_argument("--workers", type=int, default=4, help="Tasks worked on side by side")
     run.add_argument("--note", default="", help="One line about this run for the dashboard")
@@ -626,6 +660,11 @@ def main() -> int:
 
             if not 1 <= args.workers <= 16:
                 raise ValueError("workers must be 1..16")
+            # argparse checks what is typed, not a default from the environment.
+            if args.kind not in ("dev", "final"):
+                raise ValueError("ARENA_RUN_KIND must be dev or final")
+            if args.match:
+                re.compile(args.match)
             summary = run(
                 config,
                 tracker,
@@ -634,12 +673,15 @@ def main() -> int:
                 only=args.tasks.split(",") if args.tasks else None,
                 levels=[int(level) for level in args.level.split(",")] if args.level else None,
                 limit=args.limit,
+                match=args.match,
                 workers=args.workers,
                 note=args.note,
                 directory=_arena_directory(),
                 finish=not args.no_finish,
             )
             emit(summary)
+            # Answers whose submission did not arrive: starting again continues the run.
+            return int(bool(summary["incomplete"]))
         return 0
     except Exception as exc:
         # Provider exceptions and validation errors may contain user inputs; never echo bodies.

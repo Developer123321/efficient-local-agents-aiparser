@@ -31,8 +31,8 @@ Task
 | `forensics/` | Decoding, indicators, timestamps, propagation, attack phases |
 | `evidence.py` | Every row shown to the model, its ID, citations |
 | `guard.py` | Injection scan, placeholders for secrets, action guard |
-| `providers.py` | Calls to the three models (HTTP, or the kit's own client), retries, budgets, replay cache |
-| `tracking.py` | A receipt for every request |
+| `providers.py` | Calls to the three models (HTTP, or the kit's own client), retries, budgets, replay cache, a picture shown to the small model |
+| `tracking.py` | A receipt for every request: tokens, estimated cost, the cost the provider reported |
 | `benchmark.py` | Scoring, comparison, failure view |
 | `practice.py` | Rehearsal incident and its playbooks |
 | `cli.py` | Commands: `arena run` for the event, `submit` for a task file |
@@ -130,9 +130,37 @@ lexical.
 | `iocs` | List tokens, keys, addresses, URLs, digests in a document |
 | `phases` | Assign attack phases to commands by rule |
 | `calculate` | Arithmetic |
+| `image` | What a PNG or JPEG of the task shows, read by the small model. Only with `"image"` in `[agent] tools`; see [Pictures](#pictures) |
 
-All are deterministic and bounded, and none executes recovered content.
-`hacklab decode` and `hacklab iocs` offer two of them on the command line.
+All but `image` are deterministic, and all are bounded; none executes
+recovered content. `hacklab decode` and `hacklab iocs` offer two of them on
+the command line.
+
+## Pictures
+
+A picture is no document: it is neither parsed nor searched, and without the
+`image` tool it is not listed at all. With the tool in `[agent] tools`
+(`configs/image-read.toml`; not in `configs/live.toml`) the task's PNG and
+JPEG files are listed as images, and the model may ask for one:
+
+- **Which picture.** A file of this task, named by the model, never an
+  address. It must be PNG or JPEG by its own first bytes and at most 4 MB.
+- **Who reads it.** The configured small model, at the same address, with
+  the same key, routing, retries, deadline and receipts as every other
+  request of the task (`SmallModelProvider.describe`). The picture travels
+  inside the request. At most 700 output tokens; against the task's token
+  budget it counts with a fixed allowance, since its size in bytes says
+  nothing about its tokens. No other model, no OCR library.
+- **What comes back.** One evidence row, at most 2000 characters, with the
+  injection scan and placeholders, cited by the picture's path (the platform
+  wants the path alone). Text in a picture may be an attack (`image_text`),
+  and the model may misread it: the row is data like every other.
+- **When it fails.** An invalid picture, no model, a refused or empty reply:
+  the model gets an error line and the task goes on.
+
+Whether the gateway accepts pictures, what one costs and how well Gemma 4
+reads them is unmeasured. `hacklab probe --config configs/image-read.toml`
+sends one small white picture to find out the first.
 
 ## What counts as a table
 
@@ -159,12 +187,15 @@ what the submission image executes. Per run: read the tool list, start or
 continue the run, work the tasks easy level first on a few threads, finish.
 Per task:
 
-1. **Mirror.** [`Mirror`](../src/hacklab/event/arena.py) fetches the run's
-   manifest once and every distinct file once by its SHA-256, then copies
-   the task's files into a directory of its own. Our `search`, `read` and
-   `table` work there on every format; the platform's `read` and `search`
-   are not offered. Without a manifest the task's `workspace.zip` is used;
-   without either, the platform's own tools.
+1. **Mirror.** [`Mirror`](../src/hacklab/event/arena.py) asks for the
+   task's current manifest, fetches every distinct file once by its SHA-256
+   and writes the task's files into a directory of its own. A blob is
+   checked against its hash when it is downloaded and again whenever it is
+   used from the store. Our `search`, `read` and `table` work there on every
+   format; the platform's `read` and `search` are not offered. Without a
+   task manifest the run's manifest is used (the tasks as the run began),
+   without any the task's `workspace.zip`; without either, the platform's
+   own tools.
 2. **Question.** The instruction, then `/AGENTS.md` quoted as the operator's
    rules, then the names of the operator files it mentions. The system
    prompt ends with the event's standing rules
@@ -176,14 +207,48 @@ Per task:
    instruction contains a word of action (`ACTION_WORDS`), it passes the
    action guard, `send_message` is refused for a recipient that neither the
    instruction, the operator files nor a CSV registry names, `write` outside
-   `/drafts/` is refused, and URLs in what is sent are defanged.
-4. **Answer.** `to_arena` turns the `Answer` into `{outcome, answer,
+   `/drafts/` is refused, and URLs in what is sent are defanged. What the
+   platform declines (`{ok: false, error}` with HTTP 200) is a row for the
+   model, and the action does not count as done.
+4. **Files after a change.** A tool that changes something may change the
+   task's files: a draft appears, containment rewrites a state file. After
+   every such call that reached the platform, `Mirror.refresh` reads the
+   task's manifest again, fetches what is new, removes what is gone, and
+   the tool result names both. Our tools then see the new files: parsed
+   copies follow the file on disk, the search index is rebuilt, and an
+   identical earlier call is no longer answered as "unchanged". A row shown
+   before the change keeps its evidence ID, quote and locator as what was
+   seen then. Other tasks have their own directories and are not touched.
+   If the state cannot be read, the action is **not** sent again; the
+   document tools answer with an error until a later attempt succeeds,
+   instead of reading files that may be out of date.
+5. **Answer.** `to_arena` turns the `Answer` into `{outcome, answer,
    sources}`: the typed value (a list stays a list), one of the four
    outcomes, and each citation as path plus one locator in the platform's
    terms (`line`, `record`, `sheet` and `row`, `paragraph`, `page`), at most
    ten. URLs in the answer are defanged.
-5. **Submit.** Always, also after a local failure: then with an empty `OK`
-   answer and the cause in `.state/arena/runs/RUN/TASK.json`.
+6. **Submit.** Always, also after a local failure: then with an empty `OK`
+   answer and the cause in `.state/arena/runs/RUN/TASK.json`. A submission
+   the platform rejects as malformed (400) is sent again without its
+   sources, then without its answer. One that did not arrive (no
+   connection, 429, 5xx) is sent again at the end of the run after 5 and
+   15 seconds.
+
+**What a lost reply means.** The Task API has no request ids. A request
+whose reply is lost may or may not have been carried out, and nothing here
+claims otherwise:
+
+| Request | On a lost reply |
+| --- | --- |
+| Reading (`manifest`, blobs, `query_logs`, …) | Sent again |
+| `submit` | Sent again: the platform takes one answer per task. A 409 for a task it lists as submitted is recorded as `already_submitted`, without a grade |
+| A tool that changes something | **Not** sent again. The model reads "outcome unknown" and can look at the state first. Sent again only after 429, 5xx or a connection that was never made |
+
+**Restart.** The platform returns the same final run. Tasks it lists as
+submitted are skipped. A task that was answered but whose submission did
+not arrive is handed in from its record without asking the model again.
+While such answers remain, a final run is not finished and the command
+ends with 1; a final started with a task filter is not finished either.
 
 A tool can be wrapped by hand the same way:
 
@@ -215,9 +280,23 @@ at `/api/alpha/decisions`.
 - When the harness itself ends a task (a limit, a provider failure, the end
   of the run), the answer carries a fixed `cause` such as
   `token_budget_exhausted_before_request`. `hacklab failures` groups by it.
-- A failed request is retried with a growing pause (`http_retries`); a
-  malformed reply gets one repair turn (`max_retries`). The first costs time,
-  the second tokens.
+- A failed model request is retried with a growing pause (`http_retries`)
+  when the failure passes: a lost connection, 408, 429, 5xx, and
+  OpenRouter's 402 when it carries `Retry-After` (credit is left, too much
+  is reserved by requests in flight). A 402 without it, 401 and 403 (a wrong
+  key, or the key's limit) end the request at once. A wait the server asks
+  for is honoured up to two minutes and never beyond the task's or the
+  run's time. A malformed reply gets one repair turn (`max_retries`). The
+  first costs time, the second tokens.
+- **Two costs per request, kept apart.** `cost_usd` is our estimate:
+  reported tokens times the prices in the profile. `reported_cost_usd` is
+  what the provider put on the reply (OpenRouter's `usage.cost`); a reported
+  zero counts, a missing or invalid figure is unknown. Spend (`spent_usd`,
+  the task's `max_cost_usd`, `[budget] max_usd`) uses the reported figure
+  where there is one and the estimate where not. A replayed reply keeps
+  both figures and is not spent again. Neither is an invoice, and the
+  platform's `cost_usd` of a run is a third number: the key's usage between
+  start and finish.
 - Nothing passes from one task to the next: no answers, no summaries.
 - The replay cache and the trace (`HACKLAB_TRACE_DIR`) hold model replies and
   task data. Both live in the ignored `.state/` directory and are off in the

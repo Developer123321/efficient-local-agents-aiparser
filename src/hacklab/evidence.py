@@ -43,6 +43,8 @@ class Ledger:
         self._by_id: dict[str, Evidence] = {}
         self._by_key: dict[tuple[str, str, str], Evidence] = {}
         self._values: set[str] = set()
+        # (source, locator, quote) of rows whose file has since been replaced or removed.
+        self._sealed: set[tuple[str, str, str]] = set()
 
     def __len__(self) -> int:
         return len(self._by_id)
@@ -74,7 +76,25 @@ class Ledger:
         evidence = Evidence(f"e{len(self._by_id) + 1}", source, locator, quote, shown, flags)
         self._by_id[evidence.id] = evidence
         self._by_key[key] = evidence
+        self._sealed.discard((source, locator, quote))  # Seen again: it is there now.
         return evidence
+
+    def seal(self, sources: Iterable[str]) -> None:
+        """These documents were rewritten or removed after rows of them were shown.
+
+        The rows keep their IDs, quotes and locators as observations of the
+        earlier content. A row read from such a document from now on is a new
+        observation with a new ID, even where the text is the same.
+        """
+        names = set(sources)
+        for key, evidence in list(self._by_key.items()):
+            if evidence.source in names:
+                del self._by_key[key]
+                self._sealed.add((evidence.source, evidence.locator, evidence.quote))
+
+    def superseded(self, citation: Citation) -> bool:
+        """Whether a citation quotes content that a later change replaced."""
+        return (citation.document, citation.locator, citation.quote) in self._sealed
 
     def get(self, evidence_id: str) -> Evidence | None:
         match = _ID.search(str(evidence_id).strip().lower())

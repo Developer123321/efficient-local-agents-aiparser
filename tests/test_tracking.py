@@ -156,7 +156,7 @@ def test_export_json_contains_inspectable_events_without_arbitrary_keys(tmp_path
         "reason_code": "citations_ok",
         "score": 1.0,
     }
-    assert "not a provider invoice" in data["cost_basis"]
+    assert "neither is an invoice" in data["cost_basis"]
 
 
 def test_actual_agent_metadata_survives_receipt_allowlist(tmp_path):
@@ -168,3 +168,79 @@ def test_actual_agent_metadata_survives_receipt_allowlist(tmp_path):
     recorded = tracking.runs()[0]["metadata"]
     assert recorded == metadata
     assert len(recorded["source_sha256"]) == 64
+
+
+def test_reported_cost_is_stored_apart_and_validated(tmp_path):
+    tracking = tracker(tmp_path)
+    first, second = tracking.start_run("case-a", {}), tracking.start_run("case-b", {})
+    tracking.record_call(first, "openai", "small", 1000, 200, 5, "ok", 0.2, 0.4, 0.0005)
+    tracking.record_call(first, "openai", "small", 1000, 200, 5, "ok", 0.2, 0.4, reported_cost=0)
+    tracking.record_call(second, "openai", "small", 10, 2, 5, "ok", reported_cost=0.25)
+    tracking.record_call(second, "mock", "fixture", 0, 0, 0, "ok")
+    rows = tracking.calls(first)
+    assert [row["reported_cost_usd"] for row in rows] == [0.0005, 0.0]
+    assert rows[0]["cost_usd"] == pytest.approx(0.00028)
+    summary = tracking.summary(first)
+    assert summary["cost_usd"] == pytest.approx(0.00056)
+    assert summary["reported_cost_usd"] == summary["spent_usd"] == pytest.approx(0.0005)
+    # Without prices there is no estimate, and the reported figure still counts as spend.
+    other = tracking.summary(second)
+    assert other["cost_usd"] is None and other["spent_usd"] == pytest.approx(0.25)
+    assert other["reported_cost_calls"] == 1 and other["mock_calls"] == 1
+    both = tracking.tally([first, second])
+    assert both["calls"] == 4 and both["run_count"] == 2
+    assert both["spent_usd"] == pytest.approx(0.2505) and tracking.tally([])["calls"] == 0
+    for wrong in (-0.1, float("nan"), float("inf"), "0.1", True):
+        with pytest.raises(ValueError):
+            tracking.record_call(first, "openai", "small", 1, 1, 0, "ok", reported_cost=wrong)
+    target = tmp_path / "exports" / "runs.json"
+    tracking.export(target)
+    exported = json.loads(target.read_text())
+    assert exported["calls"][0]["reported_cost_usd"] == 0.0005
+    assert exported["summary"]["known_reported_cost_usd"] == pytest.approx(0.2505)
+
+
+def test_a_database_from_before_reported_cost_stays_readable(tmp_path):
+    path = tmp_path / "private" / "runs.sqlite"
+    path.parent.mkdir()
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE runs (
+            id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+            started_at TEXT NOT NULL, finished_at TEXT,
+            status TEXT NOT NULL, mode TEXT NOT NULL,
+            config_hash TEXT NOT NULL, config_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL, answer_hash TEXT, score REAL
+        );
+        CREATE TABLE calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL REFERENCES runs(id),
+            created_at TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+            input_tokens INTEGER, output_tokens INTEGER,
+            latency_ms REAL NOT NULL, status TEXT NOT NULL,
+            input_rate REAL, output_rate REAL, cost_usd REAL,
+            billable INTEGER NOT NULL, metadata_json TEXT NOT NULL
+        );
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL REFERENCES runs(id),
+            created_at TEXT NOT NULL, kind TEXT NOT NULL, data_json TEXT NOT NULL
+        );
+        INSERT INTO runs VALUES
+            ('old', 'case', 't', NULL, 'ok', 'live', 'h', '{}', '{}', NULL, NULL);
+        INSERT INTO calls (run_id, created_at, provider, model, input_tokens, output_tokens,
+            latency_ms, status, input_rate, output_rate, cost_usd, billable, metadata_json)
+            VALUES ('old', 't', 'openai', 'small', 100, 20, 5, 'ok', 1, 2, 0.00014, 1, '{}');
+    """)
+    old.commit()
+    old.close()
+    tracking = Tracker(path)
+    Tracker(path)  # Opening it again finds the column and adds nothing.
+    # The old receipt keeps its estimate; what the provider reported then is unknown.
+    assert tracking.calls("old")[0]["reported_cost_usd"] is None
+    summary = tracking.summary("old")
+    assert summary["cost_usd"] == pytest.approx(0.00014) and summary["reported_cost_usd"] is None
+    assert summary["spent_usd"] == pytest.approx(0.00014)
+    assert tracking.spend()["usd"] == pytest.approx(0.00014)
+    tracking.record_call("old", "openai", "small", 100, 20, 5, "ok", 1, 2, reported_cost=0.0002)
+    assert tracking.summary("old")["spent_usd"] == pytest.approx(0.00034)

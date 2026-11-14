@@ -78,6 +78,19 @@ def test_compare_unknown_cost_and_mixed_conditions():
     }
     right = {**left, "accuracy": 0.75, "p95_elapsed_ms": 400}
     assert compare(left, right)["right_dominates"] is None
+    # Estimates on both sides, as in a report written before reported cost was kept.
+    left["cost_usd"], right["cost_usd"] = 0.02, 0.01
+    estimated = compare(left, right)
+    assert estimated["cost_basis"] == "estimated" and estimated["right_dominates"] is True
+    assert estimated["cost_delta_usd"] == pytest.approx(-0.01)
+    # The provider's own figures win when both runs have them for every call, and a
+    # reported figure is never held against an estimate.
+    left["reported_cost_usd"] = 0.03
+    assert compare(left, right)["cost_basis"] == "estimated"
+    right["reported_cost_usd"] = 0.05
+    reported = compare(left, right)
+    assert reported["cost_basis"] == "reported" and reported["right_dominates"] is False
+    assert reported["cost_delta_usd"] == pytest.approx(0.02)
     right["mode"] = "mock"
     with pytest.raises(ValueError, match="mode"):
         compare(left, right)

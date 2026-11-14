@@ -73,6 +73,7 @@ bound ended the task; no prompt change helps against it.
 | `task_time_budget_exhausted`, `provider_timeout` | `task_timeout_seconds`, `timeout_seconds`, reasoning effort |
 | `run_deadline_reached` | `submit --deadline-seconds`, `--workers` |
 | `provider_http_429`, `provider_http_503` and the like, `provider_transport_error` | `http_retries`, fewer workers |
+| `provider_http_402`, `provider_http_403` | The key: no credit left, or its limit reached. No setting helps |
 | `model_returned_reasoning_only`, `model_output_truncated` | `extra_body` (thinking), `max_output_tokens` |
 | `output_failed_validation` | The reply format: `response_format`, then the trace |
 | `configure_small_model_base_url_and_name`, `small_model_key_missing` | `.env` |
@@ -102,12 +103,22 @@ Every request, retry and Jev call gets a receipt in a private SQLite file
 (`.state/tracking.sqlite`). It holds tokens, latency and status, never
 prompts, answers or keys.
 
-- Cost is an estimate: reported tokens times the prices in the config.
-  **Enter the organizers' prices**; list prices can differ.
-- Without reported usage or without prices, cost is `null` (unknown), never
-  guessed. `known_cost_usd` is the measured part.
-- A replayed request counts with the usage it had when live, so a run's cost
-  is what it would cost without a cache.
+- `cost_usd` is an estimate: reported tokens times the prices in the
+  config. **Enter the organizers' prices**; list prices can differ.
+- `reported_cost_usd` is what the provider itself put on each reply
+  (OpenRouter's `usage.cost`, asked for with `usage = { include = true }`).
+  It is `null` unless every call carries one; `known_reported_cost_usd` is
+  the part that does.
+- Without reported usage or without prices the estimate is `null` (unknown),
+  never guessed; a missing reported cost is unknown too, never zero.
+  `known_cost_usd` is the estimated part that is known.
+- A replayed request counts with the usage and the cost it had when live,
+  so `cost_usd` and `reported_cost_usd` of a run are what it would cost
+  without a cache. `spent_usd` is what the run itself paid: live requests
+  only, at the reported figure where there is one, else the estimate.
+- `compare` uses the reported figures when both runs have them for every
+  call and the estimates otherwise, and says which (`cost_basis`). It never
+  holds one against the other.
 
 ## Results on a real small model
 

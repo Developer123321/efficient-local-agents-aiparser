@@ -89,6 +89,7 @@ dashboard. [`JOURNAL.md`](JOURNAL.md) needs the team's own entries.
 | Change prompt, loop or final checks | `src/hacklab/agent.py` |
 | Change a model or agent setting | `configs/live.toml`, the profile that is submitted |
 | Try the embedding model or Jev | `configs/embed-rank.toml`, `configs/jev-select.toml` |
+| Let the model read pictures (off in the submitted profile) | `configs/image-read.toml` |
 | See why a run lost points | `hacklab failures REPORT`, then the trace of the task |
 | Decode a payload or list indicators by hand | `hacklab decode FILE`, `hacklab iocs FILE` |
 | Build the submission image | `Dockerfile`, `scripts/container-test` |
@@ -107,6 +108,8 @@ image without another line in the Dockerfile. All commands:
    cases ([how](docs/benchmarks.md)).
 
 The rehearsal data was written for this repository, and the benchmark
-numbers come from a stand-in model. The arena integration was tested against
-a stand-in platform only: nothing was run on the real arena or on Gemma 4
-when it was written ([what was tested](VERIFICATION.md)).
+numbers come from a stand-in model. The arena integration, the reload of a
+task's files after an action, the reported cost and the image tool were
+tested against a stand-in platform and stand-in replies only: nothing was
+run on the real arena or on Gemma 4 when they were written
+([what was tested](VERIFICATION.md)).

@@ -66,6 +66,14 @@ def arena(method: str, path: str) -> tuple[int, dict[str, Any] | bytes]:
     if path == "/runs/run_mock/manifest":
         files = {name: _sha(text) for name, text in ARENA_FILES.items()}
         return 200, {"tasks": [{"task_id": t["task_id"], "files": files} for t in ARENA_TASKS]}
+    listed = re.fullmatch(r"/runs/run_mock/tasks/(t0[12])/manifest", path)
+    if listed:
+        # A task's files as they are now; the stand-in's tools change nothing.
+        files = [
+            {"path": name, "sha256": _sha(text), "size": len(text.encode())}
+            for name, text in ARENA_FILES.items()
+        ]
+        return 200, {"run_id": "run_mock", "task_id": listed[1], "files": files}
     blob = re.fullmatch(r"/runs/run_mock/blobs/([0-9a-f]{64})", path)
     if blob:
         found = [text for text in ARENA_FILES.values() if _sha(text) == blob[1]]
@@ -130,15 +138,28 @@ class Handler(BaseHTTPRequestHandler):
         if self._arena("POST"):
             return
         if self.path.rstrip("/").endswith("/chat/completions"):
+            parts = [
+                part
+                for message in request.get("messages", [])
+                if isinstance(message, dict) and isinstance(message.get("content"), list)
+                for part in message["content"]
+            ]
+            # A picture was sent: answer in plain text, as a reading would be.
+            pictured = any(isinstance(part, dict) and "image_url" in part for part in parts)
+            content = "Stand-in endpoint: no model looked at the picture."
             self._send(
                 200,
                 {
                     "model": "mock-small",
                     "choices": [
-                        {"message": {"content": json.dumps(REPLY)}, "finish_reason": "stop"}
+                        {
+                            "message": {"content": content if pictured else json.dumps(REPLY)},
+                            "finish_reason": "stop",
+                        }
                     ],
-                    # Fixed synthetic numbers, not a token count of the request.
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                    # Fixed synthetic numbers, not a token count of the request;
+                    # the cost is reported the way OpenRouter reports it.
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
                 },
             )
         elif self.path.rstrip("/").endswith("/systemone"):

@@ -72,6 +72,7 @@ def test_every_shipped_profile_is_valid_and_ships_with_cache_and_allowance_off(m
     assert names == {
         "baseline",
         "embed-rank",
+        "image-read",
         "jev-select",
         "live",
         "mock",
@@ -138,6 +139,14 @@ def test_the_candidate_profile_differs_from_the_measured_one_only_where_the_even
     ranked = load_config(CONFIGS / "embed-rank.toml")
     assert ranked.embedding.enabled and not live.embedding.enabled
     assert ranked.model_dump(exclude={"embedding"}) == live.model_dump(exclude={"embedding"})
+    # Reading pictures is one more tool in the variant; the submitted profile has
+    # none until a run shows what it gains and costs.
+    pictured = load_config(CONFIGS / "image-read.toml")
+    assert "image" not in live.agent.tools and "image" not in Config().agent.tools
+    assert pictured.agent.tools == [*live.agent.tools, "image"]
+    live_agent, pictured_agent = live.model_copy(deep=True), pictured.model_copy(deep=True)
+    live_agent.agent.tools = pictured_agent.agent.tools = []
+    assert pictured_agent.model_dump() == live_agent.model_dump()
 
 
 def test_the_candidate_profile_finds_its_solvers_and_recipes_wherever_it_runs(

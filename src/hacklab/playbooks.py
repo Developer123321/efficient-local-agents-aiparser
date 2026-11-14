@@ -16,7 +16,7 @@ from typing import Any
 
 from hacklab.evidence import Ledger
 from hacklab.models import Action, Answer, Task
-from hacklab.toolkit import Toolbox
+from hacklab.toolkit import Refused, Toolbox
 from hacklab.tools import ToolRegistry, Unit
 
 
@@ -57,14 +57,10 @@ class Workspace:
         A tool registered as mutating passes the action guard first. A refused
         call raises, which ends the solver and hands the task to the model.
         """
-        spec = self.toolbox.extra[tool]
-        accepted: list[Action] = []
-        if spec.mutating:
-            accepted, refusal = self.toolbox.authorize(spec, arguments)
-            if refusal:
-                raise PermissionError(refusal)
-        result = spec.handler(**arguments)
-        self.toolbox.guard.commit(accepted)
+        try:
+            result, _ = self.toolbox.call(self.toolbox.extra[tool], arguments)
+        except Refused as exc:
+            raise PermissionError(str(exc)) from None
         self.toolbox.used = True
         return result
 

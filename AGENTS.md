@@ -56,7 +56,15 @@ any host machine configuration.
   A new platform tool is mutating unless it is listed in `READ_ONLY`.
 - Every task of a run is submitted, whatever failed. Do not add a path in
   `arena_run.run` that skips `submit`, and do not finish a final run that
-  left tasks out.
+  left tasks out or still holds answers that did not arrive.
+- A platform call that changes something is sent once (`repeatable=False`):
+  a lost reply is an open outcome, never a reason to send it again. After
+  it, the task's files are reloaded through `Mirror.refresh`; do not read a
+  mirrored file as current where a reload failed (`Toolbox.stale`).
+- A picture is read only by the configured small model through
+  `SmallModelProvider.describe`, and only a file of the task. Its reading is
+  evidence through `Ledger.add`. The `image` tool stays out of
+  `configs/live.toml` until a dev run has measured it.
 - `configs/live.toml` is what is submitted. Its `[limits]` and `[agent]`
   differ from the measured rehearsal profile and from the defaults in
   `config.py` only in the fields `tests/test_config.py` names; change a
@@ -83,7 +91,9 @@ any host machine configuration.
   separate files, and do not tune on the hold-out file.
 - Track every provider request attempt, including retries, errors, Jev calls
   and cache replays. Missing usage or prices means unknown cost. Never infer
-  tokens from text length.
+  tokens from text length. Keep the cost a provider reports
+  (`reported_cost_usd`) apart from the estimate (`cost_usd`); a missing
+  reported cost is unknown, never zero, and a replay is not new spend.
 - Keys, private documents, VM disks and run-time state stay out of Git and the
   Nix store. Model replies exist only in the development cache and in the
   opt-in development trace, both under `.state/`; the tracking database holds

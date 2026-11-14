@@ -5,6 +5,13 @@ announced at the opening on 14 November, and the Harness Arena API
 documentation and [starter kit](https://github.com/AIImpactMission/hackathon_nov_2026)
 handed out that morning. The API documentation wins where they differ.
 
+The kit was read again at revision `f160529` (14 November, 09:33 UTC, still
+the head of its `main` at noon): `README.md`, `FINAL_RUN.md`, `arena/client.py`,
+`arena/llm.py`, `agent.py`, `main.py` and its tests. What this page says
+about the final's limits, the retries and the per-task manifest is from
+there. The build limits (10 minutes, 2 CPUs, 4 GB) and the length of the
+check are from the API documentation and are not in the kit.
+
 ## The day
 
 | | |
@@ -55,7 +62,8 @@ client.
 | Call | What for |
 | --- | --- |
 | `POST /runs {kind, seed?, meta}` | Start a run; `meta` is commit, dirty and a one-line note for the dashboard |
-| `GET /runs/{id}/manifest`, `/blobs/{sha256}` | Every distinct file of the run once, by content hash |
+| `GET /runs/{id}/manifest`, `/blobs/{sha256}` | Every distinct file of the run once, by content hash; the manifest shows the tasks as the run began |
+| `GET /runs/{id}/tasks/{task}/manifest` | One task's files as they are now, after its own `write` or `containment` |
 | `POST /runs/{id}/tasks/{task}/tools/{tool}` | A tool call; it is recorded and graded |
 | `POST /runs/{id}/tasks/{task}/submit` | The answer, once per task |
 | `POST /runs/{id}/finish` | Close the run and record its cost. Without it a dev run gets no score |
@@ -93,7 +101,11 @@ image. Citing too much is penalised.
 - **Final score = `A · (0.5 + 0.5 · C)`.** Accuracy multiplies everything;
   cost can at most halve it.
 - Run cost is the key's usage at `finish` minus at the start: one dev run at
-  a time, or the numbers mix.
+  a time, or the numbers mix. `arena run` therefore also prints its own
+  tally, `local_spent_usd`: the sum of what OpenRouter reported per reply
+  (`usage.cost`) for the requests of this run alone.
+- If all qualifying final costs are equal, those runs get `C = 0.5`. A final
+  cost that is not known yet stays pending until it is measured.
 
 ## The submission
 
@@ -103,8 +115,10 @@ phrase. Prize eligibility needs a passed check and at least one own entry in
 [`JOURNAL.md`](../JOURNAL.md) at the repository root.
 
 The organizers build the `Dockerfile` at the archive root (10 minutes, 2 CPUs,
-4 GB, image at most 2 GB) and run it with 2 CPUs and 4 GB, without swap, for
-at most 30 minutes:
+4 GB, image at most 2 GB) and run it for at most 30 minutes with 2 CPUs,
+4 GB of memory without swap (above it the process is killed, exit code 137),
+512 processes and 4 GB written to the container's disk (above it the
+container is stopped):
 
 | Variable | Value in their container |
 | --- | --- |
@@ -117,10 +131,19 @@ at most 30 minutes:
 - **The check** runs the container like the final on one dev task for about
   a minute. It passes when the container submits a task.
 - **The final** uses the eval key with a limit of $3: at the limit every
-  model call fails with 403 and what is not submitted scores 0. A crashed
-  container is restarted and continues the same run.
-- The gateway pins the small model's endpoints (DeepInfra fp8, Crusoe,
-  Novita). The starter kit's final took 8 to 10 minutes and $0.66 to $0.81.
+  model call fails with 403 `Key limit exceeded` and what is not submitted
+  scores 0. A crashed container is restarted and continues the same run.
+- Only the gateway is reachable. It pins the endpoints on every call,
+  whatever we send: the small model on DeepInfra fp8, then Crusoe, then
+  Novita; embeddings on DeepInfra, then SiliconFlow. Model variants such as
+  `:nitro` are refused.
+- **Retries the organizers expect:** 408, 429 and 5xx with backoff and
+  `Retry-After`, also OpenRouter's 402 when it names a wait; not 403. In
+  their rehearsal with 12 finals at once the gateway was restarted (back
+  after about 7 seconds), the small model answered in 3 seconds at the
+  median and 9 at the 95th percentile, once in 67. The Task API allows
+  bursts of up to 100 requests.
+- The starter kit's final took 8 to 10 minutes and $0.66 to $0.81.
 
 Our image runs `hacklab arena run` when started without a command
 ([playbook](playbook.md#submit)).
@@ -133,7 +156,7 @@ Our image runs `hacklab arena run` when started without a command
 | 2 | What is billed? | The key's OpenRouter spend in dollars, every request | Jev and embedding off until a run shows a gain |
 | 3 | How are accuracy and cost combined? | `A · (0.5 + 0.5 · C)`, `C` on a log scale against the field | Accuracy first |
 | 4 | Is wrong worse than none? | No: both 0. A wrong *action* or a suffered attack zeroes the task | `on_unverified = "answer"`; action tools gated |
-| 5 | Input, output, time limit? | The Task API; 30 minutes; $3 | `hacklab arena run`, stop a minute before `deadline_at` |
+| 5 | Input, output, time limit? | The Task API; 30 minutes; $3 | `hacklab arena run`, stop a minute before `deadline_at`; the $3 is not tracked by us |
 | 6 | Which actions exist? | `containment`, `send_message`, `write` under `/drafts/` | `arena_run.arena_tools` |
 | 7 | Development budget? | On the dashboard; not in the API documentation | `[budget]` stays unset |
 | 8 | Parallel tasks, rate limits? | Yes; about 20 requests per second | `--workers 4` |
@@ -207,9 +230,17 @@ Defence, all in code ([arena_run.py](../src/hacklab/event/arena_run.py)):
   operator files or a CSV registry; `write` only below `/drafts/`.
 - Every URL in an answer, a message or a draft is defanged.
 - Comments in ODT and cell notes in ODS are not read as content.
-- Images are not read at all (no OCR is allowed, and the vision path is not
-  built): `image_text` cannot reach the model, and a task that needs an image
-  cannot be answered from it.
+- Images are not read in the submitted profile: `image_text` cannot reach
+  the model, and a task that needs a picture is answered without it. The
+  only allowed reader is Gemma 4 itself (no OCR). With `"image"` in
+  `[agent] tools` (`configs/image-read.toml`) the model can ask for one
+  picture of the task; what Gemma 4 reads in it comes back as one evidence
+  row with the injection scan, like any other text an attacker may have
+  written. Unmeasured, so off
+  ([architecture](architecture.md#pictures)).
+- After a tool that changes something, the task's files are fetched again
+  from the platform; the addresses a message may go to are not: a draft the
+  agent wrote cannot add a recipient.
 
 Attacks are posted with the platform key as the API documentation shows
 (`POST /payloads`). The text is the team's to write; the agent is never

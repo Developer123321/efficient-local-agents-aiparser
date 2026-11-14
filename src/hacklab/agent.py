@@ -37,7 +37,15 @@ from hacklab.providers import (
     make_embedder,
     make_providers,
 )
-from hacklab.toolkit import RESULT_ID, Result, Toolbox, ToolSpec, logfmt, split_items
+from hacklab.toolkit import (
+    RESULT_ID,
+    Reloaded,
+    Result,
+    Toolbox,
+    ToolSpec,
+    logfmt,
+    split_items,
+)
 from hacklab.tools import ToolRegistry
 
 SYSTEM_PROMPT = """You are the night-shift incident responder. Investigate with the tools, \
@@ -361,6 +369,8 @@ def _listing(inventory: list[dict[str, Any]], toolbox: Toolbox, room: int) -> st
             name = entry["document"]
             if "error" in entry:
                 listing.append(f"- {name}: unreadable")
+            elif "image" in entry:
+                listing.append(f"- {name}: image, {entry['image']} bytes")
             elif entry.get("columns") and detail == 2:
                 # What each column holds: the model can filter without a look first.
                 listing.append(f"- {name}: table, {entry['units']} rows; columns:")
@@ -565,7 +575,11 @@ def _finalize(
     if unknown and not citations:
         # Invented IDs beside real ones are dropped; nothing real is a problem.
         problems.append("unknown_evidence_id")
-    document_citations = [c for c in citations if not c.document.startswith("tool:")]
+    # A row of a file that a later action rewrote or removed stays what was
+    # seen then; only rows of the files as they are now are compared with them.
+    document_citations = [
+        c for c in citations if not c.document.startswith("tool:") and not ledger.superseded(c)
+    ]
     if documents.verify_citations(document_citations):
         problems.append("evidence_changed_on_disk")
     accepted, rejected = toolbox.guard.check(actions)
@@ -813,10 +827,13 @@ def run_task(
     *,
     deadline: float | None = None,
     model: Callable[[list[dict[str, str]]], Any] | None = None,
+    reload: Callable[[], Reloaded] | None = None,
 ) -> tuple[str, Answer]:
     """Run exactly one task; no answer labels or cross-task memory are loaded.
 
     `tools` are extra tools for this task, typically the organizers' own.
+    `reload` brings the files below `root` up to date after one of them
+    changed something and returns what the task's documents are now.
     `model` is a function of their kit that takes chat messages and returns
     the reply; without it the configured HTTP endpoint is called. `deadline`
     is the end of the whole run on `time.monotonic()`: past it, only playbooks
@@ -842,9 +859,10 @@ def run_task(
             root,
             allowed_documents=task.documents,
             decimal_separator=config.agent.decimal_separator,
+            images="image" in config.agent.tools,
         )
         ledger = Ledger(config.guard, task.question + " " + logfmt(task.constraints))
-        toolbox = Toolbox(documents, ledger, config, tools)
+        toolbox = Toolbox(documents, ledger, config, tools, reload)
         solved = None
         if config.agent.playbooks:
             registry = _playbooks(config.agent.playbooks)
@@ -878,6 +896,8 @@ def run_task(
                     )
                 kit = {} if model is None else {"model": model}
                 small, jev = make_providers(providers, budget, tracker, run_id, cache_salt, **kit)
+                # The image tool asks this same model; a kit function takes text only.
+                toolbox.vision = getattr(small, "describe", None)
                 if config.embedding.enabled:
                     # No model name, no key, or several failures in a row: the
                     # search hits keep their lexical order.

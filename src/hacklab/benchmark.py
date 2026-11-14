@@ -155,6 +155,8 @@ def benchmark(
         with ThreadPoolExecutor(workers) as pool:
             records = list(pool.map(run, jobs))  # In input order, whoever finishes first.
     costs = [r["usage"]["cost_usd"] for r in records]
+    reported = [r["usage"]["reported_cost_usd"] for r in records]
+    spent = [r["usage"]["spent_usd"] for r in records]
     durations = [r["elapsed_ms"] for r in records]
     return {
         "format_version": 1,
@@ -166,9 +168,17 @@ def benchmark(
         ).hexdigest(),
         "tasks": len(records),
         "accuracy": statistics.mean(r["score"] for r in records),
+        # Estimated from tokens and the configured prices, replays included:
+        # what the run costs at those prices without a cache.
         "known_cost_usd": sum(r["usage"]["known_cost_usd"] for r in records),
         "cost_usd": None if None in costs else sum(costs),
         "unknown_cost_calls": sum(r["usage"]["unknown_cost_calls"] for r in records),
+        # As the provider reported it reply by reply, replays with the figure
+        # they had when live; None unless every call carries one.
+        "reported_cost_usd": None if None in reported else sum(reported),
+        "reported_cost_calls": sum(r["usage"]["reported_cost_calls"] for r in records),
+        # What this run itself paid: live calls only, reported where possible.
+        "spent_usd": None if None in spent else sum(spent),
         "calls": sum(r["usage"]["calls"] for r in records),
         # Replayed from the development cache: measured once, not paid again.
         "cache_hits": sum(r["usage"]["cache_hits"] for r in records),
@@ -190,13 +200,25 @@ def compare(left: dict, right: dict) -> dict:
     for key in ("dataset_sha256", "mode", "tasks", "benchmark_kind"):
         if left[key] != right[key]:
             raise ValueError(f"Incomparable benchmark files: different {key}")
-    costs_known = left["cost_usd"] is not None and right["cost_usd"] is not None
+    # The provider's own figures where both runs have them for every call,
+    # else the estimates from the configured prices; never one against the other.
+    basis = next(
+        (
+            name
+            for name, key in (("reported", "reported_cost_usd"), ("estimated", "cost_usd"))
+            if left.get(key) is not None and right.get(key) is not None
+        ),
+        None,
+    )
+    costs_known = basis is not None
+    key = "reported_cost_usd" if basis == "reported" else "cost_usd"
     accuracy_delta = right["accuracy"] - left["accuracy"]
-    cost_delta = right["cost_usd"] - left["cost_usd"] if costs_known else None
+    cost_delta = right[key] - left[key] if costs_known else None
     tokens = ("known_input_tokens", "known_output_tokens", "calls")
     return {
         "accuracy_delta": accuracy_delta,
         "cost_delta_usd": cost_delta,
+        "cost_basis": basis,
         **{
             f"{key}_delta": right[key] - left[key] for key in tokens if key in left and key in right
         },

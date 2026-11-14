@@ -58,7 +58,10 @@ The first goal is one scored dev run, not a good one.
 
    Each line of output is a task: id, level, outcome, the harness's `cause`
    if it stopped the task itself, and the platform's feedback. The summary
-   at the end has `accuracy`, `cost_usd` and `cost_score`.
+   at the end has `accuracy`, `cost_usd` and `cost_score` from the platform
+   and `local_spent_usd`, our own sum of what OpenRouter reported per reply
+   (`null` if a reply came without a cost). `--match 'rotat|contain'` picks
+   tasks by their instruction.
 4. Run **one dev run at a time**: the cost of a run is the key's usage
    between its start and its `finish`.
 
@@ -127,8 +130,11 @@ What usually pays off, best first:
    `--config configs/jev-select.toml` on the same seed.
 8. **The embedding model**, under the same condition:
    `--config configs/embed-rank.toml`.
-9. **Images.** They are not read today. Gemma 4 takes images; a tool that
-   sends one to it is the only allowed way to read them.
+9. **Images.** Not read by `configs/live.toml`. `configs/image-read.toml`
+   adds the `image` tool, which shows one picture of the task to Gemma 4.
+   Check the gateway first (`hacklab probe --config configs/image-read.toml`),
+   then compare on a seed whose tasks have pictures: the tool is one more
+   line in every prompt and one more request per picture.
 
 Rules for the afternoon:
 
@@ -185,7 +191,15 @@ The image runs once, alone, for at most 30 minutes and $3.
   parser, a provider error) is submitted with what there is; unsubmitted
   scores 0 for certain.
 - **A restart continues.** The platform returns the same final run; tasks
-  already submitted are skipped.
+  already submitted are skipped, and an answer that was worked out but did
+  not arrive is handed in from its record, not paid for again.
+- **A submission that fails is tried again**: without sources after a 400,
+  and after 5 and 15 seconds when the platform was away. If answers are
+  still on our side then, the final is left open and the command ends with
+  1. Whether the organizers' runner restarts a container that ends with 1
+  is not documented.
+- **An action is never sent twice.** If the reply to `containment`,
+  `send_message` or `write` is lost, the model is told the outcome is open.
 - **It stops in time.** A minute before `deadline_at` no further request is
   sent; what is still open is submitted without a model. Tasks run easy
   level first, four at a time, so time and budget run out on the expensive
@@ -195,7 +209,8 @@ The image runs once, alone, for at most 30 minutes and $3.
 - **Only the gateway is needed.** With `OPENROUTER_API_KEY` set, the address
   and the model names come from the environment. If Jev or the embedding
   model is switched on and missing, the agent carries on without it. A rate
-  limit, a server error or a lost connection is retried with a growing pause.
+  limit, a request timeout (408), a server error, a lost connection and
+  OpenRouter's 402 with `Retry-After` are retried with a growing pause.
 - **No state is needed.** Tracking database and mirror live under `/tmp`; if
   the database cannot be written the run goes on without it.
 - **If a command fails with exit code 2**, `HACKLAB_DEBUG=1` adds where it

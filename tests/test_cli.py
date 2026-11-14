@@ -500,6 +500,15 @@ def test_stand_in_endpoint_serves_the_whole_request_path_over_http(tmp_path, mon
         report = json.loads(captured.out)
         assert code == 0 and report["small_model"]["reply"]["action"] == "final"
         assert report["jev"]["reply"] == {"amount": 1.0}
+        # With the image tool in the profile the probe also shows the model a picture.
+        pictured = tmp_path / "image.toml"
+        pictured.write_text(
+            '[model]\nprovider = "openai"\n[agent]\ntools = ["search", "read", "image"]\n'
+        )
+        code, captured = run(monkeypatch, capsys, ["--db", db, "probe", "--config", str(pictured)])
+        report = json.loads(captured.out)
+        assert code == 0 and report["image"]["reply"]["read"].startswith("Stand-in endpoint")
+        assert [call["reported_cost_usd"] for call in report["calls"]] == [0.0, 0.0]
         (tmp_path / "n.txt").write_text("value\n")
         task = tmp_path / "task.json"
         task.write_text(json.dumps({"id": "t", "question": "What?", "documents": ["n.txt"]}))

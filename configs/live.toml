@@ -101,8 +101,9 @@ max_actions = 200
 max_steps = 12
 max_calls = 24
 max_retries = 1
-# Attempts after a rate limit, a server error or a lost connection; they wait
-# 0.5, 1 and 2 seconds. Each attempt counts against max_calls.
+# Attempts after a rate limit, a request timeout (408), a server error, a
+# lost connection or OpenRouter's 402 with Retry-After; they wait 0.5, 1 and
+# 2 seconds, or what the server asks for. Each attempt counts against max_calls.
 http_retries = 3
 timeout_seconds = 60
 task_timeout_seconds = 300

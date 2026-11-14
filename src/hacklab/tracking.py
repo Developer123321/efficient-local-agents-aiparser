@@ -1,7 +1,10 @@
 """Private local experiment receipts, without prompts, document text or credentials.
 
-Costs are estimates from configured prices and provider-reported usage. Missing
-usage or prices stay unknown; an HTTP failure is not proof that no charge arose.
+A receipt holds two costs and keeps them apart. `cost_usd` is an estimate:
+reported tokens times the configured prices. `reported_cost_usd` is what the
+provider itself put on the reply (OpenRouter's `usage.cost`). Neither is an
+invoice. Missing usage, prices or a missing reported cost stay unknown; an
+HTTP failure is not proof that no charge arose.
 """
 
 import hashlib
@@ -66,6 +69,12 @@ def _cache_hit(row: Any) -> bool:
     keys = row.keys()
     metadata = row["metadata"] if "metadata" in keys else json.loads(row["metadata_json"])
     return bool(metadata.get("cache_hit"))
+
+
+def _spent(row: Any) -> float | None:
+    """What one call cost as far as known: the provider's own figure, else the estimate."""
+    reported = row["reported_cost_usd"]
+    return reported if reported is not None else row["cost_usd"]
 
 
 def _safe_event(data: dict) -> dict:
@@ -269,6 +278,15 @@ class Tracker:
                 CREATE INDEX IF NOT EXISTS calls_run ON calls(run_id);
                 CREATE INDEX IF NOT EXISTS events_run ON events(run_id);
             """)
+            # A database written before the provider's own cost was kept: its
+            # rows stay as they are, with that cost unknown.
+            if "reported_cost_usd" not in {
+                row[1] for row in db.execute("PRAGMA table_info(calls)")
+            }:
+                try:
+                    db.execute("ALTER TABLE calls ADD COLUMN reported_cost_usd REAL")
+                except sqlite3.OperationalError:
+                    pass  # Another process added it in the same moment.
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -320,16 +338,22 @@ class Tracker:
         status: str,
         input_rate: float | None = None,
         output_rate: float | None = None,
+        reported_cost: float | None = None,
         **kwargs,
     ) -> None:
+        """One request attempt. `reported_cost` is the provider's own figure in USD, if it gave one.
+
+        It is stored beside the estimate from tokens and prices, never in its
+        place, and a replayed reply keeps the figure it had when it was live.
+        """
         for value in (input_tokens, output_tokens):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError("Token usage must be a nonnegative integer or None")
-        for value in (input_rate, output_rate):
+        for value in (input_rate, output_rate, reported_cost):
             if value is not None and (
                 type(value) not in (int, float) or not math.isfinite(value) or value < 0
             ):
-                raise ValueError("Prices must be finite nonnegative numbers or None")
+                raise ValueError("Prices and costs must be finite nonnegative numbers or None")
         if not math.isfinite(latency_ms) or latency_ms < 0:
             raise ValueError("Latency must be finite and nonnegative")
         billable = provider != "mock"
@@ -342,7 +366,7 @@ class Tracker:
             db.execute(
                 "INSERT INTO calls (run_id,created_at,provider,model,input_tokens,"
                 "output_tokens,latency_ms,status,input_rate,output_rate,cost_usd,billable,"
-                "metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "metadata_json,reported_cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id,
                     _now(),
@@ -357,6 +381,7 @@ class Tracker:
                     cost,
                     billable,
                     _json(_safe_event(kwargs)),
+                    reported_cost,
                 ),
             )
 
@@ -410,8 +435,10 @@ class Tracker:
     def spend(self) -> dict:
         """Live requests over the whole database: what the team's allowance has paid for.
 
-        Replayed cache hits and mock calls cost nothing. Tokens and cost cover
-        the calls that reported them, so both are lower bounds.
+        Replayed cache hits and mock calls cost nothing. A call counts with
+        the cost its provider reported, else with the estimate from tokens
+        and prices. Tokens and cost cover the calls that are known, so both
+        are lower bounds.
         """
         with self._db() as db:
             rows = [
@@ -422,8 +449,9 @@ class Tracker:
         return {
             "calls": len(rows),
             "tokens": sum((row["input_tokens"] or 0) + (row["output_tokens"] or 0) for row in rows),
-            "usd": sum(row["cost_usd"] or 0.0 for row in rows),
-            "unknown_cost_calls": sum(row["cost_usd"] is None for row in rows),
+            "usd": sum(_spent(row) or 0.0 for row in rows),
+            "reported_cost_calls": sum(row["reported_cost_usd"] is not None for row in rows),
+            "unknown_cost_calls": sum(_spent(row) is None for row in rows),
         }
 
     def summary(self, run_id: str | None = None) -> dict:
@@ -436,6 +464,17 @@ class Tracker:
             run_count = db.execute("SELECT COUNT(*) FROM runs" + run_where, params).fetchone()[0]
         return self._summary(rows, run_count)
 
+    def tally(self, run_ids: list[str]) -> dict:
+        """The summary over several tracked runs together, such as the tasks of one arena run."""
+        rows: list = []
+        with self._db() as db:
+            db.execute("BEGIN")
+            for start in range(0, len(run_ids), 500):
+                part = run_ids[start : start + 500]
+                marks = ",".join("?" * len(part))
+                rows += db.execute(f"SELECT * FROM calls WHERE run_id IN ({marks})", part)
+        return self._summary(rows, len(set(run_ids)))
+
     @staticmethod
     def _summary(rows: list, run_count: int) -> dict:
         known_input = sum(row["input_tokens"] or 0 for row in rows)
@@ -444,6 +483,10 @@ class Tracker:
         output_complete = all(row["output_tokens"] is not None for row in rows)
         unknown_cost_calls = sum(row["cost_usd"] is None for row in rows)
         known_cost = sum(row["cost_usd"] or 0 for row in rows)
+        billable = [row for row in rows if row["billable"]]
+        reported = [row["reported_cost_usd"] for row in billable]
+        # What was paid now: a replayed reply was paid for when it was live.
+        spent = [_spent(row) for row in billable if not _cache_hit(row)]
         return {
             "run_count": run_count,
             "calls": len(rows),
@@ -458,9 +501,20 @@ class Tracker:
             "known_input_tokens": known_input,
             "known_output_tokens": known_output,
             "usage_complete": input_complete and output_complete,
+            # Estimates: reported tokens times the configured prices.
             "known_cost_usd": known_cost,
             "cost_usd": None if unknown_cost_calls else known_cost,
             "unknown_cost_calls": unknown_cost_calls,
+            # What the provider itself put on each reply; a replay carries the
+            # figure of the live reply. Complete only if every call has one.
+            "known_reported_cost_usd": sum(value or 0 for value in reported),
+            "reported_cost_usd": None if None in reported else sum(reported),
+            "reported_cost_calls": sum(value is not None for value in reported),
+            # Live spend: reported where there is a figure, estimated where
+            # there is none, unknown where there is neither. Replays excluded.
+            "known_spent_usd": sum(value or 0 for value in spent),
+            "spent_usd": None if None in spent else sum(spent),
+            "unknown_spend_calls": sum(value is None for value in spent),
             "latency_ms": sum(row["latency_ms"] for row in rows),
         }
 
@@ -488,7 +542,10 @@ class Tracker:
                 payload = {
                     "schema_version": 1,
                     "exported_at": _now(),
-                    "cost_basis": "Configured price estimates; not a provider invoice",
+                    "cost_basis": (
+                        "cost_usd: configured price estimates; reported_cost_usd: the "
+                        "provider's own per-reply figure; neither is an invoice"
+                    ),
                     "summary": self._summary(calls, len(runs)),
                     "runs": runs,
                     "calls": calls,
@@ -526,7 +583,17 @@ class NoReceipts:
         return []
 
     def spend(self) -> dict:
-        return {"calls": 0, "tokens": 0, "usd": 0.0, "unknown_cost_calls": 0}
+        return {
+            "calls": 0,
+            "tokens": 0,
+            "usd": 0.0,
+            "reported_cost_calls": 0,
+            "unknown_cost_calls": 0,
+        }
 
     def summary(self, run_id: str | None = None) -> dict:
         return Tracker._summary([], 0)
+
+    def tally(self, run_ids: list[str]) -> dict:
+        # Nothing was recorded, which is not the same as nothing was spent.
+        return {**Tracker._summary([], 0), "spent_usd": None, "reported_cost_usd": None}

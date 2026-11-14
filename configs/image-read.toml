@@ -1,0 +1,123 @@
+# configs/live.toml plus the image tool: the model can be shown a PNG or JPEG
+# of the task (`image(document, question?)`) and gets back what Gemma 4 reads
+# in it, as one evidence row. Each use is one more request to the small model
+# and one more line in every prompt. Unmeasured; compare with live.toml on the
+# same dev seed before it goes into the submitted profile. tests/test_config.py
+# keeps everything but the tool list equal to live.toml.
+[model]
+provider = "openai"
+response_format = "json_object"
+# DeepInfra's fp8 endpoint, where the event runs the model: OpenRouter's list
+# price on 14 November. Scored cost is the key's real usage, not this estimate.
+input_usd_per_million = 0.20
+output_usd_per_million = 0.40
+# The final's gateway pins these endpoints on every request, in this order;
+# dev runs use the same so that cost and behaviour match. usage.include asks
+# OpenRouter to report the cost of each request.
+extra_body = { usage = { include = true }, provider = { order = ["deepinfra/fp8", "crusoe", "novita"], only = ["deepinfra/fp8", "crusoe", "novita"], allow_fallbacks = true } }
+# If the endpoint rejects a request, these are the usual reasons:
+# response_format = "none"   # the endpoint knows no JSON mode
+# max_tokens_parameter = "max_completion_tokens"
+# temperature = "omit"
+# auth_header = "api-key"   # with auth_scheme = "" for gateways without Bearer
+# Gemma 4 thinks only when asked. On vLLM thinking is off by default;
+# chat_template_kwargs.enable_thinking = true or any reasoning_effort switches
+# it on. Thinking is paid output; on the stand-in model only "low" was worth
+# it. Ask how the event's endpoint is set up, then pin one and measure:
+# On OpenRouter add reasoning = { effort = "low" } (or "none") to extra_body
+# above; without it the endpoint's default applies.
+# JSON mode: one vLLM release ignored response_format for Gemma 4 with thinking
+# off (vllm-project/vllm#39130). A reply outside JSON costs a repair turn; if
+# `hacklab failures` shows model_content_must_be_json_text, try "json_schema".
+# Google recommends temperature 1.0, top_p 0.95, top_k 64 for Gemma 4. The
+# harness sends temperature 0 for repeatable decisions; measure before changing:
+# temperature = 1.0
+# extra_body = { top_p = 0.95, top_k = 64 }
+# input_usd_per_million = 0.0  # Replace with the organizer's actual scoring tariff.
+# output_usd_per_million = 0.0
+
+[jev]
+# Off until a dev run shows a gain after its cost: as a judge on the stand-in
+# model, Jev lowered accuracy and raised cost (docs/benchmarks.md).
+# configs/jev-select.toml is this file with Jev on. With OPENROUTER_API_KEY
+# set, Jev is asked at OpenRouter's /api/alpha/decisions as typesafe/jev-1.14;
+# the two lines below are TypeSafe's own API, used with TYPESAFE_API_KEY.
+enabled = false
+model = "jev-1.14.0"
+base_url = "https://api.typesafe.ai/v1/systemone"
+# Public list price is NOT necessarily the event's scoring tariff.
+# input_usd_per_million = 0.042
+# output_usd_per_million = 0.0
+threshold = 0.7  # TypeSafe's suggested starting point, not a measured optimum.
+
+[embedding]
+# Qwen3 Embedding, the third provided model. Off until a dev run shows a
+# gain: configs/embed-rank.toml is this file with it on. With
+# OPENROUTER_API_KEY set it is qwen/qwen3-embedding-8b at the small model's
+# address; EMBEDDING_MODEL_NAME and EMBEDDING_BASE_URL override.
+enabled = false
+
+[agent]
+# Search results for the task text in the first prompt: an answerable task
+# then needs one generator call instead of a search turn first.
+preload_results = 5
+inventory = true
+# Short prose documents (a runbook, a policy) are shown in full up front.
+preload_documents_under = 40
+# Every tool costs prompt tokens on every call. Remove what the scenario does
+# not need; add "phases" if tasks ask about attack stages.
+tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph", "image"]
+# Code-only solvers, tried first, and the event's standing rules for the
+# model. Both live inside the package, so they are in the image without
+# another COPY line. No skills yet: the rehearsal's recipes describe another
+# answer format; write one when a dev-run trace shows a wrong turn.
+playbooks = "hacklab.event.playbooks:playbooks"
+rules = "hacklab.event:arena-rules.md"
+# A wrong answer and no answer both score 0 here, so what passed the checks
+# is submitted instead of an abstention.
+on_unverified = "answer"
+# thought_chars = 300        # Schema-guided reasoning; costs output tokens.
+# decimal_separator = "comma"  # Fix once the data's convention is known; default "auto".
+
+[guard]
+injection = "flag"            # "withhold" hides instruction-like text entirely
+compact_secrets = true
+decode_previews = true
+require_grounded_targets = true
+# A brake against runaway containment. A swarm incident needs one action per
+# compromised agent, token and dataset: 20 was too few for the rehearsal.
+max_actions = 200
+# allowed_actions = ["quarantine_agent", "revoke_token"]   # From the organizers' action list.
+# protected_targets = ["night-shift", "hub-scanner"]
+
+[limits]
+# The event's tasks need more hops than the rehearsal's (the starter kit
+# allows 25 steps), and every prompt carries the operator rules: more steps,
+# more context and a token allowance that holds them. Not measured.
+max_steps = 12
+max_calls = 24
+max_retries = 1
+# Attempts after a rate limit, a request timeout (408), a server error, a
+# lost connection or OpenRouter's 402 with Retry-After; they wait 0.5, 1 and
+# 2 seconds, or what the server asks for. Each attempt counts against max_calls.
+http_retries = 3
+timeout_seconds = 60
+task_timeout_seconds = 300
+max_context_chars = 48000
+max_observation_chars = 4000  # One tool result; resent with every later step.
+max_output_tokens = 3000
+# Checked before each request against the request's size in BYTES plus the
+# output allowance, which is about four times its tokens: twelve requests of
+# up to 48000 characters each must fit.
+max_total_tokens = 600000
+# max_cost_usd = 0.02  # Requires all enabled prices to be explicitly configured.
+
+# The team's development allowance across all runs in this tracking database.
+# [budget]
+# max_calls = 2000
+# max_tokens = 3000000
+
+# Development only: replay unchanged requests instead of paying again. Leave it
+# off here and use HACKLAB_CACHE_MODE=readwrite while iterating.
+[cache]
+mode = "off"

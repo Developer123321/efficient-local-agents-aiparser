@@ -77,7 +77,9 @@ checks, with no network beyond a stand-in on a local address:
    still answers when they are absent;
 4. started without a command and with only the event's five variables, the
    container runs a two-task run against a stand-in gateway, submits both
-   tasks and finishes; started again, it finds nothing left to do;
+   tasks, counts the cost reported with each reply and finishes; started
+   again, it finds nothing left to do; with `configs/image-read.toml` a
+   picture reaches the stand-in model through the same address;
 5. the container cannot reach the internet;
 6. the agent runs as an unprivileged user and cannot change its own code.
 

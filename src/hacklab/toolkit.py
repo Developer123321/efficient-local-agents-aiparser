@@ -23,7 +23,8 @@ from hacklab.forensics.events import flatten, parse_timestamp
 from hacklab.forensics.graph import Edge, Graph
 from hacklab.guard import ActionGuard
 from hacklab.models import Action
-from hacklab.tools import ToolError, ToolRegistry, Unit
+from hacklab.providers import ProviderError
+from hacklab.tools import MAX_QUOTE_CHARS, ToolError, ToolRegistry, Unit
 
 MAX_LINES = 60
 MAX_DECODED_CHARS = 1500
@@ -79,6 +80,10 @@ SIGNATURES = {
         "influenced in time order"
     ),
     "phases": "phases(document, column, time?, where?): rows per kill-chain phase, by rule",
+    "image": (
+        "image(document, question?): the text and content of a PNG or JPEG picture, read by "
+        "the model; costs a model call, so only when the task needs the picture"
+    ),
 }
 RESULT_ID = re.compile(r"r\d{1,4}")
 
@@ -89,6 +94,28 @@ class Result:
 
     values: tuple[str, ...]
     evidence: tuple[str, ...]
+
+
+class Refused(Exception):
+    """Raised by a tool handler that declined before doing anything: nothing was sent or changed.
+
+    Its text is our own fixed wording, shown to the model as the reason.
+    """
+
+
+@dataclass(frozen=True)
+class Reloaded:
+    """The task's files after a tool changed something, as names below the document root."""
+
+    documents: tuple[str, ...]  # Every document of the task now.
+    written: tuple[str, ...] = ()  # New, or with new content.
+    removed: tuple[str, ...] = ()
+
+
+STALE = (
+    "the task's files changed and could not be reloaded; what is on disk may be out of date, "
+    "so document tools are unavailable until they can be"
+)
 
 
 @dataclass(frozen=True)
@@ -206,10 +233,19 @@ class Toolbox:
         ledger: Ledger,
         config: Config,
         extra: Iterable[ToolSpec] = (),
+        reload: Callable[[], Reloaded] | None = None,
     ):
         self.documents = documents
         self.ledger = ledger
         self.config = config
+        # Brings the task's files up to date after a tool changed something
+        # and says what they are now; it raises when it cannot.
+        self.reload = reload
+        # Set while a reload is owed: the files on disk may be behind the tool's effect.
+        self.stale = False
+        # Shows a picture to the small model and returns what it reads there:
+        # (bytes, media type, question) -> text. Set once the model is up.
+        self.vision: Callable[[bytes, str, str], str] | None = None
         self.guard = ActionGuard(config.guard, ledger.grounded)
         self.extra = {spec.name: spec for spec in extra}
         self.builtin = [name for name in config.agent.tools if name in SIGNATURES]
@@ -391,7 +427,7 @@ class Toolbox:
         if not self._scanned_keys:
             self._scanned_keys = True
             for entry in self.documents.inventory():
-                if "error" in entry:
+                if "error" in entry or "image" in entry:
                     continue
                 text = "\n".join(unit.text for unit in self.documents.units(entry["document"]))
                 for key in decoding.candidate_keys(text):
@@ -511,6 +547,30 @@ class Toolbox:
         body = decoded.text if decoded.text is not None else f"<{len(decoded.data)} binary bytes>"
         derived = f"decoded via {'>'.join(decoded.layers) or 'none'}: {body[:MAX_DECODED_CHARS]}"
         return self.ledger.add(source, locator, quote, derived).line()
+
+    def _image(self, arguments: dict[str, Any]) -> Observation:
+        """Show one picture of the task to the small model; what it reads is evidence.
+
+        The picture may carry text written by an attacker, and the model may
+        misread it. So the reading is one evidence row like any other: scanned
+        for instructions, secrets replaced, cited by the picture's path. The
+        bytes come from the task's own files and never from an address.
+        """
+        name = str(arguments.get("document", ""))
+        data, kind, digest = self.documents.image(name)
+        if self.vision is None:
+            return Observation(error="No model is available here to read images")
+        question = " ".join(str(arguments.get("question") or "").split())[:300]
+        try:
+            text = self.vision(data, kind, question)
+        except ProviderError as exc:
+            return Observation(error=f"The model could not read the image ({exc})")
+        read = " / ".join(line.strip() for line in str(text).splitlines() if line.strip())
+        if not read:
+            return Observation(["(the model read nothing in the image)"])
+        evidence = self.ledger.add(name, f"image:{digest[:16]}", read[:MAX_QUOTE_CHARS])
+        cut = ["-- reading cut at 2000 characters"] if len(read) > MAX_QUOTE_CHARS else []
+        return Observation([evidence.line()] + cut)
 
     def _units(self, arguments: dict[str, Any]) -> list[Unit]:
         return self.documents.rows(str(arguments.get("document", "")), arguments.get("where"))
@@ -658,6 +718,10 @@ class Toolbox:
             # A task names files as /logs/x.jsonl; documents are relative to the root.
             arguments = {**arguments, "document": arguments["document"].lstrip("/")}
         spec = self.extra.get(name) if name not in self.builtin else None
+        if spec is None and name != "calculate" and self.stale:
+            self.changed()  # Reading the state again is safe to repeat.
+            if self.stale:
+                return Observation(error=STALE)
         try:
             memo = json.dumps([name, arguments], sort_keys=True, default=str)
         except (TypeError, ValueError):
@@ -691,6 +755,7 @@ class Toolbox:
                 "iocs": self._iocs,
                 "graph": self._graph,
                 "after": self._after,
+                "image": self._image,
             }.get(name, self._phases)
             return handler(arguments)
         except ToolError as exc:
@@ -788,19 +853,68 @@ class Toolbox:
             return [], (problems or ["already_done"])[0]
         return accepted, ""
 
-    def _external(self, spec: ToolSpec, arguments: dict[str, Any]) -> Observation:
+    def changed(self) -> list[str]:
+        """A tool that changes something has run: what was read before may no longer hold.
+
+        Earlier results are no longer "unchanged", and with a `reload` the
+        task's documents are listed again. Rows shown from a file that was
+        rewritten or removed keep their evidence IDs as observations of the
+        earlier content. Returns the lines that tell the model what changed.
+        """
+        self._memo.clear()
+        self._scanned_keys = False
+        if self.reload is None:
+            return []
+        try:
+            state = self.reload()
+            self.documents.rescope(state.documents)
+        except Exception:
+            # The tool has run and is not run again; only the reading is repeated later.
+            self.stale = True
+            return [f"-- {STALE}"]
+        self.stale = False
+        self.ledger.seal({*state.written, *state.removed})
+        notes = []
+        for label, names in (("written", state.written), ("removed", state.removed)):
+            if names:
+                more = f" and {len(names) - 8} more" if len(names) > 8 else ""
+                notes.append(f"{label}: {', '.join(names[:8])}{more}")
+        return ["-- files changed; " + "; ".join(notes)] if notes else []
+
+    def call(self, spec: ToolSpec, arguments: dict[str, Any]) -> tuple[Any, list[str]]:
+        """Run an outside tool: its result and notes on what changed.
+
+        A mutating tool passes the action guard first; a refusal raises
+        `Refused`. Its action counts as done only when the tool reports no
+        failure, and the task's files are reloaded once it may have acted.
+        """
         accepted: list[Action] = []
         if spec.mutating:
             accepted, refusal = self.authorize(spec, arguments)
             if refusal:
-                return Observation(error=f"action refused: {refusal}")
+                raise Refused(refusal)
         try:
             result = spec.handler(**arguments)
+        except (TypeError, Refused):
+            raise  # Declined before anything happened.
+        except Exception:
+            if spec.mutating:
+                self.changed()  # It may have acted before it failed.
+            raise
+        failed = isinstance(result, dict) and set(result) == {"error"}
+        if not failed:
+            # Counted only once the tool has done it: a failed call may be retried.
+            self.guard.commit(accepted)
+            self.acted = self.acted or spec.mutating
+        return result, self.changed() if spec.mutating else []
+
+    def _external(self, spec: ToolSpec, arguments: dict[str, Any]) -> Observation:
+        try:
+            result, notes = self.call(spec, arguments)
         except TypeError:
             return Observation(error=f"Arguments do not match {spec.signature.split(':')[0]}")
-        # Counted only once the tool has run: a failed call may be retried.
-        self.guard.commit(accepted)
-        self.acted = self.acted or spec.mutating
+        except Refused as exc:
+            return Observation(error=f"action refused: {str(exc)[:300]}")
         rows = to_rows(result)
         lines = [
             self.ledger.add(
@@ -811,4 +925,4 @@ class Toolbox:
         ]
         if len(rows) > MAX_LINES:
             lines.append(f"-- {len(rows) - MAX_LINES} more items omitted")
-        return Observation(lines or ["(empty result)"])
+        return Observation((lines or ["(empty result)"]) + notes)

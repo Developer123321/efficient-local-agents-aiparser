@@ -601,6 +601,7 @@ def test_cache_replays_identical_requests_without_spending(receipt, tmp_path):
         "calls": 1,
         "tokens": 30,
         "usd": pytest.approx(0.00004),
+        "reported_cost_calls": 0,
         "unknown_cost_calls": 0,
     }
     # A different prompt, model setting or repetition is a different request.
@@ -1058,3 +1059,367 @@ def test_the_embedding_model_borrows_address_and_key_and_is_left_out_after_an_ou
     assert not embedding_usable(named)
     # Jev's counter is its own.
     assert jev_usable(JevConfig(enabled=True))
+
+
+# -- what a request cost: the provider's own figure beside our estimate ------------
+
+
+def priced(receipt, handler, limits=None, **options):
+    """The small model at $1 and $2 per million tokens: 20 in and 10 out are $0.00004."""
+    return small(
+        receipt, handler, limits, input_usd_per_million=1, output_usd_per_million=2, **options
+    )
+
+
+def costing(cost, status=200, **headers):
+    payload = completion()
+    payload["usage"]["cost"] = cost
+    # json.dumps writes NaN and Infinity, as a careless gateway might.
+    return httpx.Response(status, content=json.dumps(payload), headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("given", "kept"),
+    [
+        (0.0012, 0.0012),
+        (0, 0.0),  # A free reply is a known cost, not a missing one.
+        (3, 3.0),
+        (None, None),
+        ("0.0012", None),
+        (-0.01, None),
+        (True, None),
+        (float("nan"), None),
+        (float("inf"), None),
+        ({"usd": 1}, None),
+    ],
+)
+def test_a_reported_cost_is_kept_beside_the_estimate_and_never_guessed(receipt, given, kept):
+    provider, budget = priced(receipt, lambda request: costing(given))
+    provider.complete([], {})
+    call = receipt[0].calls(receipt[1])[0]
+    # The estimate from tokens and prices is the same whatever the provider reports.
+    assert call["cost_usd"] == pytest.approx(0.00004) and call["reported_cost_usd"] == kept
+    summary = receipt[0].summary(receipt[1])
+    assert summary["cost_usd"] == pytest.approx(0.00004)
+    assert summary["reported_cost_usd"] == kept
+    assert summary["reported_cost_calls"] == (kept is not None)
+    # Spend is the reported figure where there is one, else the estimate.
+    spent = 0.00004 if kept is None else kept
+    assert summary["spent_usd"] == pytest.approx(spent) and summary["unknown_spend_calls"] == 0
+    assert budget.cost_usd == pytest.approx(spent)
+    assert receipt[0].spend()["usd"] == pytest.approx(spent)
+
+
+def test_a_reply_without_usage_or_cost_stays_unknown_not_free(receipt):
+    reply = httpx.Response(200, json=completion(usage=False))
+    provider, _ = small(receipt, lambda request: reply)
+    provider.complete([], {})
+    summary = receipt[0].summary(receipt[1])
+    assert summary["cost_usd"] is None and summary["reported_cost_usd"] is None
+    assert summary["spent_usd"] is None and summary["known_spent_usd"] == 0
+    assert summary["unknown_spend_calls"] == 1
+    assert receipt[0].spend()["unknown_cost_calls"] == 1
+
+
+def test_the_task_cost_limit_and_the_allowance_count_what_was_reported(receipt):
+    tracker, run_id = receipt
+    costs = [0.0006, 0.02]
+    limits = Limits(max_cost_usd=0.015)
+    provider, budget = priced(receipt, lambda request: costing(costs.pop(0)), limits)
+    provider.spend = DevSpend(DevBudget(max_usd=0.0005), tracker)
+    provider.complete([], {})
+    # Estimated from its tokens the reply cost $0.00004; the provider says $0.0006.
+    assert budget.cost_usd == pytest.approx(0.0006) and provider.spend.usd == pytest.approx(0.0006)
+    with pytest.raises(BudgetExceeded, match="^development_budget_exhausted$"):
+        provider.complete([], {})
+    provider.spend = None
+    # By the estimate this reply would fit the task's limit many times over.
+    with pytest.raises(BudgetExceeded, match="^reported_cost_exceeded_budget$"):
+        provider.complete([], {})
+    assert [call["reported_cost_usd"] for call in tracker.calls(run_id)] == [0.0006, 0.02]
+
+
+def test_a_replay_carries_its_cost_and_is_not_spent_again(receipt, tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return costing(0.002)
+
+    ask = [{"role": "user", "content": "same question"}]
+    first = cached(receipt, tmp_path, handler)
+    first.complete(ask, {})
+    again = cached(receipt, tmp_path, handler)
+    again.complete(ask, {})
+    assert len(requests) == 1
+    live, replay = receipt[0].calls(receipt[1])
+    # The receipt of the replay says what the reply cost when it was live.
+    assert live["reported_cost_usd"] == replay["reported_cost_usd"] == 0.002
+    assert replay["metadata"]["cache_hit"] is True and "cache_hit" not in live["metadata"]
+    summary = receipt[0].summary(receipt[1])
+    # What the run would cost without a cache counts both; what was paid, one.
+    assert summary["reported_cost_usd"] == pytest.approx(0.004)
+    assert summary["spent_usd"] == pytest.approx(0.002) and summary["cache_hits"] == 1
+    assert receipt[0].spend()["usd"] == pytest.approx(0.002)
+    assert receipt[0].spend()["reported_cost_calls"] == 1
+    assert first.spend.usd == pytest.approx(0.002) and again.spend.calls == 1
+    # No body, in either direction, reached the tracking database.
+    stored = receipt[0].path.read_bytes()
+    assert b"same question" not in stored and b"final" not in stored
+
+
+def test_optional_models_report_their_cost_the_same_way(receipt, monkeypatch):
+    tracker, run_id = receipt
+    limits = Limits()
+    budget = Budget(limits)
+    routed = {
+        "answers": {"claim": {"noul": 0.9}},
+        "usage": {"prompt_tokens": 400, "completion_tokens": 0, "cost": 0.00002},
+    }
+    own = {"answers": {"claim": {"noul": 0.9}}, "usage": {"input_tokens": 400, "output_tokens": 0}}
+    replies = [routed, own]
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=replies.pop(0)))
+    )
+    jev = JevProvider(JevConfig(enabled=True), limits, budget, tracker, run_id, client=client)
+    question = {"claim": {"type": "noul", "instructions": "Check."}}
+    jev.judge({"text": "one"}, question)
+    jev.judge({"text": "two"}, question)
+    vectors = {
+        "data": [{"index": 0, "embedding": [1.0, 0.0]}],
+        "usage": {"prompt_tokens": 9, "total_tokens": 9, "cost": 0},
+    }
+    embedder = EmbeddingProvider(
+        EmbeddingConfig(enabled=True, model="qwen"),
+        ModelConfig(provider="openai", base_url="http://127.0.0.1:1/v1", model="m"),
+        limits,
+        budget,
+        tracker,
+        run_id,
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=vectors))
+        ),
+    )
+    embedder.embed(["text"])
+    calls = tracker.calls(run_id)
+    assert [(call["provider"], call["reported_cost_usd"]) for call in calls] == [
+        ("jev", 0.00002),
+        ("jev", None),  # TypeSafe's own API reports tokens only: unknown, not free.
+        ("embedding", 0.0),
+    ]
+    summary = tracker.summary(run_id)
+    assert summary["known_reported_cost_usd"] == pytest.approx(0.00002)
+    assert summary["reported_cost_usd"] is None and summary["unknown_spend_calls"] == 1
+
+
+def test_a_kit_function_reply_reports_its_cost_too(receipt):
+    tracker, run_id = receipt
+    limits = Limits()
+    reply = completion()
+    reply["usage"]["cost"] = 0.0007
+    model = FunctionModel(
+        lambda messages: reply, ModelConfig(model="kit"), limits, Budget(limits), tracker, run_id
+    )
+    model.complete([], {})
+    assert tracker.calls(run_id)[0]["reported_cost_usd"] == 0.0007
+
+
+# -- which failures pass ------------------------------------------------------------
+
+
+def clocked(monkeypatch):
+    """A clock that only moves when the provider sleeps, and the sleeps it made."""
+    clock, sleeps = [0.0], []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr("hacklab.providers.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("hacklab.providers.time.sleep", sleep)
+    return clock, sleeps
+
+
+def test_a_request_timeout_and_a_full_in_flight_budget_are_tried_again(receipt, monkeypatch):
+    clock, sleeps = clocked(monkeypatch)
+    replies = [
+        httpx.Response(408, json={}),
+        # OpenRouter: credit is left, too much of it is reserved by requests in flight.
+        httpx.Response(402, json={"error": {"message": "x"}}, headers={"Retry-After": "7"}),
+        costing(0.001),
+    ]
+    provider, budget = priced(
+        receipt, lambda request: replies.pop(0), Limits(http_retries=3, max_calls=4)
+    )
+    assert provider.complete([], {}) == {"action": "final"}
+    # A short pause after the 408, the seven seconds the 402 asked for.
+    assert sum(sleeps) == pytest.approx(7.0) and clock[0] == pytest.approx(7.0)
+    calls = receipt[0].calls(receipt[1])
+    assert [call["status"] for call in calls] == ["http_408", "http_402", "ok"]
+    assert [call["metadata"]["attempt"] for call in calls] == [1, 2, 3]
+    # Every attempt is counted; what the failed ones cost is not known.
+    assert budget.calls == 3
+    summary = receipt[0].summary(receipt[1])
+    assert summary["unknown_cost_calls"] == 2 and summary["cost_usd"] is None
+    assert summary["known_reported_cost_usd"] == pytest.approx(0.001)
+    assert summary["spent_usd"] is None and summary["unknown_spend_calls"] == 2
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 404])
+def test_a_failure_that_does_not_pass_is_not_tried_again(receipt, monkeypatch, status):
+    _, sleeps = clocked(monkeypatch)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(status, json={"error": {"message": "Key limit exceeded"}})
+
+    provider, budget = small(receipt, handler, Limits(http_retries=5))
+    with pytest.raises(ProviderError, match=f"^provider_http_{status}$"):
+        provider.complete([], {})
+    assert len(seen) == 1 and budget.calls == 1 and sleeps == []
+
+
+def test_a_403_is_final_even_when_it_names_a_wait(receipt, monkeypatch):
+    _, sleeps = clocked(monkeypatch)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(403, json={}, headers={"Retry-After": "1"})
+
+    provider, _ = small(receipt, handler, Limits(http_retries=5))
+    with pytest.raises(ProviderError, match="^provider_http_403$"):
+        provider.complete([], {})
+    assert len(seen) == 1 and sleeps == []
+
+
+def test_the_wait_a_server_asks_for_is_bounded_and_retries_run_out(receipt, monkeypatch):
+    clock, sleeps = clocked(monkeypatch)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(402, json={}, headers={"Retry-After": "3600"})
+
+    limits = Limits(http_retries=2, task_timeout_seconds=1800)
+    provider, budget = small(receipt, handler, limits)
+    with pytest.raises(ProviderError, match="^provider_http_402$"):
+        provider.complete([], {})
+    # Three attempts, and two waits of two minutes instead of an hour each.
+    assert len(seen) == 3 and budget.calls == 3 and sum(sleeps) == pytest.approx(240.0)
+    assert [call["status"] for call in receipt[0].calls(receipt[1])] == ["http_402"] * 3
+
+
+def test_a_wait_that_outlasts_the_run_ends_the_request_at_once(receipt, monkeypatch):
+    clock, sleeps = clocked(monkeypatch)
+    tracker, run_id = receipt
+    limits = Limits(http_retries=3)
+    budget = Budget(limits, clock=lambda: clock[0], deadline=20.0)
+    provider = SmallModelProvider(
+        ModelConfig(provider="openai", base_url="http://127.0.0.1:1234/v1", model="m"),
+        limits,
+        budget,
+        tracker,
+        run_id,
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(402, json={}, headers={"Retry-After": "30"})
+            )
+        ),
+    )
+    with pytest.raises(BudgetExceeded, match="^task_time_budget_exhausted_before_retry$"):
+        provider.complete([], {})
+    assert sleeps == [] and budget.calls == 1
+    # Past the end of the run no further request is started at all.
+    clock[0] = 21.0
+    with pytest.raises(BudgetExceeded, match="^run_deadline_reached$"):
+        provider.complete([], {})
+    assert len(tracker.calls(run_id)) == 1
+
+
+# -- a picture shown to the small model --------------------------------------------
+
+
+def reading(text="BOARD", finish="stop", **usage):
+    message = {"content": text}
+    counted = {"prompt_tokens": 300, "completion_tokens": 12, **usage}
+    return {"choices": [{"message": message, "finish_reason": finish}], "usage": counted}
+
+
+def test_a_picture_is_one_tracked_request_with_its_own_allowances(receipt):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=reading(cost=0.0003))
+
+    picture = b"\x89PNG" + bytes(900_000)
+    extra = {"usage": {"include": True}, "provider": {"order": ["deepinfra/fp8"]}}
+    provider, budget = priced(receipt, handler, Limits(max_total_tokens=20_000), extra_body=extra)
+    assert provider.describe(picture, "image/png", "the date") == "BOARD"
+    body = json.loads(seen[0].content)
+    # The same endpoint, key and routing as a decision; plain text back, 700 tokens at most.
+    assert str(seen[0].url) == "http://127.0.0.1:1234/v1/chat/completions"
+    assert seen[0].headers["Authorization"] == "Bearer synthetic-test-key"
+    assert body["usage"] == {"include": True} and body["provider"] == {"order": ["deepinfra/fp8"]}
+    assert body["max_tokens"] == 700 and body["temperature"] == 0.0
+    assert "response_format" not in body and body["model"] == "event-small-model"
+    # The megabyte of base64 is not held against the token budget; a fixed allowance is.
+    assert len(seen[0].content) > 1_200_000 and budget.calls == 1
+    assert budget.tokens == 312 and budget.cost_usd == pytest.approx(0.0003)
+    call = receipt[0].calls(receipt[1])[0]
+    assert (call["provider"], call["status"]) == ("openai", "ok")
+    assert (call["input_tokens"], call["output_tokens"]) == (300, 12)
+    assert call["reported_cost_usd"] == 0.0003
+    with pytest.raises(ProviderError, match="^image_type_unsupported$"):
+        provider.describe(picture, "image/gif")
+    assert len(seen) == 1
+
+
+def test_what_the_model_says_about_a_picture_is_taken_as_text_or_refused(receipt):
+    replies = [
+        httpx.Response(429, json={}),
+        httpx.Response(200, json=reading("<think>hm</think>  Line one\nLine two ")),
+        httpx.Response(200, json=reading("Cut off he", finish="length")),
+        httpx.Response(200, json=reading([{"type": "text", "text": "typed"}, {"type": "x"}])),
+        httpx.Response(200, json=reading("")),
+        httpx.Response(200, json=reading(None)),
+        httpx.Response(200, json={"choices": []}),
+        httpx.Response(400, json={"error": {"message": "this endpoint takes no images"}}),
+    ]
+    provider, budget = small(receipt, lambda request: replies.pop(0), Limits(http_retries=1))
+    picture = b"\xff\xd8\xff" + bytes(200)
+    # A rate limit passes, as for any request; hidden thinking is not part of the reading.
+    assert provider.describe(picture, "image/jpeg") == "Line one\nLine two"
+    assert provider.describe(picture, "image/jpeg") == "Cut off he …"
+    assert provider.describe(picture, "image/jpeg") == "typed"
+    for code in ("model_read_nothing_in_the_image",) * 2 + ("provider_response_schema_invalid",):
+        with pytest.raises(ProviderError, match=f"^{code}$"):
+            provider.describe(picture, "image/jpeg")
+    with pytest.raises(ProviderError, match="^provider_http_400$"):
+        provider.describe(picture, "image/jpeg")
+    statuses = [call["status"] for call in receipt[0].calls(receipt[1])]
+    assert statuses == ["http_429", "ok", "ok", "ok"] + ["invalid_response"] * 3 + ["http_400"]
+    assert budget.calls == 8
+
+
+def test_a_picture_is_not_requested_past_the_end_of_the_run(receipt):
+    tracker, run_id = receipt
+    limits = Limits()
+    now = [100.0]
+    budget = Budget(limits, clock=lambda: now[0], deadline=130.0)
+    provider = SmallModelProvider(
+        ModelConfig(provider="openai", base_url="http://127.0.0.1:1234/v1", model="m"),
+        limits,
+        budget,
+        tracker,
+        run_id,
+        client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: pytest.fail("must not be sent"))
+        ),
+    )
+    now[0] = 131.0
+    with pytest.raises(BudgetExceeded, match="^run_deadline_reached$"):
+        provider.describe(b"\x89PNG" + bytes(100), "image/png")
+    assert tracker.calls(run_id) == []

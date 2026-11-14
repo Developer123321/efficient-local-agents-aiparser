@@ -13,10 +13,11 @@ import io
 import json
 import math
 import re
+import struct
 import threading
 import zipfile
 from collections import Counter, OrderedDict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation, localcontext
@@ -83,6 +84,12 @@ SUPPORTED = TEXT_SUFFIXES | {
     ".odt",
     ".ods",
 }
+# Pictures are no documents: they are neither parsed nor searched. With the
+# image tool in `[agent] tools` the model can be shown one, within these bounds.
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+MAX_IMAGE_BYTES = 4_000_000
+MAX_IMAGE_SIDE = 16_384
+MAX_IMAGES = 200
 # A log under these names is often structured: one JSON object or one run of
 # key=value pairs per line. Such a file is read as a table.
 SNIFFED_SUFFIXES = {".log", ".txt", ".out", ""}
@@ -188,6 +195,34 @@ def list_documents(root: Path, limit: int = MAX_DOCUMENTS) -> list[str]:
                 continue
         names.append(relative.as_posix())
     return sorted(names)
+
+
+def list_images(root: Path, limit: int = MAX_IMAGES) -> list[str]:
+    """Every PNG and JPEG below `root` as a relative name, in name order, hidden ones left out."""
+    base = root.resolve()
+    names = []
+    for visited, path in enumerate(base.rglob("*")):
+        if visited >= MAX_DOCUMENTS * 10 or len(names) >= limit:
+            break
+        relative = path.relative_to(base)
+        if (
+            path.suffix.lower() in IMAGE_TYPES
+            and path.is_file()
+            and not any(part.startswith(".") for part in relative.parts)
+        ):
+            names.append(relative.as_posix())
+    return sorted(names)
+
+
+def image_type(data: bytes) -> str | None:
+    """`image/png` or `image/jpeg` by the file's own first bytes, whatever it is called."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR" and len(data) >= 33:
+        width, height = struct.unpack(">II", data[16:24])
+        sane = 0 < width <= MAX_IMAGE_SIDE and 0 < height <= MAX_IMAGE_SIDE
+        return "image/png" if sane else None
+    if data[:3] == b"\xff\xd8\xff" and len(data) >= 100:
+        return "image/jpeg"
+    return None
 
 
 def _logfmt(line: str) -> dict[str, str] | None:
@@ -572,8 +607,12 @@ class ToolRegistry:
         root: Path,
         allowed_documents: list[str] | None = None,
         decimal_separator: str = "auto",
+        images: bool = False,
     ):
         self.decimal_separator = decimal_separator
+        # Whether pictures among the task's files are listed as images and may
+        # be handed to the model. Off, a picture is an unreadable document.
+        self.images = images
         self.allowed = None if allowed_documents is None else frozenset(allowed_documents)
         if self.allowed is not None and len(self.allowed) > MAX_DOCUMENTS:
             raise ToolError(f"At most {MAX_DOCUMENTS} task documents are supported")
@@ -587,6 +626,22 @@ class ToolRegistry:
         self._cache: dict[str, tuple[tuple[int, ...], Document]] = {}
         self._index: tuple[tuple[str, ...], Any] | None = None
 
+    def rescope(self, documents: Iterable[str]) -> None:
+        """The task's documents after its files changed.
+
+        New ones become readable and removed ones stop being offered. A file
+        with new content is parsed again by itself: `_load` compares what is
+        on disk with what it parsed. The search index is built again.
+        """
+        allowed = frozenset(documents)
+        if len(allowed) > MAX_DOCUMENTS:
+            raise ToolError(f"At most {MAX_DOCUMENTS} task documents are supported")
+        if self.allowed is not None:
+            self.allowed = allowed
+        for name in set(self._cache) - allowed:
+            del self._cache[name]
+        self._index = None
+
     def inventory(self) -> list[dict[str, Any]]:
         """Size and columns of every task document, so a table needs no discovery turn."""
         listing = []
@@ -599,7 +654,37 @@ class ToolRegistry:
             except (ToolError, OSError, ValueError, UnicodeError, csv.Error, zipfile.BadZipFile):
                 entry = {"document": name, "error": "unreadable"}
             listing.append(entry)
+        for name in self._image_names():
+            try:
+                listing.append({"document": name, "image": self._path(name).stat().st_size})
+            except (ToolError, OSError):
+                listing.append({"document": name, "error": "unreadable"})
         return listing
+
+    def _image_names(self) -> list[str]:
+        if not self.images:
+            return []
+        names = sorted(self.allowed) if self.allowed is not None else list_images(self.root)
+        return [name for name in names if Path(name).suffix.lower() in IMAGE_TYPES]
+
+    def image(self, name: str) -> tuple[bytes, str, str]:
+        """A picture of this task: its bytes, its media type and its SHA-256.
+
+        Only a file of the task, only PNG or JPEG by its own first bytes, and
+        only up to a size that one request can carry.
+        """
+        if not self.images:
+            raise ToolError("Images are not read in this configuration")
+        path = self._path(name)
+        if path.suffix.lower() not in IMAGE_TYPES:
+            raise ToolError("Not an image; use read, search or table for documents")
+        if path.stat().st_size > MAX_IMAGE_BYTES:
+            raise ToolError(f"Image exceeds the {MAX_IMAGE_BYTES // 1_000_000} MB limit")
+        data = path.read_bytes()
+        kind = image_type(data)
+        if kind is None:
+            raise ToolError("Not a readable PNG or JPEG image")
+        return data, kind, hashlib.sha256(data).hexdigest()
 
     def _time(self, loaded: Document) -> str | None:
         if not loaded.timed:
@@ -767,7 +852,11 @@ class ToolRegistry:
 
     def _names(self) -> list[str]:
         if self.allowed is not None:
-            return sorted(self.allowed)
+            names = sorted(self.allowed)
+            if self.images:
+                # Listed apart: a picture is not parsed and not searched.
+                names = [name for name in names if Path(name).suffix.lower() not in IMAGE_TYPES]
+            return names
         # An explicit task allowlist is preferred. Unscoped usage remains bounded.
         return list_documents(self.root)
 
@@ -1282,6 +1371,12 @@ class ToolRegistry:
         errors = []
         for index, citation in enumerate(citations):
             try:
+                if self.images and Path(citation.document).suffix.lower() in IMAGE_TYPES:
+                    # What the model read in a picture cannot be compared with
+                    # its bytes; that it is still the same picture can.
+                    if citation.locator != f"image:{self.image(citation.document)[2][:16]}":
+                        raise ToolError("The image is not the one that was read")
+                    continue
                 loaded = self._load(citation.document)
                 unit = next((u for u in loaded.units if u.locator == citation.locator), None)
                 if unit is None:
