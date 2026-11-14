@@ -322,6 +322,20 @@ def to_arena(answer: Answer, root: Path | None = None) -> dict[str, Any]:
     return {"outcome": outcome, "answer": defang(value), "sources": sources(answer, root)}
 
 
+def hands_over_actions(instruction: str, config: Config) -> bool:
+    """Whether the tools that change something are handed to the agent for this task.
+
+    The model loop gets them only when the instruction's words ask to act.
+    Without the loop only solver code can call a tool, and a solver acts only
+    on a request it has read as one: by its words or, where the words are new,
+    by one typed reading of the request. What it then does is checked in code.
+    """
+    actions = os.environ.get("HACKLAB_ARENA_ACTIONS", "auto").lower()
+    if actions in ("always", "never"):
+        return actions == "always"
+    return config.agent.fallback == "none" or bool(ACTION_WORDS.search(instruction))
+
+
 def solve_task(
     arena: Arena,
     mirror: Mirror,
@@ -338,14 +352,12 @@ def solve_task(
         root: Path | None = mirror.workspace(run_id, task_id)
     except (ArenaError, OSError):
         root = None  # Without a mirror the platform's own read and search serve.
-    actions = os.environ.get("HACKLAB_ARENA_ACTIONS", "auto").lower()
-    wanted = actions == "always" or (actions != "never" and bool(ACTION_WORDS.search(instruction)))
     tools = arena_tools(
         arena,
         run_id,
         task_id,
         specs,
-        actions=wanted,
+        actions=hands_over_actions(instruction, config),
         trusted=trusted_addresses(root, instruction) if root else set(ADDRESS.findall(instruction)),
         local=root is not None,
     )

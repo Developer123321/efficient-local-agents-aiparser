@@ -40,6 +40,7 @@ from hacklab.event.incident import (
     parse_time,
     stamp,
 )
+from hacklab.event.reword import reword
 from hacklab.models import Answer, Citation, Task
 from hacklab.playbooks import Playbooks, Workspace
 
@@ -59,6 +60,7 @@ ACTS = re.compile(
     re.IGNORECASE,
 )
 SECRET = re.compile(r"fake_mf_[0-9a-f]+")
+PATHS = re.compile(r"(?<![\w.])/[A-Za-z_][\w.-]*/")
 
 
 def solver(pattern: str, acts: bool = False, asks: bool = False) -> Callable[[Any], Any]:
@@ -99,6 +101,10 @@ def request_of(question: str, incident: Incident) -> str:
         if ticket is None:
             raise Unreadable("no single open ticket")
         return ticket
+    # A short instruction that speaks of the queue in other words and asks nothing itself.
+    points = len(instruction) < 240 and re.search(r"\btickets?\b|\bqueue\b", instruction, re.I)
+    if points and not keys_of(instruction) and not PATHS.search(instruction):
+        return open_ticket(incident) or instruction
     return instruction
 
 
@@ -120,6 +126,46 @@ def _citation(source: Source) -> Citation:
     return Citation(document=path.lstrip("/"), locator=locator, quote=path)
 
 
+def _solve(
+    incident: Incident, request: str, workspace: Workspace, acting: bool | None = None
+) -> Solved | None:
+    """The first solver that answers `request`; PermissionError when the guard refused.
+
+    Whether the request asks to act is read from its words, unless the caller knows.
+    """
+    if acting is None:
+        acting = bool(ACTS.search(request))
+    for pattern, function, acts, asks in SOLVERS:
+        if acts != acting or not pattern.search(request):
+            continue
+        try:
+            handed = (incident, request, workspace) if acts or asks else (incident, request)
+            solved = function(*handed)
+        except (Unreadable, LookupError, ValueError, StopIteration, OSError, RuntimeError) as exc:
+            if os.environ.get("HACKLAB_DEBUG"):
+                # Which solver stepped aside and why; the message is our own, no data.
+                print(f"hacklab: {function.__name__}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            continue
+        if solved is not None:
+            return solved
+    return None
+
+
+def _otherwise(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
+    """A request no solver took: in a solver's wording, then from the computed facts."""
+    model = workspace.model() if workspace.model else None
+    if model is None:
+        return None
+    try:
+        known = reword(request, model, keyed=bool(keys_of(request)))
+        solved = _solve(incident, known[0], workspace, known[1]) if known else None
+        if solved is None and not ACTS.search(request):
+            solved = brief(incident, request, workspace)
+    except (Unreadable, LookupError, ValueError, StopIteration, OSError, RuntimeError):
+        return None
+    return solved
+
+
 @playbooks.register(r".")
 def dispatch(task: Task, workspace: Workspace) -> Answer | None:
     incident = Incident(workspace.documents.root, workspace.model, workspace.documents.units)
@@ -127,40 +173,31 @@ def dispatch(task: Task, workspace: Workspace) -> Answer | None:
         request = request_of(task.question, incident)
     except Unreadable:
         return None
-    acting = bool(ACTS.search(request))
-    for pattern, function, acts, asks in SOLVERS:
-        if acts != acting or not pattern.search(request):
-            continue
-        try:
-            handed = (incident, request, workspace) if acts or asks else (incident, request)
-            solved = function(*handed)
-        except PermissionError:
-            return None  # The guard refused the action: the model decides what is right.
-        except (Unreadable, LookupError, ValueError, StopIteration, OSError, RuntimeError) as exc:
-            if os.environ.get("HACKLAB_DEBUG"):
-                # Which solver stepped aside and why; the message is our own, no data.
-                print(f"hacklab: {function.__name__}: {type(exc).__name__}: {exc}", file=sys.stderr)
-            continue
-        if solved is None:
-            continue
-        value, sources, *rest = solved
-        if _unsafe(value):
-            return None  # A secret value or a link is never an answer.
-        citations: list[Citation] = []
-        for source in sources:
-            citation = _citation(source)
-            if citation not in citations:
-                citations.append(citation)
-        return Answer(
-            status="ok",
-            answer="" if value is None else json.dumps(value, ensure_ascii=False)[:12000],
-            value=value,
-            outcome=rest[0] if rest else "OK",
-            citations=citations[:100],
-            confidence=1.0,
-            reason="Computed from the workspace by the runbook's rules; no model was called.",
-        )
-    return None
+    try:
+        solved = _solve(incident, request, workspace)
+        if solved is None and os.environ.get("HACKLAB_REWORD", "on") != "off":
+            solved = _otherwise(incident, request, workspace)
+    except PermissionError:
+        return None  # The guard refused the action: nothing is done and nothing is answered.
+    if solved is None:
+        return None
+    value, sources, *rest = solved
+    if _unsafe(value):
+        return None  # A secret value or a link is never an answer.
+    citations: list[Citation] = []
+    for source in sources:
+        citation = _citation(source)
+        if citation not in citations:
+            citations.append(citation)
+    return Answer(
+        status="ok",
+        answer="" if value is None else json.dumps(value, ensure_ascii=False)[:12000],
+        value=value,
+        outcome=rest[0] if rest else "OK",
+        citations=citations[:100],
+        confidence=1.0,
+        reason="Computed from the workspace by the runbook's rules.",
+    )
 
 
 LINK = re.compile(
@@ -227,7 +264,7 @@ def entry(incident: Incident, request: str) -> Solved | None:
 # -- what left the building -----------------------------------------------------------
 
 
-@solver(r"exfiltrat")
+@solver(r".")
 def exfiltrated(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     if set(keys) != {"records", "domains"}:
@@ -240,7 +277,7 @@ def exfiltrated(incident: Incident, request: str) -> Solved | None:
     return {key: value[key] for key in keys}, [transfer.source for transfer in counted]
 
 
-@solver(r"exfiltrat")
+@solver(r".")
 def largest_share(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     if set(keys) != {"agent", "owner_email"}:
@@ -267,7 +304,7 @@ def largest_share(incident: Incident, request: str) -> Solved | None:
     return {key: value[key] for key in keys}, sources
 
 
-@solver(r"exfiltrat")
+@solver(r".")
 def largest_group(incident: Incident, request: str) -> Solved | None:
     """The team (or other roster group) whose agents sent the most records, and how many."""
     keys = keys_of(request)
@@ -299,7 +336,8 @@ def largest_group(incident: Incident, request: str) -> Solved | None:
     for transfer in incident.exfiltration:
         if transfer.event.agent in group_of:
             groups.setdefault(group_of[transfer.event.agent], []).append(transfer)
-    distinct = True if re.search(r"distinct|unique", request, re.IGNORECASE) else None
+    once = r"distinct|unique|different|deduplicat|counted once|each record once"
+    distinct = True if re.search(once, request, re.IGNORECASE) else None
     totals = {group: incident.count(sent, distinct) for group, sent in groups.items()}
     ranked = sorted(totals, key=lambda group: -totals[group])
     if not ranked or (len(ranked) > 1 and totals[ranked[0]] == totals[ranked[1]]):
@@ -482,7 +520,14 @@ def access_violations(incident: Incident, request: str) -> Solved | None:
     )
     folder = name.rsplit("/", 1)[0]
     policy = incident.text(folder + "/POLICY.md") if incident.has(folder + "/POLICY.md") else ""
-    spelled = bool(re.search(r"ticket field is empty|no ticket", request, re.IGNORECASE))
+    spelled = bool(
+        re.search(
+            r"ticket (field|column|value)? ?(is|was)? ?(empty|blank|missing|unset|absent)|"
+            r"\b(no|without (a|any)?) ?(change )?ticket|lacks? a ticket",
+            request,
+            re.IGNORECASE,
+        )
+    )
     tickets: list[dict[str, str]] = []
     if not spelled and "change_tickets.csv" in policy:
         tickets = canon(
@@ -604,7 +649,7 @@ def _moment(incident: Incident, phrase: str) -> tuple[Any, Source] | None:
     return None
 
 
-@solver(r"chronolog|earliest|\\border\\b|sequence|timeline")
+@solver(r"chronolog|earliest|\border\b|sequence|timeline")
 def timeline(incident: Incident, request: str) -> Solved | None:
     items = re.findall(r"\b([A-H]):\s*(.+?)(?=;\s*[A-H]:|\.\s+[A-Z]|\.?\s*$)", request, re.DOTALL)
     if len(items) < 2 or len({letter for letter, _ in items}) != len(items):
@@ -1124,7 +1169,7 @@ def _holds(incident: Incident, claim: str, amount: re.Match[str], events: list[A
     return stated in totals
 
 
-@solver(r"valid.{0,80}revoked|revoked.{0,80}valid")
+@solver(r".")
 def token_status(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     token = re.search(r"\bTOK-[A-Z0-9]+-\d+\b", request)
@@ -1151,7 +1196,7 @@ def token_status(incident: Incident, request: str) -> Solved | None:
     return {key: value[key] for key in keys}, sources
 
 
-@solver(r"board")
+@solver(r".")
 def board_origin(incident: Incident, request: str) -> Solved | None:
     """The board message an agent acted on, its poster and what started the poster's trace."""
     keys = keys_of(request)
@@ -1949,7 +1994,6 @@ def _facts(incident: Incident) -> list[tuple[str, list[Source]]]:
     return facts
 
 
-@solver(r".", asks=True)
 def brief(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
     """One model reading of computed facts, for a question no solver above answered."""
     model = workspace.model() if workspace.model else None

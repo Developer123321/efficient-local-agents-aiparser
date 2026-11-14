@@ -51,9 +51,18 @@ any host machine configuration.
   package, so the image needs no new COPY line. `examples/` holds worked
   examples only.
 - The platform's tools that change something (`containment`, `send_message`,
-  `write`) are offered only when the instruction asks to act, and their
-  recipients, paths and URLs are checked in code (`arena_run.arena_tools`).
-  A new platform tool is mutating unless it is listed in `READ_ONLY`.
+  `write`) are offered to the model loop only when the instruction asks to
+  act (`ACTION_WORDS`). Without the loop (`fallback = "none"`) solver code
+  holds them and acts only on a request it read as one: by its words (`ACTS`)
+  or by the routing reading (`event/reword.py`). Recipients, paths and URLs
+  are checked in code either way (`arena_run.arena_tools`). A new platform
+  tool is mutating unless it is listed in `READ_ONLY`.
+- The final words its instructions in phrasings no dev run shows. A solver
+  is chosen by words or by the answer's keys; a request none takes is matched
+  by the model to a known request (`reword.KINDS`: a kind and a form from a
+  fixed list), and code writes that request with the names the original
+  holds. Add a kind there with every new solver that is chosen by words. The
+  model never writes a part of a request, a path, an agent or an action.
 - Every task of a run is submitted, whatever failed. Do not add a path in
   `arena_run.run` that skips `submit`, and do not finish a final run that
   left tasks out or still holds answers that did not arrive.

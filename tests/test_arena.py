@@ -442,6 +442,22 @@ def test_tools_that_change_something_are_offered_and_guarded(platform, tmp_path)
     assert not arena_run.ACTION_WORDS.search("Which agents are compromised? JSON list.")
 
 
+def test_without_the_loop_solvers_hold_the_acting_tools_and_decide_themselves(monkeypatch):
+    question = "Which agents are compromised? JSON list."
+    order = "Put the hijacked agents out of action."
+    looping = Config()
+    assert not arena_run.hands_over_actions(question, looping)
+    assert not arena_run.hands_over_actions(order, looping)  # Words the loop's gate does not know.
+    assert arena_run.hands_over_actions("Quarantine every compromised agent.", looping)
+    alone = Config(agent={"fallback": "none"})
+    assert arena_run.hands_over_actions(question, alone)
+    assert arena_run.hands_over_actions(order, alone)
+    monkeypatch.setenv("HACKLAB_ARENA_ACTIONS", "never")
+    assert not arena_run.hands_over_actions(order, alone)
+    monkeypatch.setenv("HACKLAB_ARENA_ACTIONS", "always")
+    assert arena_run.hands_over_actions(question, looping)
+
+
 def odf(path, body):
     namespaces = (
         'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '

@@ -226,9 +226,11 @@ Defence, all in code ([arena_run.py](../src/hacklab/event/arena_run.py)):
 - Workspace text is evidence: it gets an evidence ID, the injection scan and
   placeholders, and cannot select a tool, a target or an action by itself
   ([defence layers](architecture.md#defence-layers)).
-- `containment`, `send_message` and `write` are offered only when the
-  instruction asks to act (`ACTION_WORDS`). `HACKLAB_ARENA_ACTIONS=always`
-  or `never` overrides the gate.
+- `containment`, `send_message` and `write` are offered to the model loop
+  only when the instruction asks to act (`ACTION_WORDS`). In the submitted
+  profile there is no loop: solver code holds them and acts only on a
+  request it read as one, by its words or by one typed reading of the
+  request. `HACKLAB_ARENA_ACTIONS=always` or `never` overrides the gate.
 - `send_message` goes only to addresses named by the instruction, the
   operator files or a CSV registry; `write` only below `/drafts/`.
 - Every URL in an answer, a message or a draft is defanged.

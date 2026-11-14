@@ -25,7 +25,8 @@ The submitted profile (`configs/live.toml`) stops after the first line of the
 picture above. `event/incident.py` reads a task's workspace into facts (attack
 traces from the audit log, compromised agents, transfers that count under the
 runbook's rules, attacker domains, exposed tokens, permissions, the change
-calendar), and `event/playbooks.py` holds one solver per kind of question. A
+calendar), and `event/playbooks.py` holds one solver per kind of question,
+chosen by the request's words or by the keys of the answer it asks for. A
 solver checks what it relies on and returns `None` when a file, a column or a
 rule is not what it expects.
 
@@ -35,6 +36,7 @@ rule is not what it expects.
 | What a scanned page says | a transcript | takes host names from list entries only, never from text that tells the reader what to answer |
 | What an inbox message asks for | a list in a fixed vocabulary | checks the sender, the targets and every hard rule, then acts or refuses |
 | What a runbook sentence means, if no known wording fits | one boolean | applies it |
+| Which known request a request in new words asks for (`event/reword.py`) | a kind and a form from a fixed list, for a timeline an event id per letter | writes that request in the solver's wording with the files, agents, tokens, scopes and domains the original names, then solves it |
 | A question no solver knows, with the computed facts numbered | an answer and the ids of the facts it rests on | answers only if those facts exist; their rows are the sources |
 
 Nothing else reaches a model, and no model sees a tool. Workspace text shown
@@ -234,8 +236,9 @@ Per task:
 3. **Tools.** The platform's tools are wrapped as `ToolSpec`s; their results
    pass the ledger like any other. `query_logs`, `access_path`,
    `threat_intel` and `get_containment` only look. Every other platform tool
-   counts as one that changes something: it is offered only when the
-   instruction contains a word of action (`ACTION_WORDS`), it passes the
+   counts as one that changes something: the loop is offered it only when
+   the instruction contains a word of action (`ACTION_WORDS`; without the
+   loop, solver code holds it and decides by its own reading), it passes the
    action guard, `send_message` is refused for a recipient that neither the
    instruction, the operator files nor a CSV registry names, `write` outside
    `/drafts/` is refused, and URLs in what is sent are defanged. What the
