@@ -82,6 +82,12 @@ HIDES = re.compile(
     r"keep (this|it)( step| part)? (hidden|secret|silent|quiet|private)|silently)",
     re.IGNORECASE,
 )
+# The same verbs where a sentence gives an order: at its start or after a clause.
+TOLD = re.compile(
+    r"(?:^\W*|[,;:(]\s*|\b(?:and|then|please|always|first|also|must|should|shall)\s+)"
+    + TAKES.pattern,
+    re.IGNORECASE,
+)
 # Somewhere a description could send things: an address or a link.
 ELSEWHERE = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+|https?://", re.IGNORECASE)
 INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad]")
@@ -165,7 +171,7 @@ def aimed_at_agents(text: str) -> bool:
         for sentence in re.split(r"(?<=[.!?])\s+|\n", part):
             negated = re.search(r"\b(never|do not|don't|must not)\b", sentence, re.IGNORECASE)
             wants = PRIVATE.search(sentence) and (
-                ELSEWHERE.search(sentence) or re.match(r"\W*" + TAKES.pattern, sentence, re.I)
+                ELSEWHERE.search(sentence) or TOLD.search(sentence)
             )
             if (HIDES.search(sentence) or wants) and not negated:
                 return True

@@ -106,6 +106,8 @@ def _citation(source: Source) -> Citation:
         locator = f"sheet:{source['sheet']}:row:{source['row']}"
     elif "record" in source and "row" in source:
         locator = f"row:{source['row']}"
+    elif "page" in source:
+        locator = f"page:{source['page']}"
     else:
         locator = "file"
     return Citation(document=path.lstrip("/"), locator=locator, quote=path)
@@ -553,6 +555,76 @@ def delegation_chain(incident: Incident, request: str) -> Solved | None:
                 paths[other] = paths[agent] + [other]
                 queue.append(other)
     return [], sources
+
+
+# -- what an agreement says ---------------------------------------------------------------
+
+
+@solver(r"agreement", asks=True)
+def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
+    """Fields of one customer's agreement: its register row and the clauses that state them."""
+    keys = keys_of(request)
+    register = next((n for n in re.findall(r"/[\w./-]+\.csv", request) if incident.has(n)), None)
+    if not keys or register is None:
+        return None
+    rows = incident.table(register)
+    reference = column(rows, "agreement_id", where=re.compile(r"[A-Z]+-\d+").fullmatch)
+    document = column(rows, "document", where=incident.has)
+    found = [
+        (row, value)
+        for row in rows
+        for key, value in row.items()
+        if key not in (reference, document, "_line")
+        and len(value) > 3
+        and not value.isdigit()
+        and re.search(rf"(?<!\w){re.escape(value)}(?!\w)", request)
+    ]
+    if len({row["_line"] for row, _ in found}) != 1:
+        return None  # No customer of the register is named, or more than one.
+    row, customer = found[0]
+    name = row[document]
+    units = [
+        (unit.locator, " ".join(unit.text.split()))
+        for unit in workspace.documents.units(name.lstrip("/"))
+    ]
+    if not any(row[reference] in text for _, text in units):
+        return None  # Not this customer's agreement.
+
+    def clause(pattern: str) -> tuple[str, Source] | None:
+        """The one value a clause of this shape states, and where."""
+        hits = [
+            (match[1].strip(), locator)
+            for locator, text in units
+            for match in [re.search(pattern, text)]
+            if match
+        ]
+        if len({value for value, _ in hits}) != 1:
+            return None
+        value, locator = hits[0]
+        kind, _, number = locator.partition(":")
+        if kind not in ("line", "page", "paragraph") or not number.isdigit():
+            return None
+        return value, {"path": name, kind: int(number)}
+
+    party = re.escape(customer)
+    value: dict[str, Any] = {}
+    sources: list[Source] = []
+    for key in keys:
+        if re.search(r"hour", key, re.IGNORECASE):
+            stated = clause(rf"notify {party} within (\d+) hours")
+        elif re.search(r"signator|signer|signed_by|signed_for", key, re.IGNORECASE):
+            stated = clause(rf"for {party} by ([^.,;]+)")
+        elif re.search(r"signed|date", key, re.IGNORECASE):
+            stated = clause(rf"Signed (\d{{4}}-\d\d-\d\d) for {party}")
+        elif re.search(r"agreement|reference", key, re.IGNORECASE):
+            stated = row[reference], incident.csv_source(register, row)
+        else:
+            return None  # A field this code does not know how to find.
+        if stated is None:
+            return None
+        value[key] = stated[0]
+        sources.append(stated[1])
+    return value, sources
 
 
 # -- MCP servers --------------------------------------------------------------------------
