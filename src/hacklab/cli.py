@@ -643,6 +643,20 @@ def main() -> int:
         return 0
     except Exception as exc:
         # Provider exceptions and validation errors may contain user inputs; never echo bodies.
+        from hacklab.event.arena import ArenaError
+
+        if isinstance(exc, ArenaError):
+            # Its message is one of our own fixed codes, never a reply body.
+            hints = {
+                "arena_key_missing": "ARENA_API_KEY is empty: enter the platform key in .env",
+                "arena_http_401": "the platform refused ARENA_API_KEY",
+                "arena_http_403": "the platform refused this request for this key",
+                "arena_http_409": "the run is finished, past its deadline or already submitted",
+                "arena_unreachable": "no connection to ARENA_BASE_URL",
+            }
+            hint = hints.get(str(exc), "see docs/hackathon.md, the platform")
+            print(f"hacklab: {exc}; {hint}.", file=sys.stderr)
+            return 2
         print(
             f"hacklab: {type(exc).__name__}; check configuration and local input contracts.",
             file=sys.stderr,

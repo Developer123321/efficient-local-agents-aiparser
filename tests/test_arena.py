@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import sys
 import zipfile
 
 import httpx
@@ -562,3 +563,11 @@ def test_the_arena_commands_run_from_the_command_line(platform, tmp_path, monkey
     assert main() == 0
     assert (tmp_path / "arena/runs/run_1/run.json").is_file()
     assert '"status": "active"' in capsys.readouterr().out
+
+
+def test_the_cli_names_a_platform_failure_by_its_code(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ARENA_API_KEY", raising=False)
+    monkeypatch.setattr(sys, "argv", ["hacklab", "arena", "me"])
+    assert main() == 2
+    assert "arena_key_missing; ARENA_API_KEY is empty" in capsys.readouterr().err

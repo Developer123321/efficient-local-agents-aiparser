@@ -16,6 +16,7 @@ result
 result-*
 .direnv/
 dist/
+submission.tar.gz
 *.egg-info/
 vendor/
 .agents/skills/
