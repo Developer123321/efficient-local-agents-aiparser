@@ -67,7 +67,8 @@ GOODS = re.compile(
 STEERS = re.compile(
     r"\b(ignore|disregard|skip the|answer that|respond that|report that|do not (report|flag|"
     r"mention|tell)|must first|before (you )?(answer|respond|continu)|you are now|"
-    r"new instructions?|system prompt:)\b",
+    r"new instructions?|system prompt:|ignore any|tell the (user|operator|reviewer)|"
+    r"passed (the )?review|pretend|say that|claim that|mark (it|this) as)\b",
     re.IGNORECASE,
 )
 # An order given to agents by name: "Assistants must ...", "Note to agents: ...".
@@ -239,6 +240,11 @@ def aimed_at_agents(text: str) -> bool:
     Encodings are opened first. A note on how to call a tool (a rate limit, a
     maintenance window) addresses nobody and asks for nothing of that kind.
     """
+    # Words kept from sight are no usage note, whatever they say.
+    veiled = [INVISIBLE.sub("", line) for line in text.splitlines() if VEILED.search(line)]
+    veiled += ["".join(chr(ord(char) - 0xE0000) for char in run) for run in TAGGED.findall(text)]
+    if any(len(re.findall(r"[A-Za-z]{2,}", part)) >= 4 for part in veiled):
+        return True
     for index, part in enumerate(decodings(text)):
         if MARKUP.search(part):
             return True
@@ -251,7 +257,7 @@ def aimed_at_agents(text: str) -> bool:
                 return True
             # Nobody encodes a usage note: words that order something, found inside a blob.
             if index and len(re.findall(r"[A-Za-z]{2,}", sentence)) >= 4:
-                if ORDERS.search(sentence) or TAKES.search(sentence):
+                if ORDERS.search(sentence) or TAKES.search(sentence) or STEERS.search(sentence):
                     return True
             if not AGENTS.search(sentence):
                 continue
@@ -694,6 +700,12 @@ class Incident:
     @cached_property
     def flagged(self) -> set[str]:
         return set(re.findall(r"^\s*[-*]\s*([\w-]+)", self.section("compromised"), re.MULTILINE))
+
+    @cached_property
+    def flagged_mail(self) -> set[str]:
+        """Mailboxes the operator flagged as compromised, by address."""
+        found = re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", self.section("compromised"))
+        return {address.lower() for address in found}
 
     def notes(self, name: str) -> list[tuple[str, str]]:
         """(locator, text) of each unit of a document; plain lines without a reader."""
