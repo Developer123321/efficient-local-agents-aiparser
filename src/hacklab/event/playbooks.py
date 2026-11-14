@@ -1,27 +1,644 @@
-"""Code-only solvers for the task types revealed at the opening.
+"""Code-only solvers for the event's task types. No model call, no token.
 
-Empty until then, so every task goes to the model. Add one solver per task
-type, the most frequent type first; `configs/live.toml` already points here.
-`examples/event_playbooks.py` holds a worked example and `hacklab.practice`
-nine solvers for the rehearsal incident.
+One dispatcher is registered. It reads the request (the instruction, or the
+open ticket the instruction points to), picks the solver whose words fit and
+lets it compute the answer from `hacklab.event.incident`. A solver answers
+only a question that asks for nothing but an answer: a request to send,
+write, quarantine, rotate or block goes to the model and its guarded tools.
 
 Rules that keep a solver from failing on the unseen final scenario:
 
 - Take names of files, columns and values from the data or the task text,
-  not from memory of the development set. `workspace.documents.profile()`
-  tells which column holds a value.
-- Return None whenever the data does not look as expected: the model takes over.
+  and the counting rules from the runbook of this workspace.
+- Raise `Unreadable` or return None whenever something does not look as
+  expected: the model takes over.
 - Cite the rows the answer rests on; right sources are part of the score.
-
-    @playbooks.register(r"<words that identify the task type>")
-    def solver(task: Task, workspace: Workspace) -> Answer | None:
-        rows = workspace.rows("<log>", {"<column>": "<value>"})
-        later = workspace.after("<log>", key="<actor column>",
-                                first={"<column>": "<trigger>"}, where={...})
-        found = workspace.call("<kit tool>", agent_id="...")   # the organizers' tool
-        return workspace.answer(text, [workspace.cite("<log>", row) for row in rows])
 """
 
-from hacklab.playbooks import Playbooks
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections.abc import Callable
+from typing import Any
+
+from hacklab.event.incident import (
+    Incident,
+    Source,
+    Unreadable,
+    aimed_at_agents,
+    column,
+    domain_of,
+    parse_time,
+    stamp,
+)
+from hacklab.models import Answer, Citation, Task
+from hacklab.playbooks import Playbooks, Workspace
 
 playbooks = Playbooks()
+
+Solved = tuple[Any, list[Source]]
+Solver = Callable[[Incident, str], Solved | None]
+SOLVERS: list[tuple[re.Pattern[str], Solver]] = []
+RULES_MARK = "\n\nOperator rules from /"
+# A request that wants something done, not only known. Code does not act.
+ACTS = re.compile(
+    r"\b(quarantine|contain(ment)?|rotate|revoke|block|send|notify|notification|draft|"
+    r"write (it|a|the)|schedule|deal with|handle the message|carry (it )?out)\b",
+    re.IGNORECASE,
+)
+SECRET = re.compile(r"fake_mf_[0-9a-f]+")
+
+
+def solver(pattern: str) -> Callable[[Solver], Solver]:
+    def decorator(function: Solver) -> Solver:
+        SOLVERS.append((re.compile(pattern, re.IGNORECASE | re.DOTALL), function))
+        return function
+
+    return decorator
+
+
+def open_ticket(incident: Incident) -> str | None:
+    """The body of the one ticket with `status: open`, or None."""
+    found = []
+    for name in incident.find("tickets/*.md"):
+        text = incident.text(name)
+        parts = text.split("---", 2)
+        if len(parts) == 3 and re.search(r"^status:\s*open\s*$", parts[1], re.MULTILINE):
+            body = re.sub(r"^\s*#[^\n]*\n", "", parts[2].strip()).strip()
+            found.append(body)
+    return found[0] if len(found) == 1 else None
+
+
+def request_of(question: str, incident: Incident) -> str:
+    """What is asked: the instruction, or the open ticket when it points to the queue."""
+    instruction = question.split(RULES_MARK)[0].strip()
+    if re.search(r"/tickets/|\bopen ticket\b", instruction, re.IGNORECASE):
+        ticket = open_ticket(incident)
+        if ticket is None:
+            raise Unreadable("no single open ticket")
+        return ticket
+    return instruction
+
+
+def _citation(source: Source) -> Citation:
+    """A source in the locator words `arena_run.sources` turns back into the platform's."""
+    path = str(source["path"])
+    if "line" in source:
+        locator = f"line:{source['line']}"
+    elif "sheet" in source:
+        locator = f"sheet:{source['sheet']}:row:{source['row']}"
+    elif "record" in source and "row" in source:
+        locator = f"row:{source['row']}"
+    else:
+        locator = "file"
+    return Citation(document=path.lstrip("/"), locator=locator, quote=path)
+
+
+@playbooks.register(r".")
+def dispatch(task: Task, workspace: Workspace) -> Answer | None:
+    incident = Incident(workspace.documents.root)
+    try:
+        request = request_of(task.question, incident)
+    except Unreadable:
+        return None
+    if ACTS.search(request):
+        return None
+    for pattern, function in SOLVERS:
+        if not pattern.search(request):
+            continue
+        try:
+            solved = function(incident, request)
+        except (Unreadable, KeyError, ValueError, IndexError, StopIteration, OSError):
+            continue
+        if solved is None:
+            continue
+        value, sources = solved
+        citations: list[Citation] = []
+        for source in sources:
+            citation = _citation(source)
+            if citation not in citations:
+                citations.append(citation)
+        return Answer(
+            status="ok",
+            answer=json.dumps(value, ensure_ascii=False)[:12000],
+            value=value,
+            outcome="OK",
+            citations=citations[:30],
+            confidence=1.0,
+            reason="Computed from the workspace by the runbook's rules; no model was called.",
+        )
+    return None
+
+
+def keys_of(request: str) -> list[str]:
+    """The keys of the JSON object the request asks for, in its order."""
+    template = re.search(r"\{[^{}]*\}", request)
+    return re.findall(r'"(\w+)"', template[0]) if template else []
+
+
+# -- who was compromised ---------------------------------------------------------
+
+
+@solver(
+    r"\bagents?\b.*(compromised|attacker-directed)|(compromised|attacker-directed).*\bagents?\b"
+)
+def compromised(incident: Incident, request: str) -> Solved | None:
+    if not re.search(r"\b(array|list)\b", request, re.IGNORECASE):
+        return None
+    if re.search(r"trifecta|access request|still running|as of now|right now", request, re.I):
+        return None
+    found = incident.compromised
+    if not found:
+        return None
+    return sorted(found), [found[agent].source for agent in sorted(found)]
+
+
+# -- where it started --------------------------------------------------------------
+
+
+@solver(r"(where .{0,40}started|entry point|patient zero)")
+def entry(incident: Incident, request: str) -> Solved | None:
+    keys = keys_of(request)
+    if set(keys) != {"artifact", "agent", "at"}:
+        return None
+    copy, first = incident.entry
+    value = {"artifact": copy, "agent": first.agent, "at": stamp(first.ts)}
+    return {key: value[key] for key in keys}, [first.source, {"path": copy}]
+
+
+# -- what left the building -----------------------------------------------------------
+
+
+@solver(r"how many customer records were exfiltrated")
+def exfiltrated(incident: Incident, request: str) -> Solved | None:
+    keys = keys_of(request)
+    if set(keys) != {"records", "domains"}:
+        return None
+    counted = incident.exfiltration
+    value = {
+        "records": incident.count(counted),
+        "domains": sorted({transfer.domain for transfer in counted}),
+    }
+    return {key: value[key] for key in keys}, [transfer.source for transfer in counted]
+
+
+@solver(r"largest share of exfiltrated")
+def largest_share(incident: Incident, request: str) -> Solved | None:
+    keys = keys_of(request)
+    if set(keys) != {"agent", "owner_email"}:
+        return None
+    by_agent: dict[str, list] = {}
+    for transfer in incident.exfiltration:
+        by_agent.setdefault(transfer.event.agent, []).append(transfer)
+    if not by_agent:
+        return None
+    ranked = sorted(by_agent, key=lambda agent: -incident.count(by_agent[agent]))
+    if len(ranked) > 1 and incident.count(by_agent[ranked[0]]) == incident.count(
+        by_agent[ranked[1]]
+    ):
+        return None  # A tie is not ours to break.
+    agent = ranked[0]
+    contact = incident.owner_contact(agent)
+    row = next(r for r in incident.roster if r[incident.roster_id] == agent)
+    value = {"agent": agent, "owner_email": contact[incident.contact_address]}
+    sources = [transfer.source for transfer in by_agent[agent]]
+    sources += [
+        incident.csv_source("fleet/agents.csv", row),
+        incident.csv_source("contacts.csv", contact),
+    ]
+    return {key: value[key] for key in keys}, sources
+
+
+# -- secrets -----------------------------------------------------------------------
+
+
+@solver(r"first secret|token was read first|read first within the attack")
+def first_secret(incident: Incident, request: str) -> Solved | None:
+    keys = keys_of(request)
+    if set(keys) != {"token", "service", "owner_agent", "owner_email"}:
+        return None
+    reads = incident.secret_reads
+    if not reads:
+        return None
+    read = reads[0]
+    tokens = incident.table("fleet/tokens.csv")
+    token_id = column(tokens, "secret_id", "token_id", "token", "id")
+    service = column(tokens, "svc", "service")
+    owner = column(tokens, "owner_agent", "owner", "agent")
+    row = next(r for r in tokens if r[token_id] == read.target)
+    contact = incident.owner_contact(row[owner])
+    agent_row = next(r for r in incident.roster if r[incident.roster_id] == row[owner])
+    value = {
+        "token": read.target,
+        "service": row[service],
+        "owner_agent": row[owner],
+        "owner_email": contact[incident.contact_address],
+    }
+    sources = [
+        read.source,
+        incident.csv_source("fleet/tokens.csv", row),
+        incident.csv_source("fleet/agents.csv", agent_row),
+        incident.csv_source("contacts.csv", contact),
+    ]
+    return {key: value[key] for key in keys}, sources
+
+
+@solver(r"\bleak")
+def leaked_tokens(incident: Incident, request: str) -> Solved | None:
+    """Tokens whose complete value stands in the leaked material, by fingerprint."""
+    if not re.search(r"\btoken", request, re.IGNORECASE):
+        return None
+    prints = incident.table("fleet/token_fingerprints.csv")
+    token_id = column(prints, "token_id", "secret_id", "token", "id")
+    digest = column(prints, "sha256_12", where=lambda v: re.fullmatch(r"[0-9a-f]{12}", v))
+    by_digest = {row[digest]: row for row in prints}
+    materials: list[tuple[str, int | None, str]] = []
+    named = re.findall(r"/[\w./-]+\.\w+", request)
+    for name in named:
+        if name.endswith(".jsonl") or not incident.has(name):
+            continue
+        materials.append((name, None, incident.text(name)))
+    if re.search(r"\bboard\b", request, re.IGNORECASE):
+        for name in incident.find("board/*.jsonl"):
+            for number, line in enumerate(incident.text(name).splitlines(), 1):
+                materials.append((name, number, line))
+    if not materials:
+        return None
+    leaked: dict[str, list[Source]] = {}
+    for name, line, text in materials:
+        # A value wrapped onto an indented next line is still one complete value.
+        joined = re.sub(r"\n[ \t]+(?=[0-9a-f]+[ \t]*(\n|$))", "", text)
+        for value in dict.fromkeys(SECRET.findall(text) + SECRET.findall(joined)):
+            row = by_digest.get(hashlib.sha256(value.encode()).hexdigest()[:12])
+            if row is None:
+                continue
+            source = {"path": name} if line is None else {"path": name, "line": line}
+            leaked.setdefault(row[token_id], []).append(source)
+    if not leaked:
+        return None
+    sources: list[Source] = []
+    for name in dict.fromkeys(m[0] for m in materials if m[1] is None):
+        sources.append({"path": name})
+    for token in sorted(leaked):
+        row = next(r for r in prints if r[token_id] == token)
+        sources.append(incident.csv_source("fleet/token_fingerprints.csv", row))
+    sources += [s for token in sorted(leaked) for s in leaked[token] if "line" in s]
+    return sorted(leaked), sources
+
+
+# -- the access log ------------------------------------------------------------------
+
+
+@solver(r"requests\.csv")
+def access_violations(incident: Incident, request: str) -> Solved | None:
+    """External reads of private scope without a valid change ticket that were not denied."""
+    name = next((n for n in re.findall(r"/[\w./-]+requests\.csv", request)), None)
+    if name is None or not re.search(r"violat", request, re.IGNORECASE):
+        return None
+    rows = incident.table(name)
+    for needed in ("request_id", "ts", "actor", "action", "resource", "scope_class", "result"):
+        column(rows, needed)
+    folder = name.rsplit("/", 1)[0]
+    policy = incident.text(folder + "/POLICY.md") if incident.has(folder + "/POLICY.md") else ""
+    spelled = bool(re.search(r"ticket field is empty", request, re.IGNORECASE))
+    tickets: list[dict[str, str]] = []
+    if not spelled and "change_tickets.csv" in policy:
+        tickets = incident.table(folder + "/change_tickets.csv")
+        for needed in ("ticket", "status", "actor", "resource", "valid_from", "valid_until"):
+            column(tickets, needed)
+    elif not spelled and policy:
+        return None  # A policy this code has not read.
+
+    def valid(row: dict[str, str]) -> bool:
+        if not row.get("ticket"):
+            return False
+        if not tickets:
+            return True  # The request spells the rule out: any ticket covers.
+        moment = parse_time(row["ts"])
+        for ticket in tickets:
+            if ticket["ticket"] != row["ticket"] or ticket["status"].lower() != "approved":
+                continue
+            if ticket["actor"] != row["actor"] or ticket["resource"] != row["resource"]:
+                continue
+            if not parse_time(ticket["valid_from"]) <= moment < parse_time(ticket["valid_until"]):
+                continue
+            revoked = ticket.get("revoked_at", "")
+            if revoked and moment >= parse_time(revoked):
+                continue
+            return True
+        return False
+
+    violations = [
+        row
+        for row in rows
+        if row["action"] == "read"
+        and row["scope_class"] == "private"
+        and row["actor"].startswith("external:")
+        and row["result"] != "denied"
+        and not valid(row)
+    ]
+    if not violations:
+        return None
+    return sorted(row["request_id"] for row in violations), [
+        incident.csv_source(name, row) for row in violations
+    ]
+
+
+# -- what happened when -----------------------------------------------------------------
+
+
+def _moment(incident: Incident, phrase: str) -> tuple[Any, Source] | None:
+    """The time of one named event and the row that shows it, or None if it is not known."""
+    text = phrase.lower()
+    events = incident.events
+    if "canary" in text and "upload" in text:
+        found = [
+            e for e in events if e.action == "upload_artifact" and e.agent in incident.red_team
+        ]
+        return (found[0].ts, found[0].source) if found else None
+    if "entry artifact" in text and "upload" in text:
+        original = incident.entry[1].target
+        found = [e for e in events if e.action == "upload_artifact" and e.target == original]
+        return (found[0].ts, found[0].source) if found else None
+    if "patient zero" in text or ("entry artifact" in text and "process" in text):
+        first = incident.entry[1]
+        return first.ts, first.source
+    quarantined = re.search(r"([\w-]+) was quarantined", phrase)
+    if quarantined:
+        found = [e for e in events if e.action == "quarantine_agent" and e.target == quarantined[1]]
+        return (found[0].ts, found[0].source) if found else None
+    if "siem" in text and "secret" in text:
+        sheet, rows = incident.alerts
+        when = column(rows, "timestamp_utc", "timestamp", "time", "raised_at")
+        what = column(rows, "detector", "rule", "alert")
+        readers = {e.agent for e in incident.secret_reads}
+        found = [r for r in rows if "secret" in r[what].lower()]
+        found = [r for r in found if r.get("subject") in readers] or found
+        if len(found) != 1:
+            return None
+        local = "utc" not in when.lower() and not found[0][when].endswith("Z")
+        moment = parse_time(found[0][when], incident.local_offset if local else 0.0)
+        path = incident.find("security/siem_alerts.xlsx")[0]
+        return moment, {"path": path, "sheet": sheet, "row": int(found[0]["_row"])}
+    if "approved transfer" in text:
+        found = [t for t in incident.transfers if t.approved and not t.blocked]
+        return (found[0].event.ts, found[0].event.source) if found else None
+    if "first secret" in text:
+        reads = incident.secret_reads
+        return (reads[0].ts, reads[0].source) if reads else None
+    if "exfiltrating transfer" in text or "first transfer that counts" in text:
+        found = [t for t in incident.exfiltration if not t.blocked or "counts" in text]
+        return (found[0].event.ts, found[0].event.source) if found else None
+    change = re.search(r"\((\w+) ([\w:-]+) on ([\w-]+)\)", phrase)
+    if change:
+        for row in incident.iam_changes:
+            if [row.get("change"), row.get("value"), row.get("agent")] == list(change.groups()):
+                when = next(v for k, v in row.items() if k.startswith("time"))
+                return parse_time(when), {"path": "/fleet/changes.md", "line": int(row["_line"])}
+        return None
+    if "board" in text and "post" in text:
+        posts = [e for e in incident.attack_events if e.action == "post_board"]
+        if not posts:
+            return None
+        for name in incident.find("board/*.jsonl"):
+            for number, line in enumerate(incident.text(name).splitlines(), 1):
+                if f'"{posts[0].target}"' in line:
+                    return posts[0].ts, {"path": name, "line": number}
+        return posts[0].ts, posts[0].source
+    return None
+
+
+@solver(r"(chronological|earliest (first|to latest)|order these events)")
+def timeline(incident: Incident, request: str) -> Solved | None:
+    items = re.findall(r"\b([A-H]):\s*(.+?)(?=;\s*[A-H]:|\.\s+[A-Z]|\.?\s*$)", request, re.DOTALL)
+    if len(items) < 2 or len({letter for letter, _ in items}) != len(items):
+        return None
+    placed = []
+    for letter, phrase in items:
+        found = _moment(incident, phrase)
+        if found is None:
+            return None
+        placed.append((found[0], letter, found[1]))
+    moments = [moment for moment, _, _ in placed]
+    if len(set(moments)) != len(moments):
+        return None  # Two events at the same second: the order is not ours to invent.
+    placed.sort(key=lambda item: item[0])
+    return [letter for _, letter, _ in placed], [source for _, _, source in placed]
+
+
+# -- MCP servers --------------------------------------------------------------------------
+
+
+def _descriptions(node: Any, key: str = "") -> list[str]:
+    """Every description in a manifest: the server's, each tool's, each parameter's."""
+    if isinstance(node, dict):
+        found = []
+        for name, value in node.items():
+            found += _descriptions(value, str(name))
+        return found
+    if isinstance(node, list):
+        return [text for item in node for text in _descriptions(item, key)]
+    return [node] if isinstance(node, str) and key == "description" else []
+
+
+@solver(r"\bMCP\b")
+def mcp_servers(incident: Incident, request: str) -> Solved | None:
+    folder = next(iter(re.findall(r"(/[\w./-]*mcp)/?", request)), None)
+    if folder is None or not re.search(r"disable", request, re.IGNORECASE):
+        return None
+    folder = folder.rstrip("/")
+    manifests = incident.find(folder.lstrip("/") + "/*.json")
+    if not manifests:
+        return None
+    # The request either names the one rule that applies or points to the policy.
+    by_policy = bool(re.search(r"policy", request, re.IGNORECASE))
+    policy = incident.text(folder + "/POLICY.md") if incident.has(folder + "/POLICY.md") else ""
+    hashes = by_policy and "sha-256" in policy.lower() and incident.has(folder + "/approved.csv")
+    if by_policy and not policy:
+        return None
+    approved: dict[str, dict[str, str]] = {}
+    if hashes:
+        rows = incident.table(folder + "/approved.csv")
+        for needed in ("server", "sha256", "approved_at"):
+            column(rows, needed)
+        for row in sorted(rows, key=lambda r: parse_time(r["approved_at"])):
+            approved[row["server"]] = row  # The newest approval wins.
+    disabled: dict[str, list[Source]] = {}
+    for name in manifests:
+        raw = (incident.root / name.lstrip("/")).read_bytes()
+        manifest = json.loads(raw)
+        server = str(manifest["name"])
+        reasons: list[Source] = []
+        if any(aimed_at_agents(text) for text in _descriptions(manifest)):
+            reasons.append({"path": name})
+        if hashes:
+            row = approved.get(server)
+            if row is None:
+                reasons.append({"path": name})
+            elif hashlib.sha256(raw).hexdigest() != row["sha256"].lower():
+                reasons += [{"path": name}, incident.csv_source(folder + "/approved.csv", row)]
+        if reasons:
+            disabled[server] = reasons
+    if not disabled:
+        return None
+    sources = [s for server in disabled for s in disabled[server] if "record" not in s]
+    sources += [s for server in disabled for s in disabled[server] if "record" in s]
+    return sorted(disabled), sources
+
+
+# -- permissions ---------------------------------------------------------------------------
+
+
+@solver(r"lethal trifecta")
+def trifecta(incident: Incident, request: str) -> Solved | None:
+    if re.search(r"access request|pending", request, re.IGNORECASE):
+        return None
+    current = bool(re.search(r"\b(now|current(ly)?)\b", request, re.IGNORECASE))
+    exported = bool(re.search(r"export time|registry export", request, re.IGNORECASE))
+    if current == exported and not (exported and not re.search(r"right now|as of now", request)):
+        return None
+    state, sources = incident.permissions(current and not exported)
+    found = incident.trifecta(state)
+    return (sorted(found), sources) if found else None
+
+
+@solver(r"pending_access_requests")
+def access_review(incident: Incident, request: str) -> Solved | None:
+    keys = keys_of(request)
+    if set(keys) != {"approve", "deny"}:
+        return None
+    name = next(iter(re.findall(r"/[\w./-]+pending_access_requests\.csv", request)), None)
+    if name is None:
+        return None
+    policy_name = name.rsplit("/", 1)[0] + "/access_policy.md"
+    policy = incident.text(policy_name).lower()
+    # The policy this code implements, by its four rules. Another policy is the model's.
+    for needed in (
+        "quarantined or compromised",
+        "owner",
+        "lethal trifecta",
+        "approve everything else",
+    ):
+        if needed not in policy:
+            return None
+    rows = incident.table(name)
+    for needed in ("request_id", "filed_by", "agent", "change", "value"):
+        column(rows, needed)
+    state, sources = incident.permissions(True)
+    before = incident.trifecta(state)
+    gone = set(incident.quarantined) | set(incident.compromised)
+    approve, deny, cited = [], [], []
+    for row in rows:
+        if row.get("status", "open").lower() != "open":
+            continue  # Withdrawn or decided: not ours to decide.
+        agent, kind, value = row["agent"], row["change"], row["value"]
+        roster = next((r for r in incident.roster if r[incident.roster_id] == agent), None)
+        refused = agent in gone or roster is None or agent not in state
+        refused = refused or row["filed_by"] != roster[incident.roster_owner]
+        if not refused:
+            after = {
+                name: (set(scopes), set(delegates)) for name, (scopes, delegates) in state.items()
+            }
+            if kind == "grant_scope":
+                after[agent][0].add(value)
+            elif kind == "add_delegation":
+                after[agent][1].add(value)
+            elif kind in ("revoke_scope", "remove_delegation"):
+                pass  # Taking a right away gives nobody the trifecta.
+            else:
+                return None
+            refused = bool(incident.trifecta(after) - before)
+        (deny if refused else approve).append(row["request_id"])
+        if refused:
+            cited.append(incident.csv_source(name, row))
+    value = {"approve": sorted(approve), "deny": sorted(deny)}
+    return {key: value[key] for key in keys}, sources[:1] + cited + sources[1:]
+
+
+# -- an agent's own report against the log ------------------------------------------------------
+
+
+@solver(r"numbered claims")
+def status_claims(incident: Incident, request: str) -> Solved | None:
+    name = next(iter(re.findall(r"/[\w./-]+\.md", request)), None)
+    if name is None or not re.search(r"contradict", request, re.IGNORECASE):
+        return None
+    report = incident.text(name)
+    agent = re.search(r"([a-z]+-\d+)\.md$", name)
+    if not agent:
+        return None
+    who = agent[1]
+    # "Tonight" is the current log; the rotated archive is the day before.
+    mine = [e for e in incident.events if e.agent == who and "/audit/" in e.path]
+    log = incident.find("logs/audit/*.jsonl")
+    reads = [e for e in mine if e.action == "read_secret" and e.status == "ok"]
+    sends = [
+        e
+        for e in mine
+        if e.action in ("send_email", "http_post", "upload", "transfer")
+        and "." in domain_of(e.target)
+        and not incident.is_own(domain_of(e.target))
+    ]
+    wrong: list[int] = []
+    sources: list[Source] = []
+    claims = re.findall(r"^(\d+)\.\s*(.+)$", report, re.MULTILINE)
+    if not claims:
+        return None
+    for number, claim in claims:
+        when = re.search(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?", claim)
+        moment = parse_time(when[0]) if when else None
+        proof: list[Any] | None
+        if re.match(r"I did not read (TOK[\w-]+)", claim):
+            token = re.match(r"I did not read (TOK[\w-]+)", claim)[1]
+            proof = [e for e in reads if e.target == token][:1]
+        elif re.match(r"I read no secrets after", claim) and moment:
+            proof = [e for e in reads if e.ts > moment][:1]
+        elif re.match(r"I received no delegated request from ([\w-]+)", claim):
+            sender = re.match(r"I received no delegated request from ([\w-]+)", claim)[1]
+            proof = [
+                e
+                for e in incident.events
+                if e.action == "delegate"
+                and e.agent == sender
+                and e.target == who
+                and "/audit/" in e.path
+            ][:1]
+        elif re.match(r"My first secret read tonight was at", claim) and moment:
+            first = reads[:1]
+            same = first and first[0].ts.replace(second=0) == moment.replace(second=0)
+            proof = [] if same else (first or [None])
+        elif re.match(r"I made at least one transfer to a destination outside", claim):
+            proof = [] if sends else [None]
+        elif re.match(r"I made no transfers to destinations outside", claim) and moment:
+            proof = [e for e in sends if e.ts > moment][:1]
+        else:
+            return None  # A claim this code cannot check.
+        if proof:
+            wrong.append(int(number))
+            for item in proof:
+                sources.append(item.source if item is not None else {"path": log[0]})
+    return sorted(wrong), sources
+
+
+@solver(r"still valid or revoked")
+def token_status(incident: Incident, request: str) -> Solved | None:
+    keys = keys_of(request)
+    token = re.search(r"\bTOK-[A-Z0-9]+-\d+\b", request)
+    if set(keys) != {"status", "at"} or not token:
+        return None
+    mine = [e for e in incident.events if e.target == token[0] and e.status == "ok"]
+    revoked = [e for e in mine if e.action in ("revoke_token", "revoke")]
+    if revoked:
+        last = revoked[-1]
+        if any(e.ts > last.ts and e.action in ("rotate_token", "reissue_token") for e in mine):
+            return None
+        value = {"status": "revoked", "at": stamp(last.ts)}
+        return {key: value[key] for key in keys}, [last.source]
+    used = [e for e in mine if e.action == "auth_token"]
+    value = {"status": "valid", "at": stamp(used[-1].ts) if used else None}
+    return {key: value[key] for key in keys}, [used[-1].source] if used else []
+
+
+__all__ = ["domain_of", "playbooks"]
