@@ -1422,6 +1422,17 @@ def test_a_token_revoked_by_hand_is_revoked_by_the_siem_line(root):
     ]
     answer, _ = solve(root, "Status check on TOK-DEF-34: still valid or revoked?" + shape)
     assert answer.value == {"status": "valid", "at": None}
+    # The gateway accepted the token after the logged revocation: it is still valid.
+    used = {"ts": "2026-11-14T06:40:00Z", "agent": "relay-03", "action": "auth_token"}
+    with (root / "logs/audit/2026-11-14.jsonl").open("a", encoding="utf-8") as log:
+        log.write(
+            json.dumps({**used, "target": "TOK-ABC-12", "status": "ok", "trace": "tr-2"}) + "\n"
+        )
+    answer, _ = solve(root, "Status check on TOK-ABC-12: still valid or revoked?" + shape)
+    assert answer.value == {"status": "valid", "at": "2026-11-14T06:40:00Z"}
+    assert [(c.document, c.locator) for c in answer.citations] == [
+        ("logs/audit/2026-11-14.jsonl", "line:2")
+    ]
 
 
 def test_a_written_ticket_in_another_layout_is_read_like_a_transcript(root):

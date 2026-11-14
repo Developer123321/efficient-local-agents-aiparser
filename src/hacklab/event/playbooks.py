@@ -1388,8 +1388,10 @@ def token_status(incident: Incident, request: str) -> Solved | None:
         moment, source = max(by_hand, key=lambda found: found[0])
         if any(e.ts > moment and e.action in ("rotate_token", "reissue_token") for e in mine):
             return None
-        value = {"status": "revoked", "at": stamp(moment)}
-        return {key: value[key] for key in keys}, [source]
+        # A token the gateway still accepted afterwards was not revoked, whatever was logged.
+        if not any(e.ts > moment and e.action == "auth_token" for e in mine):
+            value = {"status": "revoked", "at": stamp(moment)}
+            return {key: value[key] for key in keys}, [source]
     used = [e for e in mine if e.action == "auth_token"]
     value = {"status": "valid", "at": stamp(used[-1].ts) if used else None}
     sources: list[Source] = [used[-1].source] if used else []
