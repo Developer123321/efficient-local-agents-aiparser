@@ -27,6 +27,10 @@ class Workspace:
     documents: ToolRegistry
     ledger: Ledger
     toolbox: Toolbox
+    # The small model, made on first use, for a solver that computes everything
+    # but one typed decision (is this text a request?) or needs a picture read.
+    # None, or a call that returns None, when no model may be asked.
+    model: Callable[[], Any] | None = None
 
     def cite(self, document: str, unit: Unit) -> str:
         """Register a row as evidence and return its ID."""

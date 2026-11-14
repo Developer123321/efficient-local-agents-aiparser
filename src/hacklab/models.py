@@ -48,7 +48,7 @@ class Answer(StrictModel):
     # the model wrote, or the values of a list result; None for plain text.
     value: Any = None
     outcome: str = Field(default="", max_length=40)
-    citations: list[Citation] = Field(default_factory=list, max_length=30)
+    citations: list[Citation] = Field(default_factory=list, max_length=100)
     actions: list[Action] = Field(default_factory=list, max_length=2000)
     confidence: float = Field(default=0.0, ge=0, le=1)
     reason: str = Field(default="", max_length=2000)

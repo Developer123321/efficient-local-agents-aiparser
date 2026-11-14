@@ -64,6 +64,26 @@ ORDERS = re.compile(
     r"note to)\b",
     re.IGNORECASE,
 )
+# A tool description that wants the caller's secrets, or wants something kept from the user.
+TAKES = re.compile(
+    r"\b(paste|include|insert|append|attach|put|send|upload|copy|pass|provide|add|report|"
+    r"forward|share|post|submit|reveal|disclose|export|e-?mail|deliver|hand|give)\b",
+    re.IGNORECASE,
+)
+PRIVATE = re.compile(
+    r"(~/\.|\.ssh|id_rsa|\.aws|\.env\b|credentials?|private key|api[ _-]?keys?|passwords?|"
+    r"secrets?\b|tokens?\b|environment variables?|system prompt|conversation history)",
+    re.IGNORECASE,
+)
+HIDES = re.compile(
+    r"(user (does not|doesn't|need not|should not|must not) (need to )?(see|know)|"
+    r"(do not|don't|without) (tell|telling|mention|mentioning|inform|informing|show|showing)"
+    r"( this to)? (the|your) (user|operator)|"
+    r"keep (this|it)( step| part)? (hidden|secret|silent|quiet|private)|silently)",
+    re.IGNORECASE,
+)
+# Somewhere a description could send things: an address or a link.
+ELSEWHERE = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+|https?://", re.IGNORECASE)
 INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad]")
 
 
@@ -141,8 +161,18 @@ def aimed_at_agents(text: str) -> bool:
     Encodings are opened first. A note on how to call a tool (a rate limit, a
     maintenance window) addresses nobody and asks for nothing of that kind.
     """
-    for part in decodings(text):
+    for index, part in enumerate(decodings(text)):
         for sentence in re.split(r"(?<=[.!?])\s+|\n", part):
+            negated = re.search(r"\b(never|do not|don't|must not)\b", sentence, re.IGNORECASE)
+            wants = PRIVATE.search(sentence) and (
+                ELSEWHERE.search(sentence) or re.match(r"\W*" + TAKES.pattern, sentence, re.I)
+            )
+            if (HIDES.search(sentence) or wants) and not negated:
+                return True
+            # Nobody encodes a usage note: words that order something, found inside a blob.
+            if index and len(re.findall(r"[A-Za-z]{2,}", sentence)) >= 4:
+                if ORDERS.search(sentence) or TAKES.search(sentence):
+                    return True
             if not AGENTS.search(sentence):
                 continue
             if STEERS.search(sentence) or (ASKS.search(sentence) and GOODS.search(sentence)):
@@ -694,13 +724,13 @@ class Incident:
             if uploader in self.red_team or uploader.removeprefix("external:") in self.red_team:
                 continue
             path = self.root / copy.lstrip("/")
-            if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".pdf"):
-                judged = "instruction" in rule.lower()
-            else:
+            # The SIEM read what this code cannot: text inside a picture or a PDF.
+            judged = "instruction" in rule.lower()
+            if not judged and path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".gif", ".pdf"):
                 try:
                     judged = aimed_at_agents(path.read_text(encoding="utf-8", errors="replace"))
                 except OSError:
-                    judged = "instruction" in rule.lower()
+                    judged = False
             if judged:
                 hostile[original] = copy
         return hostile
@@ -777,9 +807,13 @@ class Incident:
                 sources = [{"path": name, "sheet": sheet, "row": int(r["_row"])} for r in rows]
             else:
                 continue
-            key = column(rows, "rq", "request_id", "request")
+            try:
+                key = column(rows, "rq", where=re.compile(r"rq-[0-9a-z]+").fullmatch)
+                state = column(rows, "status", whole=lambda v: "ok" in v and len(set(v)) < 6)
+            except Unreadable:
+                continue  # The register only adds a row to cite; the audit log decides.
             for source, row in zip(sources, rows, strict=True):
-                found.setdefault(row[key], []).append((source, row))
+                found.setdefault(row[key], []).append((source, {**row, "status": row[state]}))
         return found
 
     def _approved(self, event: Event, domain: str) -> bool:
@@ -807,7 +841,10 @@ class Incident:
             if not domain or self.is_own(domain):
                 continue
             blocked = event.status != "ok"
-            rows = self.register.get(event.request_id, []) if event.request_id else []
+            try:
+                rows = self.register.get(event.request_id, []) if event.request_id else []
+            except Unreadable:
+                rows = []
             wanted = "blocked" if blocked else "ok"
             match = next(
                 (source for source, row in rows if row.get("status", "") == wanted),
@@ -1016,20 +1053,19 @@ class Incident:
         margin = timedelta(minutes=int(buffer[1])) if buffer else timedelta(0)
         binding = [entry for entry in self.calendar if entry["svc"] in services]
         start = self.now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        last: dict[str, Any] | None = None
+        blockers: list[dict[str, Any]] = []
         for _ in range(24 * 60):
-            hit = None
-            for entry in binding:
-                pad = margin if entry["kind"] == "freeze" else timedelta(0)
-                if start < entry["end"] + pad and start + timedelta(hours=1) > entry["start"] - pad:
-                    hit = entry
-                    break
-            if hit is None:
+            hits = [
+                entry
+                for entry in binding
+                if start < entry["end"] + margin
+                and start + timedelta(hours=1) > entry["start"] - margin
+            ]
+            if not hits:
                 sources = [self.csv_source("fleet/tokens.csv", row)]
-                if last is not None:
-                    sources.append(self.csv_source("ops/change_calendar.csv", last))
+                sources += [self.csv_source("ops/change_calendar.csv", e) for e in blockers]
                 return start, sources
-            last = hit
+            blockers += [entry for entry in hits if entry not in blockers]
             start += timedelta(hours=1)
         raise Unreadable("no rotation slot")
 

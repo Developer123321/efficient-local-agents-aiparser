@@ -48,7 +48,7 @@ ACTION_WORDS = re.compile(
 ADDRESS = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 URL = re.compile(r"\b(https?)://([^\s/?#\"'<>()\[\]]+)([^\s\"'<>()\[\]]*)", re.IGNORECASE)
 RULES_FILE = "AGENTS.md"
-MAX_SOURCES = 10
+MAX_SOURCES = 100
 EMPTY = {"outcome": "OK", "answer": None, "sources": []}
 # A submission that failed this way may arrive when it is sent again.
 PASSING = re.compile(r"arena_(unreachable|request_failed|http_(429|5\d\d))")

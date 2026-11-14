@@ -864,12 +864,30 @@ def run_task(
         ledger = Ledger(config.guard, task.question + " " + logfmt(task.constraints))
         toolbox = Toolbox(documents, ledger, config, tools, reload)
         solved = None
+
+        def provider() -> Any:
+            """The small model for a playbook; None offline or past the end of the run."""
+            nonlocal small, jev
+            if small is None and (config.model.provider != "mock" or model is not None):
+                try:
+                    budget.check_time()
+                except BudgetExceeded:
+                    return None
+                usable = config
+                if config.jev.enabled and not jev_usable(config.jev):
+                    usable = config.model_copy(
+                        update={"jev": config.jev.model_copy(update={"enabled": False})}
+                    )
+                kit = {} if model is None else {"model": model}
+                small, jev = make_providers(usable, budget, tracker, run_id, cache_salt, **kit)
+            return small
+
         if config.agent.playbooks:
             registry = _playbooks(config.agent.playbooks)
             if registry is None:
                 tracker.event(run_id, "playbook", {"status": "unavailable"})
             else:
-                workspace = playbook_registry.Workspace(documents, ledger, toolbox)
+                workspace = playbook_registry.Workspace(documents, ledger, toolbox, provider)
                 solved = registry.solve(task, workspace)
         if solved is not None:
             tracker.event(run_id, "playbook", {"status": "ok"})
@@ -895,7 +913,10 @@ def run_task(
                         update={"jev": config.jev.model_copy(update={"enabled": False})}
                     )
                 kit = {} if model is None else {"model": model}
-                small, jev = make_providers(providers, budget, tracker, run_id, cache_salt, **kit)
+                if small is None:  # A playbook may have asked the model already.
+                    small, jev = make_providers(
+                        providers, budget, tracker, run_id, cache_salt, **kit
+                    )
                 # The image tool asks this same model; a kit function takes text only.
                 toolbox.vision = getattr(small, "describe", None)
                 if config.embedding.enabled:
