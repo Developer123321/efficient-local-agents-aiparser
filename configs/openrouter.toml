@@ -1,17 +1,22 @@
-# Rehearsal against a real small model through OpenRouter. IBM Granite 4.2 8B
-# is a guess at the kind of model the event provides, nothing more. Prices are
-# OpenRouter's list prices of 13 November 2026, not the event's tariff.
-# URL, model and key come from .env.
+# The event's small model, Gemma 4 31B, through OpenRouter:
+# SMALL_MODEL_NAME=google/gemma-4-31b-it, URL and key in .env. Prices are what
+# OpenRouter's customers paid on average on 14 November 2026; its providers
+# list $0.10 to $0.38 per million input tokens and $0.34 to $1.15 output. Not
+# the event's tariff.
+#
+# [agent] and [limits] were measured on 13 November with IBM Granite 4.2 8B
+# ($0.06 / $0.15, reasoning "low"), the stand-in before the model was known:
+# docs/benchmarks.md. Nothing in this file is measured on Gemma 4 yet.
 [model]
 provider = "openai"
 response_format = "json_object"
-input_usd_per_million = 0.06
-output_usd_per_million = 0.15
-# Granite 4.2 reasons before it answers unless told otherwise; that thinking
-# is billed as output. Measured on the rehearsal incident (13 November 2026):
-# "low" needed fewer calls, cost less than half of "none" and was as accurate
-# or better. "high" was not measured.
-extra_body = { reasoning = { effort = "low" } }
+input_usd_per_million = 0.1245
+output_usd_per_million = 0.3932
+# Thinking is billed as output. Gemma 4 does not think unless asked, so "none"
+# is what an endpoint without settings does. On Granite, "low" needed fewer
+# calls and cost less than half of "none"; measure it on Gemma before keeping
+# either.
+extra_body = { reasoning = { effort = "none" } }
 
 [jev]
 enabled = false

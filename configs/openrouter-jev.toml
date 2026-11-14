@@ -3,9 +3,9 @@
 [model]
 provider = "openai"
 response_format = "json_object"
-input_usd_per_million = 0.06
-output_usd_per_million = 0.15
-extra_body = { reasoning = { effort = "low" } }
+input_usd_per_million = 0.1245
+output_usd_per_million = 0.3932
+extra_body = { reasoning = { effort = "none" } }
 
 [jev]
 enabled = true

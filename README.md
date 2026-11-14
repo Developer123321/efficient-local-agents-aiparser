@@ -5,8 +5,8 @@ Our agent for the **Efficient Local Agents Hackathon**, Saturday 14 November
 
 The challenge is "The MuggingFace Incident": a hijacked agent swarm attacks a
 model hub, and our agent is the night shift. It has to investigate the
-incident and contain it, on a small model that every team gets. The score is
-half accuracy and half cost.
+incident and contain it, on the models every team gets: Gemma 4 31B, Jev
+1.14.0 and Qwen3 Embedding. The score is half accuracy and half cost.
 
 Our approach: code does everything code can do (read logs, decode payloads,
 follow who infected whom, check every action). The small model makes one small
@@ -64,11 +64,14 @@ cp .env.example .env && chmod 600 .env     # then enter URL, model name and key
 uv run hacklab probe --config configs/live.toml
 ```
 
-`probe` sends one small request to each model and shows whether URL, key and
-reply format fit. Keys live only in `.env`, which Git ignores.
+`probe` sends one small request to each enabled model and shows whether URL,
+key and reply format fit. Keys live only in `.env`, which Git ignores. To
+include the embedding model, set `EMBEDDING_MODEL_NAME` and probe
+`configs/embed-rank.toml`.
 
-To rehearse before the event, put an OpenRouter key into `.env` as
-`SMALL_MODEL_API_KEY` and run `just practice-live 7 configs/openrouter.toml`.
+To rehearse on Gemma 4 31B outside the event, put an OpenRouter key into
+`.env` as `SMALL_MODEL_API_KEY`, set `SMALL_MODEL_NAME=google/gemma-4-31b-it`
+and run `just practice-live 7 configs/openrouter.toml`.
 
 ## What is where
 
@@ -79,6 +82,7 @@ To rehearse before the event, put an OpenRouter key into `.env` as
 | Plug in the organizers' starter kit | `src/hacklab/event/adapter.py` |
 | Change prompt, loop or final checks | `src/hacklab/agent.py` |
 | Change a model or agent setting | `configs/live.toml`, the profile that is submitted |
+| Try the embedding model or Jev | `configs/embed-rank.toml`, `configs/jev-select.toml` |
 | See why a run lost points | `hacklab failures REPORT`, then the trace of the task |
 | Decode a payload or list indicators by hand | `hacklab decode FILE`, `hacklab iocs FILE` |
 | Build the submission image | `Dockerfile`, `scripts/container-test` |
@@ -89,11 +93,13 @@ image without another line in the Dockerfile. All commands:
 
 ## Three rules
 
-1. **Only the organizers' models decide at run time.** No own LLM, embedder,
-   reranker or classifier in the agent. Coding assistants help us build.
+1. **Only the organizers' models decide at run time**: Gemma 4 31B, Jev
+   1.14.0, Qwen3 Embedding. No own LLM, embedder, reranker or classifier in
+   the agent. While building, anything goes.
 2. **Keys stay in `.env`.** Never in code, configs, chat or the image.
 3. **No change without a number.** Measure before and after on the same
    cases ([how](docs/benchmarks.md)).
 
-Everything here is preparation. The rehearsal data was written for this
-repository; nothing was measured on the event's model or data.
+The rehearsal data was written for this repository, and the benchmark
+numbers come from a stand-in model. Nothing was measured on Gemma 4 or on the
+event's data yet.

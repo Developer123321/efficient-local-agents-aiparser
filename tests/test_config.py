@@ -22,6 +22,18 @@ def test_cost_cap_requires_prices_for_each_live_provider():
                 "limits": {"max_cost_usd": 0.01},
             }
         )
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "model": {
+                    "provider": "openai",
+                    "input_usd_per_million": 0.1,
+                    "output_usd_per_million": 0.1,
+                },
+                "embedding": {"enabled": True},
+                "limits": {"max_cost_usd": 0.01},
+            }
+        )
 
 
 def test_env_override_and_secret_file(tmp_path, monkeypatch):
@@ -33,6 +45,16 @@ def test_env_override_and_secret_file(tmp_path, monkeypatch):
     assert load_config(path).jev.base_url == "https://api.typesafe.ai/v1/systemone"
     monkeypatch.setenv("TYPESAFE_BASE_URL", "http://gateway:8080/v1/systemone")
     assert load_config(path).jev.base_url == "http://gateway:8080/v1/systemone"
+    # The embedding model is named by the environment, like the small model.
+    assert load_config(path).embedding.model == ""
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "Qwen/Qwen3-Embedding-0.6B")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://gateway:8080/v1")
+    embedding = load_config(path).embedding
+    assert (embedding.model, embedding.base_url, embedding.enabled) == (
+        "Qwen/Qwen3-Embedding-0.6B",
+        "http://gateway:8080/v1",
+        False,
+    )
     secret = tmp_path / "key"
     secret.write_text("fake-test-key\n")
     monkeypatch.setenv("EXAMPLE_KEY_FILE", str(secret))
@@ -49,6 +71,7 @@ def test_every_shipped_profile_is_valid_and_ships_with_cache_and_allowance_off(m
     names = {path.stem for path in profiles}
     assert names == {
         "baseline",
+        "embed-rank",
         "jev-select",
         "live",
         "mock",
@@ -102,6 +125,10 @@ def test_the_candidate_profile_is_the_measured_one():
         without = load_config(CONFIGS / f"{base}.toml")
         assert with_jev.jev.enabled and not without.jev.enabled
         assert with_jev.model_dump(exclude={"jev"}) == without.model_dump(exclude={"jev"})
+    # The same holds for the embedding variant and its [embedding] table.
+    ranked = load_config(CONFIGS / "embed-rank.toml")
+    assert ranked.embedding.enabled and not live.embedding.enabled
+    assert ranked.model_dump(exclude={"embedding"}) == live.model_dump(exclude={"embedding"})
 
 
 def test_the_candidate_profile_finds_its_solvers_and_recipes_wherever_it_runs(

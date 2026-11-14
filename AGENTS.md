@@ -53,10 +53,14 @@ any host machine configuration.
   (`tests/test_config.py`); change a value in all three, with a number.
 - Jev is a native System One provider, never a chat model. Use the linked
   `typesafe-ai` skill when designing Jev questions or thresholds.
-- Jev is optional at run time. The evaluation container may have no route to
-  it, so no code path may fail a task because Jev is missing or unreachable.
-- Only the models the organizers provide may make run-time decisions. Do not
-  add any other model, embedder, reranker or classifier to the agent.
+- Jev and the embedding model are optional at run time. The evaluation
+  container may have no route to them, so no code path may fail a task
+  because one of them is missing or unreachable.
+- Only the models the organizers provide may make run-time decisions: Gemma 4
+  31B (`[model]`), Jev 1.14.0 (`[jev]`) and Qwen3 Embedding (`[embedding]`).
+  Do not add any other model, embedder, reranker or classifier to the agent.
+- The embedding model orders rows that code has found. It never adds a row
+  and never selects a tool, a target or an action.
 - Before changing a prompt or a tool because of a failure, read the trace of
   the failing task (`HACKLAB_TRACE_DIR=.state/trace`).
   Coding assistants build the solution; they never answer competition tasks.

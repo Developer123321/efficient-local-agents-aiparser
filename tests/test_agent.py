@@ -411,6 +411,60 @@ def test_jev_selection_drops_irrelevant_preloaded_passages_but_keeps_one(lab, mo
     assert first.count("| ") == 1 and passages["p1"] in first
 
 
+def test_the_embedding_model_orders_preloaded_passages_and_is_never_required(lab, monkeypatch):
+    root, tracker = lab
+    (root / "notes.txt").write_text(
+        "The contact list is old.\nContact lenses.\nThe contact is Mira.\nNo contact today.\n"
+    )
+    task = Task(id="who", question="Who is the contact?", documents=["notes.txt"])
+    asked = []
+
+    class Embedder:
+        def __init__(self, scores):
+            self.scores = scores
+
+        def similarity(self, query, passages):
+            asked.append((query, passages))
+            if self.scores is None:
+                raise agent.ProviderError("provider_transport_error")
+            return [self.scores.get(passage, 0.0) for passage in passages]
+
+        def close(self):
+            pass
+
+    def run(embedder=None, model="qwen3-embedding"):
+        config, calls = live(monkeypatch, [final("Mira", ["e1"])])
+        config.agent.preload_results = 2
+        config.embedding.enabled = embedder is not None
+        config.embedding.model = model
+        monkeypatch.setattr(agent, "make_embedder", lambda *a: embedder)
+        run_id, answer = agent.run_task(task, root, config, tracker)
+        assert answer.status in ("ok", "abstain")
+        first = calls[0]["messages"][1]["content"]
+        return first.split("Evidence found for the task text")[1], run_id
+
+    lexical, _ = run()
+    assert lexical.count("| ") == 2
+    scores = {"The contact is Mira.": 0.9, "No contact today.": 0.4}
+    ranked, _ = run(Embedder(scores))
+    # All four lexical hits were scored; the two most similar reach the prompt, best first.
+    assert asked[0][0] == task.question and len(asked[0][1]) == 4
+    assert ranked.count("| ") == 2
+    assert ranked.index("The contact is Mira.") < ranked.index("No contact today.")
+    # Out of reach: the lexical order stands and the task is answered.
+    fallback, _ = run(Embedder(None))
+    assert fallback == lexical
+    # Switched on without a model name: nothing is asked.
+    asked.clear()
+    unnamed, run_id = run(Embedder(scores), model="")
+    assert unnamed == lexical and not asked
+    assert ("provider", "embedding_unavailable") in events(tracker, run_id, root.parent)
+    # The offline mode never reaches a live model.
+    offline = Config()
+    offline.embedding.enabled = True
+    assert agent.run_task(task, root, offline, tracker)[1].status == "error"
+
+
 def test_instruction_like_evidence_is_flagged_and_can_be_withheld(lab, monkeypatch):
     root, tracker = lab
     (root / "board.txt").write_text(

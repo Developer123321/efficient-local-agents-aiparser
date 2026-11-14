@@ -42,7 +42,9 @@ The first goal is one valid submission, not a good one.
    example agent once, fully.
 2. `cp .env.example .env && chmod 600 .env`, enter URL, model name and key.
    Run `uv run hacklab probe --config configs/live.toml` and adjust `[model]`
-   until it is green.
+   until it is green. Then `EMBEDDING_MODEL_NAME` and
+   `uv run hacklab probe --config configs/embed-rank.toml` for the embedding
+   model, and `configs/jev-select.toml` for Jev.
 3. Connect kit and harness with the least glue. Either the kit's entry
    point calls `hacklab.event.adapter.solve` once per task
    ([adapter.py](../src/hacklab/event/adapter.py): its tools are wrapped,
@@ -95,11 +97,14 @@ What usually pays off, best first:
    lower `max_steps`.
 4. **Smaller prompts.** Remove unused tools from `[agent] tools`, lower
    `max_observation_chars`.
-5. **Model settings.** Thinking low or off through `extra_body`.
+5. **Model settings.** Gemma 4 thinks only when asked: compare thinking off
+   with `reasoning_effort = "low"` through `extra_body`.
 6. **Guards and abstention.** `on_unverified`, `injection`, `allowed_actions`,
    decided by the scoring rules.
 7. **Jev**, only if it is reachable in the final run and the benchmark shows
    a gain after its cost.
+8. **The embedding model**, under the same condition: `configs/embed-rank.toml`
+   against `configs/live.toml` on the same cases.
 
 Rules for the afternoon:
 
@@ -134,8 +139,8 @@ The agent runs once, alone, on data nobody has seen.
   is stopped early still leaves a complete file. A record it cannot read
   becomes an `error` line, never the end of the run. A second run overwrites
   the file.
-- **Nothing but the provided endpoints is needed.** If Jev is missing, the
-  agent carries on without it. A rate limit, a server error or a lost
+- **Nothing but the provided endpoints is needed.** If Jev or the embedding
+  model is missing, the agent carries on without it. A rate limit, a server error or a lost
   connection is retried after 0.5, 1 and 2 seconds; a slow reply gets one
   more try.
 - **A playbook checks the files and columns it relies on** and returns `None`

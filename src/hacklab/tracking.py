@@ -121,7 +121,7 @@ def _safe_metadata(data: dict | None) -> dict:
 
 def _safe_config(config: dict) -> dict:
     safe = {}
-    for section in ("model", "jev"):
+    for section in ("model", "jev", "embedding"):
         values = config.get(section, {})
         if not isinstance(values, dict):
             continue

@@ -111,6 +111,13 @@ def test_probe_makes_one_tracked_request_per_model(tmp_path, monkeypatch, capsys
                 ],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 4},
             }
+        elif request.url.path.endswith("/embeddings"):
+            vectors = [[1.0, 0.0], [0.8, 0.6], [0.0, 1.0]]
+            payload = {
+                "model": "qwen3-embedding-0001",
+                "data": [{"index": i, "embedding": v} for i, v in enumerate(vectors)],
+                "usage": {"prompt_tokens": 25, "total_tokens": 25},
+            }
         else:
             payload = {
                 "model": "jev-1.14.0",
@@ -130,20 +137,47 @@ def test_probe_makes_one_tracked_request_per_model(tmp_path, monkeypatch, capsys
             ),
         )
 
+    def make_embedder(config, budget, tracker, run_id):
+        return providers.EmbeddingProvider(
+            config.embedding,
+            config.model,
+            config.limits,
+            budget,
+            tracker,
+            run_id,
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+    real_embedder = providers.make_embedder
     monkeypatch.setattr(providers, "make_providers", make)
+    monkeypatch.setattr(providers, "make_embedder", make_embedder)
     config = tmp_path / "live.toml"
     config.write_text(
         '[model]\nprovider = "openai"\nbase_url = "http://localhost/v1"\nmodel = "event-model"\n'
         "[jev]\nenabled = true\n"
+        '[embedding]\nenabled = true\nmodel = "qwen3-embedding"\n'
     )
     db = tmp_path / "private" / "tracking.sqlite"
     assert invoke(monkeypatch, ["--db", str(db), "probe", "--config", str(config)]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["ok"] and report["small_model"]["reply"] == {"ok": True}
     assert report["jev"]["reply"] == {"amount": 0.97}
-    assert [call["model"] for call in report["calls"]] == ["event-model-0001", "jev-1.14.0"]
-    assert [call["input_tokens"] for call in report["calls"]] == [12, 30]
-    assert len(seen) == 2
+    assert report["embedding"]["reply"] == {"similarity": [0.8, 0.0]}
+    assert [call["model"] for call in report["calls"]] == [
+        "event-model-0001",
+        "jev-1.14.0",
+        "qwen3-embedding-0001",
+    ]
+    assert [call["input_tokens"] for call in report["calls"]] == [12, 30, 25]
+    assert seen[2] == "http://localhost/v1/embeddings" and len(seen) == 3
+    # Switched on without a model name: the probe says so and stays red.
+    unnamed = tmp_path / "unnamed.toml"
+    unnamed.write_text(config.read_text().replace('model = "qwen3-embedding"\n', ""))
+    monkeypatch.setattr(providers, "make_embedder", real_embedder)
+    assert invoke(monkeypatch, ["--db", str(db), "probe", "--config", str(unnamed)]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["embedding"] == {"ok": False, "error": "configure_embedding_base_url_and_name"}
+    assert report["small_model"]["ok"]
     # Without a live endpoint the probe reports the gap instead of calling anything.
     assert invoke(monkeypatch, ["--db", str(db), "probe"]) == 1
     assert json.loads(capsys.readouterr().out)["setup"]["ok"] is False

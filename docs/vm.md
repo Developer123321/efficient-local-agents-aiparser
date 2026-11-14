@@ -73,8 +73,8 @@ checks, with no network at all:
 2. the candidate profile finds its playbooks and skills inside the image
    (`doctor --strict`), and the agent answers nine tasks through a stand-in
    model over a local address, with the baseline and the candidate profile;
-3. Jev works over a local address, and the agent still answers when Jev is
-   absent;
+3. Jev and the embedding model work over a local address, and the agent
+   still answers when they are absent;
 4. the container cannot reach the internet;
 5. the agent runs as an unprivileged user and cannot change its own code.
 

@@ -24,9 +24,22 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from hacklab.cache import ResponseCache
-from hacklab.config import Config, DevBudget, JevConfig, Limits, ModelConfig, read_secret
+from hacklab.config import (
+    Config,
+    DevBudget,
+    EmbeddingConfig,
+    JevConfig,
+    Limits,
+    ModelConfig,
+    read_secret,
+)
 
 MAX_RESPONSE_BYTES = 1_000_000
+# Vectors are long: 64 passages of 4096 numbers each are several megabytes.
+MAX_EMBEDDING_RESPONSE_BYTES = 8_000_000
+# An embedding answers within a second. It orders search hits and must not
+# hold a task up the way a slow generator may.
+EMBEDDING_TIMEOUT_SECONDS = 15.0
 # Pause before the first, second, ... retry of a request that failed for a
 # reason that passes: a rate limit, a server error, a lost connection. A longer
 # Retry-After from the server wins.
@@ -175,7 +188,14 @@ def decision_object(content: str) -> dict[str, Any]:
     Small models often wrap the object in a code fence, reasoning tags or a
     sentence. Recovering it locally costs nothing; a repair turn costs a call.
     """
-    text = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+    # Hidden thinking that an endpoint left in the reply: <think> tags, or
+    # Gemma 4's thought channel, which is empty when thinking is off.
+    text = re.sub(
+        r"<think>.*?</think>|<\|channel>thought\n.*?<channel\|>",
+        "",
+        content,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
     try:
         value = json.loads(text)
     except ValueError:
@@ -206,6 +226,10 @@ def _usage(payload: Any, provider: str) -> tuple[int | None, int | None]:
     usage = payload["usage"]
     if provider == "jev":
         return _token(usage.get("input_tokens")), _token(usage.get("output_tokens"))
+    if provider == "embedding":
+        # An embedding reply reports the prompt only; nothing is generated.
+        prompt = _token(usage.get("prompt_tokens"))
+        return prompt, None if prompt is None else 0
     return _token(usage.get("prompt_tokens")), _token(usage.get("completion_tokens"))
 
 
@@ -258,7 +282,9 @@ class _HTTPProvider:
         spend: DevSpend | None = None,
         auth_header: str = "Authorization",
         auth_scheme: str = "Bearer",
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
     ):
+        self.max_response_bytes = max_response_bytes
         self.cache = cache
         self.cache_salt = cache_salt
         self.spend = spend
@@ -327,7 +353,7 @@ class _HTTPProvider:
                     for chunk in response.iter_bytes():
                         self.budget.check_time()
                         chunks.extend(chunk)
-                        if len(chunks) > MAX_RESPONSE_BYTES:
+                        if len(chunks) > self.max_response_bytes:
                             raise ProviderError("provider_response_too_large")
                     try:
                         payload = json.loads(chunks)
@@ -733,11 +759,12 @@ class FunctionModel:
 
 
 class _Outage:
-    """Consecutive failed Jev requests in this process.
+    """Consecutive failed requests to one optional model in this process.
 
-    Jev reviews and filters; the small model answers. If the evaluation gives
-    the container no route to Jev, asking again for every task would only
-    spend the time limit, so after `limit` failures in a row it is left out.
+    Jev reviews and filters, the embedding model orders search hits; the small
+    model answers. If the evaluation gives the container no route to one of
+    them, asking again for every task would only spend the time limit, so
+    after `limit` failures in a row it is left out.
     """
 
     limit = 3
@@ -756,6 +783,29 @@ class _Outage:
 
 
 JEV_OUTAGE = _Outage()
+EMBEDDING_OUTAGE = _Outage()
+
+
+class _OptionalProvider(_HTTPProvider):
+    """A model the agent can do without: its failures are counted towards an outage."""
+
+    def _outage(self) -> _Outage:
+        raise NotImplementedError
+
+    def request(
+        self, body: dict[str, Any], parse: Callable[[Any], Any], *, output_allowance: int
+    ) -> Any:
+        try:
+            result = super().request(body, parse, output_allowance=output_allowance)
+        except BudgetExceeded:
+            raise  # The task ran out of allowance; that says nothing about the model.
+        except ProviderError as exc:
+            # A miss in replay mode is a missing recording, not a missing model.
+            if str(exc) != "cache_miss_in_replay_mode":
+                self._outage().record(False)
+            raise
+        self._outage().record(True)
+        return result
 
 
 def jev_usable(config: JevConfig) -> bool:
@@ -763,7 +813,7 @@ def jev_usable(config: JevConfig) -> bool:
     return config.enabled and bool(read_secret(config.api_key_env)) and not JEV_OUTAGE.reached()
 
 
-class JevProvider(_HTTPProvider):
+class JevProvider(_OptionalProvider):
     """Native TypeSafe System One Noul adapter; Jev never generates text."""
 
     def __init__(
@@ -803,20 +853,8 @@ class JevProvider(_HTTPProvider):
             spend=spend,
         )
 
-    def request(
-        self, body: dict[str, Any], parse: Callable[[Any], Any], *, output_allowance: int
-    ) -> Any:
-        try:
-            result = super().request(body, parse, output_allowance=output_allowance)
-        except BudgetExceeded:
-            raise  # The task ran out of allowance; that says nothing about Jev.
-        except ProviderError as exc:
-            # A miss in replay mode is a missing recording, not a missing Jev.
-            if str(exc) != "cache_miss_in_replay_mode":
-                JEV_OUTAGE.record(False)
-            raise
-        JEV_OUTAGE.record(True)
-        return result
+    def _outage(self) -> _Outage:
+        return JEV_OUTAGE
 
     def choose(self, state: Any, instructions: str, criteria: dict[str, str]) -> tuple[str, float]:
         """One Choice question: the selected option and Jev's confidence in it.
@@ -881,15 +919,147 @@ class JevProvider(_HTTPProvider):
         return self.request(body, parse, output_allowance=64 * len(questions))
 
 
-def make_providers(
-    config: Config,
-    budget: Budget,
-    tracker: Any,
-    run_id: str,
-    cache_salt: str = "",
-    model: Callable[[list[dict[str, str]]], Any] | None = None,
-) -> tuple[SmallModelProvider | FunctionModel, JevProvider | None]:
-    """The generator and, if enabled, Jev. `model` replaces our HTTP client for the generator."""
+def embeddings_endpoint(base_url: str) -> str:
+    """The URL embedding requests go to: the API prefix plus /embeddings.
+
+    The small model's address is accepted too, with or without its chat
+    route. A URL with a query string is complete and used as given.
+    """
+    parts = urlsplit(base_url.strip())
+    path = parts.path.rstrip("/")
+    if parts.query or path.endswith("/embeddings"):
+        return base_url.strip()
+    for route in ("/chat/completions", "/chat"):
+        if path.endswith(route):
+            path = path[: -len(route)]
+    return urlunsplit(parts._replace(path=path + "/embeddings"))
+
+
+def _embedding_key(config: Config) -> str:
+    return read_secret(config.embedding.api_key_env) or read_secret(config.model.api_key_env)
+
+
+def embedding_usable(config: Config) -> bool:
+    """Whether a task run should ask the embedding model: on, configured, no outage."""
+    embedding = config.embedding
+    return (
+        embedding.enabled
+        and bool(embedding.model)
+        and bool(embedding.base_url or config.model.base_url)
+        and bool(_embedding_key(config))
+        and not EMBEDDING_OUTAGE.reached()
+    )
+
+
+class EmbeddingProvider(_OptionalProvider):
+    """OpenAI-compatible /embeddings adapter for the provided embedding model.
+
+    It orders passages that code has already found; it never answers, and it
+    never selects a tool, a target or an action.
+    """
+
+    def __init__(
+        self,
+        config: EmbeddingConfig,
+        model: ModelConfig,
+        limits: Limits,
+        budget: Budget,
+        tracker: Any,
+        run_id: str,
+        *,
+        client: httpx.Client | None = None,
+        cache: ResponseCache | None = None,
+        cache_salt: str = "",
+        spend: DevSpend | None = None,
+    ):
+        base_url = config.base_url or model.base_url
+        if not base_url or not config.model:
+            raise ProviderError("configure_embedding_base_url_and_name")
+        key = read_secret(config.api_key_env) or read_secret(model.api_key_env)
+        if not key:
+            raise ProviderError("embedding_key_missing")
+        self.config = config
+        limits = limits.model_copy(
+            update={"timeout_seconds": min(limits.timeout_seconds, EMBEDDING_TIMEOUT_SECONDS)}
+        )
+        super().__init__(
+            provider="embedding",
+            model=config.model,
+            endpoint=embeddings_endpoint(base_url),
+            key=key,
+            input_rate=config.input_usd_per_million,
+            # Nothing is generated; with a known input price the cost is known.
+            output_rate=None if config.input_usd_per_million is None else 0.0,
+            limits=limits,
+            budget=budget,
+            tracker=tracker,
+            run_id=run_id,
+            client=client,
+            cache=cache,
+            cache_salt=cache_salt,
+            spend=spend,
+            auth_header=model.auth_header,
+            auth_scheme=model.auth_scheme,
+            max_response_bytes=MAX_EMBEDDING_RESPONSE_BYTES,
+        )
+
+    def _outage(self) -> _Outage:
+        return EMBEDDING_OUTAGE
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """One vector per text, in the order given."""
+        if not 1 <= len(texts) <= 65 or any(not text.strip() for text in texts):
+            raise ProviderError("embedding_requires_one_to_65_non_empty_texts")
+        body: dict[str, Any] = {"model": self.model, "input": texts}
+        if self.config.dimensions is not None:
+            body["dimensions"] = self.config.dimensions
+
+        def parse(payload: Any) -> list[list[float]]:
+            data = payload["data"]
+            if not isinstance(data, list) or len(data) != len(texts):
+                raise ProviderError("embedding_count_invalid")
+            vectors: list[list[float] | None] = [None] * len(texts)
+            for position, item in enumerate(data):
+                index = item.get("index", position)
+                vector = item["embedding"]
+                if type(index) is not int or not 0 <= index < len(texts) or vectors[index]:
+                    raise ProviderError("embedding_index_invalid")
+                if (
+                    not isinstance(vector, list)
+                    or not vector
+                    or any(type(v) not in (int, float) or not math.isfinite(v) for v in vector)
+                ):
+                    raise ProviderError("embedding_vector_invalid")
+                vectors[index] = [float(v) for v in vector]
+            if len({len(vector or ()) for vector in vectors}) != 1:
+                raise ProviderError("embedding_dimensions_differ")
+            return vectors  # type: ignore[return-value]
+
+        return self.request(body, parse, output_allowance=0)
+
+    def similarity(self, query: str, passages: list[str]) -> list[float]:
+        """Cosine similarity of each passage to the query, in the order given.
+
+        Only the query carries the task instruction, as the model card asks.
+        """
+        texts = [f"Instruct: {self.config.instruction}\nQuery:{query[:2000]}"]
+        texts += [passage[:2000] for passage in passages]
+        first, *rest = self.embed(texts)
+
+        def norm(vector: list[float]) -> float:
+            return math.sqrt(sum(value * value for value in vector))
+
+        scale = norm(first)
+        scores = []
+        for vector in rest:
+            length = scale * norm(vector)
+            dot = sum(a * b for a, b in zip(first, vector, strict=True))
+            scores.append(dot / length if length else 0.0)
+        return scores
+
+
+def _shared(config: Config, tracker: Any, cache_salt: str) -> dict[str, Any]:
+    """What every provider of one task run has in common: the cache and the allowance."""
     cache = (
         ResponseCache(Path(config.cache.path), config.cache.mode)
         if config.cache.mode != "off"
@@ -899,11 +1069,40 @@ def make_providers(
         value is not None
         for value in (config.budget.max_calls, config.budget.max_tokens, config.budget.max_usd)
     )
-    shared: dict[str, Any] = {
+    return {
         "cache": cache,
         "cache_salt": cache_salt,
         "spend": DevSpend(config.budget, tracker) if limited else None,
     }
+
+
+def make_embedder(
+    config: Config, budget: Budget, tracker: Any, run_id: str, cache_salt: str = ""
+) -> EmbeddingProvider | None:
+    """The embedding model, if enabled. It shares the task's budget with the generator."""
+    if not config.embedding.enabled:
+        return None
+    return EmbeddingProvider(
+        config.embedding,
+        config.model,
+        config.limits,
+        budget,
+        tracker,
+        run_id,
+        **_shared(config, tracker, cache_salt),
+    )
+
+
+def make_providers(
+    config: Config,
+    budget: Budget,
+    tracker: Any,
+    run_id: str,
+    cache_salt: str = "",
+    model: Callable[[list[dict[str, str]]], Any] | None = None,
+) -> tuple[SmallModelProvider | FunctionModel, JevProvider | None]:
+    """The generator and, if enabled, Jev. `model` replaces our HTTP client for the generator."""
+    shared = _shared(config, tracker, cache_salt)
     arguments = (config.model, config.limits, budget, tracker, run_id)
     small: SmallModelProvider | FunctionModel = (
         SmallModelProvider(*arguments, **shared)

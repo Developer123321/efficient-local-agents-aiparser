@@ -9,7 +9,8 @@ evidence that code has prepared.
 Task
   -> playbooks   code solves a task type it recognises          0 model calls
   -> briefing    what the documents hold, short ones in full,
-                 a matching skill
+                 a matching skill, search hits for the task text
+                 (optionally ordered by the embedding model)
   -> loop        the model picks ONE tool call, or "final"
                  every row it sees gets an evidence ID and passes the guards
   -> final       answer + evidence IDs + containment actions
@@ -30,7 +31,7 @@ Task
 | `forensics/` | Decoding, indicators, timestamps, propagation, attack phases |
 | `evidence.py` | Every row shown to the model, its ID, citations |
 | `guard.py` | Injection scan, placeholders for secrets, action guard |
-| `providers.py` | Calls to the models (HTTP, or the kit's own client), retries, budgets, replay cache |
+| `providers.py` | Calls to the three models (HTTP, or the kit's own client), retries, budgets, replay cache |
 | `tracking.py` | A receipt for every request |
 | `benchmark.py` | Scoring, comparison, failure view |
 | `practice.py` | Rehearsal incident and its playbooks |
@@ -89,6 +90,33 @@ It never blocks an answer. If Jev has no key, cannot be reached or runs out of
 allowance, the answer that passed the code's checks stands. After three failed
 requests in a row the run stops asking Jev. `TYPESAFE_BASE_URL` points it at a
 gateway.
+
+## The embedding model at run time
+
+Qwen3 Embedding is the third provided model. With `[embedding] enabled =
+true` (`configs/embed-rank.toml`) the first prompt's search works in two
+steps: the lexical search returns `candidates` hits instead of
+`preload_results`, one embedding request scores them against the task text,
+and the `preload_results` most similar ones go into the prompt. The prompt
+does not grow; the request costs input tokens of the embedding model only.
+
+- It orders rows that code found. It adds no row, and it never selects a
+  tool, a target or an action. The rows pass the injection scan as before.
+- It never blocks an answer. Without a model name, a key or a route, or after
+  three failed requests in a row, the lexical order stands. A request waits
+  at most 15 seconds.
+- It is asked only when the search finds more than `preload_results` hits
+  outside tables and outside documents shown in full. On the rehearsal
+  incident and on `bench/smoke.jsonl` that never happens: their evidence is
+  tables and short documents. Expect an effect only on long prose.
+- The task text carries the instruction (`[embedding] instruction`), the
+  passages do not, as the model card asks.
+- `EMBEDDING_MODEL_NAME` names the model. `EMBEDDING_BASE_URL` and
+  `EMBEDDING_API_KEY` are only needed when it is not served next to the small
+  model: unset, the small model's address and key are used.
+
+Whether this helps is unmeasured. The `search` tool inside the loop stays
+lexical.
 
 ## Tools the model can call
 
@@ -179,7 +207,9 @@ shape. Three things a kit may bring are covered:
 1. Map the organizers' task and answer format in `event/adapter.py`
    (`to_kit`, `MUTATING`) and set the image's `CMD`.
 2. Wrap their tools; set `allowed_actions` and `protected_targets`.
-3. Confirm URL, key and reply format with `hacklab probe`. Only the
-   OpenAI-compatible chat API is implemented.
+3. Confirm URL, key and reply format with `hacklab probe`: one request to
+   the small model, one to Jev and one to the embedding model, each if
+   enabled. Only the OpenAI-compatible chat and embeddings APIs are
+   implemented.
 4. Write a playbook or a skill per task type, with held-out cases.
 5. Measure one change at a time ([benchmarks](benchmarks.md)).

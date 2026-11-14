@@ -1,11 +1,13 @@
-# The candidate profile: what the submission image runs. Set URL, model and key
-# in .env after the organizers announce the model. base_url is the API prefix
-# BEFORE /chat/completions, for example https://host/v1; a complete URL with a
-# query string is used as it is. This adapter assumes an OpenAI-compatible API.
+# The candidate profile: what the submission image runs. The event's models
+# are Gemma 4 31B (small model), Jev 1.14.0 and Qwen3 Embedding. Set URL, model
+# name and key in .env. base_url is the API prefix BEFORE /chat/completions,
+# for example https://host/v1; a complete URL with a query string is used as
+# it is. This adapter assumes an OpenAI-compatible API.
 #
-# [agent] and [limits] are the values measured on the stand-in model
-# (configs/openrouter.toml); tests/test_config.py keeps the two files equal
-# there. Change a value here only together with a benchmark number.
+# [agent] and [limits] were measured on 13 November on a stand-in (Granite 4.2
+# 8B), before the model was known; nothing here is measured on Gemma 4 yet.
+# tests/test_config.py keeps them equal to configs/openrouter.toml. Change a
+# value here only together with a benchmark number.
 [model]
 provider = "openai"
 response_format = "json_object"
@@ -14,10 +16,19 @@ response_format = "json_object"
 # max_tokens_parameter = "max_completion_tokens"
 # temperature = "omit"
 # auth_header = "api-key"   # with auth_scheme = "" for gateways without Bearer
-# A reasoning model spends output tokens on hidden thinking. Switch it off or
-# down with the parameter the endpoint documents, for example:
-# extra_body = { chat_template_kwargs = { enable_thinking = false } }
-# extra_body = { reasoning_effort = "low" }
+# Gemma 4 thinks only when asked. On vLLM thinking is off by default;
+# chat_template_kwargs.enable_thinking = true or any reasoning_effort switches
+# it on. Thinking is paid output; on the stand-in model only "low" was worth
+# it. Ask how the event's endpoint is set up, then pin one and measure:
+# extra_body = { chat_template_kwargs = { enable_thinking = false } }   # off
+# extra_body = { reasoning_effort = "low" }                             # on
+# JSON mode: one vLLM release ignored response_format for Gemma 4 with thinking
+# off (vllm-project/vllm#39130). A reply outside JSON costs a repair turn; if
+# `hacklab failures` shows model_content_must_be_json_text, try "json_schema".
+# Google recommends temperature 1.0, top_p 0.95, top_k 64 for Gemma 4. The
+# harness sends temperature 0 for repeatable decisions; measure before changing:
+# temperature = 1.0
+# extra_body = { top_p = 0.95, top_k = 64 }
 # input_usd_per_million = 0.0  # Replace with the organizer's actual scoring tariff.
 # output_usd_per_million = 0.0
 
@@ -32,6 +43,13 @@ base_url = "https://api.typesafe.ai/v1/systemone"
 # input_usd_per_million = 0.042
 # output_usd_per_million = 0.0
 threshold = 0.7  # TypeSafe's suggested starting point, not a measured optimum.
+
+[embedding]
+# Qwen3 Embedding, the third provided model. Off until a benchmark shows a
+# gain: configs/embed-rank.toml is this file with it on. Model name and
+# address come from EMBEDDING_MODEL_NAME and EMBEDDING_BASE_URL; without an
+# address and a key of its own it uses the small model's.
+enabled = false
 
 [agent]
 # Search results for the task text in the first prompt: an answerable task

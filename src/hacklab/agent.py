@@ -32,7 +32,9 @@ from hacklab.providers import (
     BudgetExceeded,
     ModelOutputError,
     ProviderError,
+    embedding_usable,
     jev_usable,
+    make_embedder,
     make_providers,
 )
 from hacklab.toolkit import RESULT_ID, Result, Toolbox, ToolSpec, logfmt, split_items
@@ -270,6 +272,27 @@ def _jev_select(jev: Any, task: Task, rows: list[dict[str, Any]], config: Config
     return kept or rows[:1]
 
 
+def _embedding_rank(
+    embedder: Any, task: Task, rows: list[dict[str, Any]], config: Config
+) -> list[dict]:
+    """The lexical hits most similar to the task, as the embedding model sees them.
+
+    The model only orders rows that the search found. Without it, the lexical
+    order stands.
+    """
+    keep = config.agent.preload_results
+    if len(rows) <= keep:
+        return rows
+    try:
+        scores = embedder.similarity(task.question, [row["quote"] for row in rows])
+    except BudgetExceeded:
+        raise
+    except ProviderError:
+        return rows[:keep]
+    order = sorted(range(len(rows)), key=lambda position: (-scores[position], position))
+    return [rows[position] for position in order[:keep]]
+
+
 def skill_directory(reference: str) -> Path:
     """`[agent] skills` as a directory: a path, or "package:folder" inside an installed package."""
     package, _, folder = reference.partition(":")
@@ -362,6 +385,7 @@ def _briefing(
     tracker: Any,
     run_id: str,
     room: int | None = None,
+    embedder: Any = None,
 ) -> str:
     """The first message: the task, what the documents hold, and evidence found by search.
 
@@ -404,9 +428,12 @@ def _briefing(
         add(f"{name} in full:\n" + toolbox.render(read).text(allowance))
         in_full.add(name)
     if config.agent.preload_results and task.documents and left > 400:
-        found = toolbox.documents.execute(
-            "search", {"query": task.question[:500], "limit": config.agent.preload_results}
-        )
+        # With the embedding model, more lexical hits are fetched and the most
+        # similar ones kept; the prompt holds `preload_results` rows either way.
+        wanted = config.agent.preload_results
+        if embedder is not None:
+            wanted = max(wanted, config.embedding.candidates)
+        found = toolbox.documents.execute("search", {"query": task.question[:500], "limit": wanted})
         tracker.event(
             run_id,
             "tool",
@@ -420,6 +447,8 @@ def _briefing(
             for row in found.get("results", [])
             if row["document"] not in in_full and row["document"] not in tables
         ]
+        if embedder is not None:
+            rows = _embedding_rank(embedder, task, rows, config)
         if jev is not None and config.jev.select and len(rows) > 1:
             rows = _jev_select(jev, task, rows, config)
         if rows:
@@ -600,6 +629,7 @@ def _investigate(
     jev: Any,
     tracker: Any,
     run_id: str,
+    embedder: Any = None,
 ) -> Answer:
     system = system_prompt(config, toolbox)
     # The first message leaves room for two tool results, or takes half of
@@ -608,7 +638,10 @@ def _investigate(
     room = max(free - 2 * config.limits.max_observation_chars, free // 2)
     base = [
         {"role": "system", "content": system},
-        {"role": "user", "content": _briefing(task, toolbox, config, jev, tracker, run_id, room)},
+        {
+            "role": "user",
+            "content": _briefing(task, toolbox, config, jev, tracker, run_id, room, embedder),
+        },
     ]
     history: list[tuple[dict[str, str], dict[str, str]]] = []
     repairs = 0
@@ -784,6 +817,7 @@ def run_task(
     )
     small: Any = None
     jev: Any = None
+    embedder: Any = None
     answer = _stopped("no_answer_produced")
     try:
         budget = Budget(config.limits, deadline=deadline)
@@ -811,6 +845,8 @@ def run_task(
             if config.model.provider == "mock" and model is None:
                 if config.jev.enabled:
                     raise ProviderError("mock_mode_cannot_call_live_jev")
+                if config.embedding.enabled:
+                    raise ProviderError("mock_mode_cannot_call_live_embedding")
                 answer = _mock(task, documents, tracker, run_id)
                 if documents.verify_citations(answer.citations):
                     answer = _abstain("Offline evidence validation failed.")
@@ -825,8 +861,15 @@ def run_task(
                     )
                 kit = {} if model is None else {"model": model}
                 small, jev = make_providers(providers, budget, tracker, run_id, cache_salt, **kit)
+                if config.embedding.enabled:
+                    # No model name, no key, or several failures in a row: the
+                    # search hits keep their lexical order.
+                    if embedding_usable(config):
+                        embedder = make_embedder(config, budget, tracker, run_id, cache_salt)
+                    else:
+                        tracker.event(run_id, "provider", {"status": "embedding_unavailable"})
                 answer = _investigate(
-                    task, toolbox, documents, config, budget, small, jev, tracker, run_id
+                    task, toolbox, documents, config, budget, small, jev, tracker, run_id, embedder
                 )
     except BudgetExceeded as exc:
         answer = _stopped(str(exc))
@@ -840,7 +883,7 @@ def run_task(
         answer = _stopped("local_setup_failed", "error")
         tracker.event(run_id, "local", {"status": "error"})
     finally:
-        for provider in [small, jev]:
+        for provider in [small, jev, embedder]:
             if provider is not None:
                 try:
                     provider.close()

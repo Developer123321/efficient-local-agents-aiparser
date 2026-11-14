@@ -5,18 +5,22 @@ import httpx
 import pytest
 
 from hacklab.cache import ResponseCache
-from hacklab.config import Config, DevBudget, JevConfig, Limits, ModelConfig
+from hacklab.config import Config, DevBudget, EmbeddingConfig, JevConfig, Limits, ModelConfig
 from hacklab.providers import (
     Budget,
     BudgetExceeded,
     DevSpend,
+    EmbeddingProvider,
     FunctionModel,
     JevProvider,
     ModelOutputError,
     ProviderError,
     SmallModelProvider,
     chat_endpoint,
+    embedding_usable,
+    embeddings_endpoint,
     jev_usable,
+    make_embedder,
     make_providers,
 )
 from hacklab.tracking import Tracker
@@ -464,6 +468,9 @@ def test_invalid_jev_probability_is_rejected(receipt, value):
         'Here is my decision:\n{"action":"final"}\nI hope this helps.',
         '<think>The user wants {"x": 1} maybe.</think>\n{"action":"final"}',
         'Sure. [1, 2] then {"action":"final"} and {"action":"read"}',
+        # Gemma 4: an empty thought channel with thinking off, a filled one with it on.
+        '<|channel>thought\n<channel|>{"action":"final"}',
+        '<|channel>thought\nMaybe {"action":"read"} first?<channel|>{"action":"final"}',
     ],
 )
 def test_decision_is_recovered_from_wrapped_model_output(content):
@@ -926,3 +933,128 @@ def test_a_kit_function_that_hangs_or_fails_is_given_up_within_bounds(receipt):
         down.complete([], {})
     # Usage the kit did not report stays unknown instead of being guessed.
     assert receipt[0].calls(receipt[1])[-1]["input_tokens"] is None
+
+
+def embedder(receipt, handler, limits=None, model=None, **config):
+    limits = limits or Limits()
+    settings = {"enabled": True, "model": "Qwen/Qwen3-Embedding-0.6B", **config}
+    return EmbeddingProvider(
+        EmbeddingConfig(**settings),
+        model or ModelConfig(provider="openai", base_url="http://gateway:8000/v1", model="gemma"),
+        limits,
+        Budget(limits),
+        *receipt,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_embedding_contract_instructs_the_query_only_and_bills_input_alone(receipt):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        # Out of order on purpose: `index` decides, not the position.
+        data = [
+            {"index": 2, "embedding": [0.0, 2.0]},
+            {"index": 0, "embedding": [3.0, 0.0]},
+            {"index": 1, "embedding": [1.0, 0]},
+        ]
+        usage = {"prompt_tokens": 40, "total_tokens": 40}
+        return httpx.Response(200, json={"model": "qwen3-embedding", "data": data, "usage": usage})
+
+    provider = embedder(receipt, handler, dimensions=256, input_usd_per_million=0.01)
+    assert provider.similarity("Who was quarantined?", ["Agent a7.", "Lunch."]) == [1.0, 0.0]
+    body = json.loads(seen[0].content)
+    assert seen[0].url.path == "/v1/embeddings"
+    assert seen[0].headers["Authorization"] == "Bearer synthetic-test-key"
+    assert body["model"] == "Qwen/Qwen3-Embedding-0.6B" and body["dimensions"] == 256
+    assert body["input"][0].startswith("Instruct: Given a question about a security incident")
+    assert body["input"][0].endswith("\nQuery:Who was quarantined?")
+    assert body["input"][1:] == ["Agent a7.", "Lunch."]
+    call = receipt[0].calls(receipt[1])[0]
+    assert (call["provider"], call["model"]) == ("embedding", "qwen3-embedding")
+    assert (call["input_tokens"], call["output_tokens"]) == (40, 0)
+    assert call["cost_usd"] == pytest.approx(40 * 0.01 / 1_000_000)
+    # Without `dimensions` the field is left out: not every endpoint accepts it.
+    plain = embedder(receipt, handler)
+    plain.similarity("q", ["a", "b"])
+    assert "dimensions" not in json.loads(seen[1].content)
+    assert receipt[0].calls(receipt[1])[1]["cost_usd"] is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [{"index": 0, "embedding": [1.0]}],
+        [{"index": 0, "embedding": [1.0]}, {"index": 0, "embedding": [1.0]}],
+        [{"index": 0, "embedding": [1.0]}, {"index": 1, "embedding": []}],
+        [{"index": 0, "embedding": [1.0]}, {"index": 1, "embedding": ["x"]}],
+        [{"index": 0, "embedding": [1.0]}, {"index": 1, "embedding": [1.0, 2.0]}],
+        [{"index": 0, "embedding": [1.0]}, {"index": 1}],
+    ],
+)
+def test_a_malformed_embedding_reply_is_a_provider_error(receipt, data):
+    provider = embedder(receipt, lambda request: httpx.Response(200, json={"data": data}))
+    with pytest.raises(ProviderError):
+        provider.embed(["one", "two"])
+    with pytest.raises(ProviderError):
+        provider.embed([])
+
+
+@pytest.mark.parametrize(
+    ("base_url", "endpoint"),
+    [
+        ("http://gateway:8000/v1", "http://gateway:8000/v1/embeddings"),
+        ("http://gateway:8000/v1/", "http://gateway:8000/v1/embeddings"),
+        ("http://gateway:8000/v1/chat/completions", "http://gateway:8000/v1/embeddings"),
+        ("http://gateway:8000/v1/embeddings", "http://gateway:8000/v1/embeddings"),
+        ("https://host/embed?api-version=1", "https://host/embed?api-version=1"),
+    ],
+)
+def test_the_embedding_endpoint_is_derived_from_a_prefix_or_the_chat_route(base_url, endpoint):
+    assert embeddings_endpoint(base_url) == endpoint
+
+
+def test_the_embedding_model_borrows_address_and_key_and_is_left_out_after_an_outage(
+    receipt, monkeypatch
+):
+    def config(**embedding):
+        return Config.model_validate(
+            {
+                "model": {"provider": "openai", "base_url": "http://gateway/v1", "model": "gemma"},
+                "embedding": {"enabled": True, **embedding},
+            }
+        )
+
+    named = config(model="qwen3-embedding")
+    # Off, or without a model name, nothing is asked.
+    assert not embedding_usable(Config()) and not embedding_usable(config())
+    assert make_embedder(Config(), Budget(Limits()), *receipt) is None
+    assert embedding_usable(named)
+    own = make_embedder(named, Budget(named.limits), *receipt)
+    assert own.endpoint == "http://gateway/v1/embeddings" and own.key == "synthetic-test-key"
+    # It waits a quarter of what the generator may take, and never longer than configured.
+    assert (named.limits.timeout_seconds, own.limits.timeout_seconds) == (60, 15)
+    assert embedder(receipt, None, limits=Limits(timeout_seconds=5)).limits.timeout_seconds == 5
+    own.close()
+    monkeypatch.setenv("EMBEDDING_API_KEY", "own-synthetic-key")
+    separate = make_embedder(
+        config(model="qwen3-embedding", base_url="http://embed:9000/v1"),
+        Budget(named.limits),
+        *receipt,
+    )
+    assert separate.endpoint == "http://embed:9000/v1/embeddings"
+    assert separate.key == "own-synthetic-key"
+    separate.close()
+
+    def unreachable(request):
+        raise httpx.ConnectError("no route", request=request)
+
+    limits = Limits(max_retries=0, max_calls=20)
+    provider = embedder(receipt, unreachable, limits=limits)
+    for _ in range(3):
+        with pytest.raises(ProviderError, match="provider_transport_error"):
+            provider.embed(["one"])
+    assert not embedding_usable(named)
+    # Jev's counter is its own.
+    assert jev_usable(JevConfig(enabled=True))

@@ -48,6 +48,39 @@ class JevConfig(StrictModel):
     select_threshold: float = Field(default=0.3, ge=0, le=1)
 
 
+class EmbeddingConfig(StrictModel):
+    """The provided embedding model (Qwen3 Embedding); optional at run time, like Jev.
+
+    Switched on, it orders the lexical search hits of the first prompt by their
+    similarity to the task. Without a route, a key or a model name the lexical
+    order stands.
+    """
+
+    enabled: bool = False
+    # Empty means the small model's address and key: one gateway usually serves both.
+    base_url: str = ""
+    model: str = ""
+    api_key_env: str = "EMBEDDING_API_KEY"
+    # An embedding request bills its input only.
+    input_usd_per_million: float | None = Field(default=None, ge=0)
+    # Qwen3 Embedding is trained Matryoshka-style: a shorter vector is still an
+    # embedding. Sent as `dimensions` when set; not every endpoint accepts it.
+    dimensions: int | None = Field(default=None, ge=32, le=4096)
+    # Qwen3 Embedding is instruction-aware. The query is sent as
+    # "Instruct: <this>\nQuery:<task>", passages as they are; the model card
+    # reports 1 to 5 % better retrieval with an English task instruction.
+    instruction: str = Field(
+        default=(
+            "Given a question about a security incident, retrieve log lines and "
+            "passages that help answer it"
+        ),
+        max_length=500,
+    )
+    # How many lexical hits are embedded and re-ordered; the first
+    # `[agent] preload_results` of them reach the prompt.
+    candidates: int = Field(default=20, ge=2, le=64)
+
+
 class Limits(StrictModel):
     """Per-task bounds. The defaults are the measured candidate profile, configs/live.toml:
 
@@ -151,6 +184,7 @@ class DevBudget(StrictModel):
 class Config(StrictModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     jev: JevConfig = Field(default_factory=JevConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
     limits: Limits = Field(default_factory=Limits)
@@ -160,8 +194,12 @@ class Config(StrictModel):
     @model_validator(mode="after")
     def priced_budget(self):
         providers = [self.model] + ([self.jev] if self.jev.enabled else [])
-        unpriced = self.model.provider != "mock" and any(
-            p.input_usd_per_million is None or p.output_usd_per_million is None for p in providers
+        unpriced = self.model.provider != "mock" and (
+            any(
+                p.input_usd_per_million is None or p.output_usd_per_million is None
+                for p in providers
+            )
+            or (self.embedding.enabled and self.embedding.input_usd_per_million is None)
         )
         if unpriced and (self.limits.max_cost_usd is not None or self.budget.max_usd is not None):
             raise ValueError("A cost budget requires explicit prices for every enabled provider")
@@ -177,6 +215,9 @@ def load_config(path: Path | None = None) -> Config:
     # The organizers may route Jev through their own gateway inside the container.
     if os.environ.get("TYPESAFE_BASE_URL"):
         data.setdefault("jev", {})["base_url"] = os.environ["TYPESAFE_BASE_URL"]
+    for env, key in [("EMBEDDING_BASE_URL", "base_url"), ("EMBEDDING_MODEL_NAME", "model")]:
+        if os.environ.get(env):
+            data.setdefault("embedding", {})[key] = os.environ[env]
     if os.environ.get("HACKLAB_CACHE_MODE"):
         data.setdefault("cache", {})["mode"] = os.environ["HACKLAB_CACHE_MODE"]
     return Config.model_validate(data)

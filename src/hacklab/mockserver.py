@@ -1,8 +1,9 @@
 """A stand-in model endpoint for plumbing tests, above all inside the offline container.
 
-It answers every chat request with a fixed abstention and every Jev question
-with certainty. That proves the request path, credentials handling and the
-output contract without a network or a key. It says nothing about a model.
+It answers every chat request with a fixed abstention, every Jev question
+with certainty and every embedding request with the same vector. That proves
+the request path, credentials handling and the output contract without a
+network or a key. It says nothing about a model.
 """
 
 from __future__ import annotations
@@ -71,6 +72,19 @@ class Handler(BaseHTTPRequestHandler):
                     "model": "mock-jev",
                     "answers": answers,
                     "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+        elif self.path.rstrip("/").endswith("/embeddings"):
+            texts = request.get("input", [])
+            texts = texts if isinstance(texts, list) else [texts]
+            self._send(
+                200,
+                {
+                    "model": "mock-embedding",
+                    "data": [
+                        {"index": index, "embedding": [1.0, 0.0]} for index in range(len(texts))
+                    ],
+                    "usage": {"prompt_tokens": 1, "total_tokens": 1},
                 },
             )
         else:

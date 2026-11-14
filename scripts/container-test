@@ -81,6 +81,21 @@ grep -q '"provider": "jev"' <<<"$report"
 answered /work/answers-without-jev.jsonl
 echo 'jev: reachable through a local route; without one, 9 answers and no error'
 
+# 3b. The embedding model, under the same two conditions: named and reachable
+# next to the small model, or not announced to the container at all.
+report=$("$engine" run "${shared[@]}" "${endpoints[@]}" -e EMBEDDING_MODEL_NAME=mock-embedding \
+  "$image" probe --config configs/embed-rank.toml)
+grep -q '"provider": "embedding"' <<<"$report"
+"$engine" run "${shared[@]}" "${endpoints[@]}" -e EMBEDDING_MODEL_NAME=mock-embedding \
+  "$image" submit --config configs/embed-rank.toml --input /work/scenario/tasks.jsonl \
+  --output /work/answers-embedding.jsonl --root /work/scenario/docs >/dev/null
+answered /work/answers-embedding.jsonl
+"$engine" run "${shared[@]}" "${endpoints[@]}" "$image" submit --config configs/embed-rank.toml \
+  --input /work/scenario/tasks.jsonl --output /work/answers-without-embedding.jsonl \
+  --root /work/scenario/docs >/dev/null
+answered /work/answers-without-embedding.jsonl
+echo 'embedding: reachable through a local route; without a model name, 9 answers and no error'
+
 # 4. The agent's network namespace must not reach the internet.
 probe='python -c "import socket; socket.create_connection((\"1.1.1.1\", 443), 3)" 2>/dev/null'
 if inside "$probe" "${shared[@]}"; then

@@ -98,6 +98,10 @@ def doctor(config: Config) -> dict:
         "small_model_key_present": bool(read_secret(config.model.api_key_env)),
         "jev_enabled": config.jev.enabled,
         "jev_key_present": bool(read_secret(config.jev.api_key_env)),
+        "embedding_enabled": config.embedding.enabled,
+        "embedding_configured": bool(
+            config.embedding.model and (config.embedding.base_url or config.model.base_url)
+        ),
         "cache_mode": config.cache.mode,
         "playbooks": {"reference": config.agent.playbooks or None, "solvers": solvers},
         "skills": {"reference": config.agent.skills or None, "files": recipes},
@@ -114,13 +118,14 @@ def doctor(config: Config) -> dict:
 
 def probe(config: Config, tracker: Tracker) -> dict:
     """One small tracked request to each configured model: is the contract right?"""
-    from hacklab.providers import Budget, ProviderError, make_providers
+    from hacklab.providers import Budget, ProviderError, make_embedder, make_providers
 
     run_id = tracker.start_run("probe", config.model_dump(), mode=config.model.provider)
     report: dict = {}
     providers: list = []
     try:
-        small, jev = make_providers(config, Budget(config.limits), tracker, run_id)
+        budget = Budget(config.limits)
+        small, jev = make_providers(config, budget, tracker, run_id)
         providers = [small, jev]
         checks = [
             (
@@ -141,6 +146,17 @@ def probe(config: Config, tracker: Tracker) -> dict:
                     ),
                 )
             )
+        if config.embedding.enabled:
+            # Built inside the check: a missing name or key is this model's
+            # failure, not the probe's.
+            def embedding() -> dict:
+                embedder = make_embedder(config, budget, tracker, run_id)
+                providers.append(embedder)
+                passages = ["Agent a7 was quarantined at 02:14.", "Lunch is at 12:30."]
+                scores = embedder.similarity("Which agent was quarantined?", passages)
+                return {"similarity": [round(score, 3) for score in scores]}
+
+            checks.append(("embedding", embedding))
         for name, call in checks:
             try:
                 report[name] = {"ok": True, "reply": call()}

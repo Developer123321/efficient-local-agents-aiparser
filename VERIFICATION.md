@@ -1,5 +1,33 @@
 # What was actually tested
 
+## 14 November 2026, the announced models (same workstation)
+
+The models were announced: Gemma 4 31B, Jev 1.14.0, Qwen3 Embedding. Added:
+an optional embedding provider (`[embedding]`, `configs/embed-rank.toml`),
+Gemma 4's thought channel in the reply parser, the models' facts in
+[docs/hackathon.md](docs/hackathon.md#the-models).
+
+| Check | Result |
+| --- | --- |
+| `bash scripts/check` (Ruff format and lint, `pytest`) | Passed, **295 tests** on Python 3.15 |
+| Shellcheck on `scripts/container-test` | Passed |
+| `hacklab probe --config configs/embed-rank.toml` against `hacklab mock-server` over HTTP on the host | Small model and embedding model answered; the embedding receipt has input tokens and 0 output tokens |
+| `hacklab submit --config configs/embed-rank.toml` against the stand-in, rehearsal seed 3 | 9 answer lines with the embedding model named, 9 without a model name (`embedding_unavailable` recorded per task) |
+| `bash scripts/vm-smoke` (disposable guest, rootless Podman) | Passed, including `scripts/container-test`: the image built, `probe` reached the stand-in embedding model over a local address, and `configs/embed-rank.toml` wrote 9 answers with and 9 without a model name |
+
+The VM ran on the tree before the last two changes: the 15-second limit for
+an embedding request with its test, and documentation. The fast gate ran
+again after them.
+
+No request went to a real model. The facts about the three models come from
+their model cards and vendor documentation, read on 14 November; none was
+checked against the event's endpoints.
+
+On the rehearsal incident and on `bench/smoke.jsonl` the embedding step sent
+no request: it is asked only when the search finds more hits than fit into
+the first prompt outside tables and short documents. Its ordering is covered
+by a unit test with a stand-in, not by a benchmark.
+
 ## 13 November 2026 (evening), NixOS x86_64 workstation with KVM
 
 Nix 2.35.3, uv 0.13.5, Ruff 0.17.3 on the host and 0.17.4 in the guest and in
@@ -61,15 +89,18 @@ requests. Nothing was sent to a model while hardening.
 
 ## Not verified
 
-- **The event's model.** Granite 4.2 8B is a guess. Prompts, tools and
-  defaults were tuned on this one stand-in and three seeds of our own
-  scenario.
+- **The event's models.** Nothing was run on Gemma 4 31B or on Qwen3
+  Embedding. Prompts, tools and defaults were tuned on Granite 4.2 8B, a much
+  smaller stand-in, and three seeds of our own scenario. Whether thinking,
+  JSON mode and temperature 0 behave on Gemma 4 as assumed is open, and so is
+  whether ordering search hits with the embedding model gains anything.
 - **The organizers' side.** Starter kit, task and answer format, the
   container's run contract, how the models are reached inside the container,
   prices, scoring formula, rate limits. The Dockerfile's `CMD` is a
   placeholder.
-- **Jev in the final run.** Whether the container has a route to Jev is
-  unknown. The fallback was tested with a stand-in, not with a real outage.
+- **Jev and the embedding model in the final run.** Whether the container
+  has a route to them is unknown. The fallbacks were tested with a stand-in,
+  not with a real outage.
 - **Docker, macOS, Windows, ARM.** The container test ran with rootless
   Podman on x86_64 Linux. `scripts/setup` ran on NixOS and in Ubuntu and
   Debian containers. Docker, Docker Desktop, macOS (bash 3.2), Git Bash, WSL 2,

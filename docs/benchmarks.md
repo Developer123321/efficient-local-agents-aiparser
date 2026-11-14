@@ -109,9 +109,11 @@ prompts, answers or keys.
 
 ## Results on a real small model
 
-Measured on 13 November 2026 with IBM Granite 4.2 8B through OpenRouter, as a
-stand-in for the event's model. The model worked alone with the tools, no
-playbooks. One run per row at temperature 0: a difference of one task is
+Measured on 13 November 2026 with IBM Granite 4.2 8B through OpenRouter
+($0.06 and $0.15 per million tokens), as a stand-in before the event's model
+was known. The event's model is Gemma 4 31B, a much larger model at two to
+three times the price; none of the rows below was repeated on it. The model worked
+alone with the tools, no playbooks. One run per row at temperature 0: a difference of one task is
 noise.
 
 | Setup | Right, of 9 per seed | Cost per seed |
@@ -146,11 +148,14 @@ What we learned:
   cut cost by 10 to 29 %.
 - **Jev as judge is mixed.** It turned wrong answers into abstentions, and
   once a right one too. Worth it only if a wrong answer costs more than none.
-- **Not worth it:** schema-enforced replies, a visible thought, an embedder
-  (also forbidden).
+- **Not worth it:** schema-enforced replies, a visible thought.
+- **Not measured:** the embedding model. Qwen3 Embedding is provided and
+  allowed; `configs/embed-rank.toml` orders the preloaded search hits with it.
 
-To repeat: `just practice-live 7 configs/openrouter.toml` with an OpenRouter
-key in `.env`.
+To repeat on Gemma 4 31B: `just practice-live 7 configs/openrouter.toml` with
+an OpenRouter key and `SMALL_MODEL_NAME=google/gemma-4-31b-it` in `.env`.
+`configs/openrouter.toml` now carries Gemma's prices and thinking off; the
+Granite rows used reasoning as named in the table.
 
 The perfect score of the playbooks shows that the tools work on data built
 for them. None of these numbers predicts the event's model or data.
