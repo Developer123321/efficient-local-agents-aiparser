@@ -101,3 +101,10 @@ finally:
     arena.close()
 PY
 ```
+
+## Submitted 13:26 UTC
+
+- `t08-p7` = F1 (this file), stage dev, active from 13:30 UTC, 0/0.
+- `t08-p6` A3-QUOTED-EVIDENCE retired to free the slot; unmeasured.
+- Dev slots: p2 (1/46), p5 (starts 13:30), p7 (starts 13:30). Final slot free.
+- Names and ids: [break-it-submissions.md](break-it-submissions.md).
