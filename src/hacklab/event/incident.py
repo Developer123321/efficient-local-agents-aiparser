@@ -21,6 +21,7 @@ import hashlib
 import html
 import json
 import re
+import threading
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -46,6 +47,16 @@ NOT_IN_FORCE = re.compile(r"\b(typed|cop(y|ies)|earlier|old|superseded|replaced|
 # of a run carries the same sheet: the same bytes and the same question are read once.
 _SEEN: dict[str, str] = {}
 _RULED: dict[tuple[str, str], bool] = {}
+_LOCKS: dict[str, threading.Lock] = {}
+_GUARD = threading.Lock()
+
+
+def _once(key: str) -> threading.Lock:
+    """The lock for one reading: tasks that run side by side wait for the first to read."""
+    with _GUARD:
+        return _LOCKS.setdefault(key, threading.Lock())
+
+
 WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "five": 5, "ten": 10}
 WORDS |= {"fifteen": 15, "twenty": 20, "thirty": 30, "forty-five": 45, "sixty": 60}
 WORDS |= {"ninety": 90}
@@ -516,28 +527,30 @@ class Incident:
             self._cache[name] = read_csv(self.path(name))
         return self._cache[name]
 
-    def seen(self, name: str) -> str:
+    def seen(self, name: str, hint: str = "") -> str:
         """What the small model reads on a picture of the task, line by line.
 
         Read once per run and picture. The reading is data like any file of the
-        workspace: code parses it, and whoever drew the picture wrote it.
+        workspace: code parses it, and whoever drew the picture wrote it. A `hint`
+        says what to look for and is our own fixed text.
         """
         try:
             data = self.path(name).read_bytes()
         except OSError as exc:
             raise Unreadable(name) from exc
-        key = hashlib.sha256(data).hexdigest()
-        if key not in _SEEN:
-            model = self.model() if self.model else None
-            read = getattr(model, "describe", None)
-            if read is None:
-                raise Unreadable("no reader for a picture")
-            kind = "image/png" if name.lower().endswith(".png") else "image/jpeg"
-            try:
-                _SEEN[key] = str(read(data, kind))
-            except (OSError, RuntimeError, ValueError, LookupError) as exc:
-                raise Unreadable("picture not read") from exc
-        return _SEEN[key]
+        key = hashlib.sha256(data).hexdigest() + hint
+        with _once(key):
+            if key not in _SEEN:
+                model = self.model() if self.model else None
+                read = getattr(model, "describe", None)
+                if read is None:
+                    raise Unreadable("no reader for a picture")
+                kind = "image/png" if name.lower().endswith(".png") else "image/jpeg"
+                try:
+                    _SEEN[key] = str(read(data, kind, hint))
+                except (OSError, RuntimeError, ValueError, LookupError) as exc:
+                    raise Unreadable("picture not read") from exc
+            return _SEEN[key]
 
     def find(self, pattern: str) -> list[str]:
         """Workspace paths (with a leading slash) that match a glob below the root."""
@@ -650,9 +663,10 @@ class Incident:
         item = self._ordered(topic)
         if not item:
             raise Unreadable("standing order")
-        if (item, question) not in _RULED:
-            _RULED[item, question] = self._reads(item, question)
-        return _RULED[item, question]
+        with _once(item + "\n" + question):
+            if (item, question) not in _RULED:
+                _RULED[item, question] = self._reads(item, question)
+            return _RULED[item, question]
 
     def _reads(self, line: str, question: str) -> bool:
         """A yes or no about one sentence of the runbook, from the small model.

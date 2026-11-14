@@ -77,6 +77,7 @@ KINDS: dict[str, tuple[str, dict[str, str]]] = {
         {
             "shown": "the contacted attacker domains that the images show",
             "missing": "the contacted attacker domains that the images do not show",
+            "never": "the destinations on the images that none of our agents ever contacted",
         },
     ),
     "rotate": ("ACT: schedule the rotation of one named token at the earliest allowed time", {}),
@@ -339,6 +340,12 @@ def canonical(kind: str, form: str | None, events: Any, request: str) -> str | N
         images = [p for p in found["paths"] if re.search(r"\.(jpe?g|png)$", p, re.IGNORECASE)]
         if not images:
             return None
+        if form == "never":
+            return (
+                f"Which destinations on the scanned pages {' '.join(images)} did none of our "
+                "agents ever contact (no request at all, blocked attempts count as contact)? "
+                "Answer as a sorted JSON array of domains."
+            )
         if form == "missing":
             return (
                 "Which attacker domains (runbook definition) that our agents contacted (any "

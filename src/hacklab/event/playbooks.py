@@ -101,6 +101,12 @@ SAYS = re.compile(
     r"\b(shows?|is|depicts?|displays?|contains?|presents?)\b",
     re.IGNORECASE,
 )
+ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# A closed ticket is not the request: one word of it is all that is paid for.
+CLOSED_IS_ENOUGH = (
+    "the status stamp. If the ticket is stamped CLOSED, reply with the single word CLOSED "
+    "and nothing else"
+)
 STRAIGHT = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'"})
 
 
@@ -111,13 +117,22 @@ def _scanned(seen: str) -> tuple[bool, bool, str, str]:
     another stamp that it is not. Words that steer the reader end the request: the
     ticket asks for a result, it does not tell an agent what to disregard.
     """
-    lines = [re.sub(r"^[\s>*#`|]+|[\s*`|]+$", "", line) for line in seen.splitlines()]
+    # A heading or a rule of dashes is the sheet's frame, never a part of the request.
+    framed = [
+        "" if re.fullmatch(r"\s*[-=_]{3,}\s*", line) else line
+        for line in seen.splitlines()
+        if not (line.lstrip().startswith("#") and not STAMP.search(line))
+    ]
+    stamps: set[str] = set()
+    for line in seen.splitlines():
+        if line.lstrip().startswith("#"):
+            stamps |= set(STAMP.findall(line))
+    lines = [re.sub(r"^[\s>*#`|]+|[\s*`|]+$", "", line) for line in framed]
     while lines and not lines[-1]:
         lines.pop()
     if len(lines) > 2 and SAYS.match(lines[-1]):
         lines.pop()
     fields: dict[str, str] = {}
-    stamps: set[str] = set()
     body: list[str] = []
     shut = started = False
     for line in lines:
@@ -146,7 +161,8 @@ def _scanned(seen: str) -> tuple[bool, bool, str, str]:
         stamps.add("OPEN" if state == "open" else "CLOSED")
     request = " ".join(part for part in body if part).translate(STRAIGHT).strip()
     for sentence in re.split(r"(?<=[.!?])\s+", request):
-        if STEERS.search(sentence):
+        # No request of the operator names an address or a link, and none steers its reader.
+        if STEERS.search(sentence) or LINK.search(sentence) or ADDRESS.search(sentence):
             request = request[: request.index(sentence)].strip()
             break
     asker = next((value for label, value in fields.items() if ASKER.match(label)), "")
@@ -161,7 +177,7 @@ def _scanned_ticket(incident: Incident) -> tuple[str, str] | None:
         if not PICTURE.search(name):
             continue
         try:
-            is_open, shut, asker, request = _scanned(incident.seen(name))
+            is_open, shut, asker, request = _scanned(incident.seen(name, CLOSED_IS_ENOUGH))
         except Unreadable:
             continue  # Not read: it cannot be told to be the open one.
         if is_open and request:
@@ -173,19 +189,32 @@ def _scanned_ticket(incident: Incident) -> tuple[str, str] | None:
 
 
 def open_ticket(incident: Incident) -> str | None:
-    """The body of the one ticket with `status: open`, or None."""
+    """The request of the one open ticket in /tickets/, or None.
+
+    A written ticket in the layout every dev run had (a header between two rules, then
+    the request) is read as before; one written another way is read like a transcript.
+    """
     flagged = {flag.lower() for flag in incident.flagged}
     found = []
-    for name in incident.find("tickets/*.md"):
+    for name in incident.find("tickets/*"):
+        if PICTURE.search(name) or not re.search(r"\.(md|txt|text|rst|ya?ml)$", name, re.I):
+            continue
         text = incident.text(name)
         parts = text.split("---", 2)
-        if len(parts) == 3 and re.search(r"^status:\s*open\s*$", parts[1], re.MULTILINE):
+        usual = len(parts) == 3 and re.search(r"^status:", parts[1], re.MULTILINE)
+        if usual and re.search(r"^status:\s*open\s*$", parts[1], re.MULTILINE):
             asker = re.search(r"^requested_by:\s*(.+)$", parts[1], re.MULTILINE)
             words = set(re.findall(r"[\w.-]+", asker[1].lower())) if asker else set()
             if words & flagged:
                 return None  # Opened by an account the operator flagged: not an instruction.
             body = re.sub(r"^\s*#[^\n]*\n", "", parts[2].strip()).strip()
             found.append(body)
+        elif not usual:
+            is_open, _, who, request = _scanned(text)
+            if is_open and request:
+                if set(re.findall(r"[\w.-]+", who.lower())) & flagged:
+                    return None
+                found.append(request)
     if found:
         return found[0] if len(found) == 1 else None
     scanned = _scanned_ticket(incident)
@@ -861,6 +890,21 @@ def delegation_chain(incident: Incident, request: str) -> Solved | None:
 # -- what an agreement says ---------------------------------------------------------------
 
 
+def _units(incident: Incident, workspace: Workspace, name: str) -> list[tuple[str, str]]:
+    """(locator, text) of each unit of a document, its white space made plain.
+
+    A photographed sheet is one unit that ends with its last signature: what stands
+    below is not the signers'.
+    """
+    if not PICTURE.search(name):
+        units = workspace.documents.units(name.lstrip("/"))
+        return [(unit.locator, " ".join(unit.text.split())) for unit in units]
+    lines = incident.seen(name).translate(STRAIGHT).splitlines()
+    signed = [n for n, line in enumerate(lines) if re.match(r"\W*signed\b", line, re.IGNORECASE)]
+    kept = lines[: signed[-1] + 1] if signed else lines
+    return [("file", " ".join(" ".join(kept).split()))]
+
+
 @solver(r"agreement|signator|deadline", asks=True)
 def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
     """Fields of one customer's agreement: its register row and the clauses that state them."""
@@ -893,10 +937,7 @@ def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> S
         return None  # No customer of the register is named, or more than one.
     row, customer = found[0]
     name = row[document]
-    units = [
-        (unit.locator, " ".join(unit.text.split()))
-        for unit in workspace.documents.units(name.lstrip("/"))
-    ]
+    units = _units(incident, workspace, name)
     if not any(row[reference] in text for _, text in units):
         return None  # Not this customer's agreement.
 
@@ -912,6 +953,8 @@ def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> S
             return None
         value, locator = hits[0]
         kind, _, number = locator.partition(":")
+        if locator == "file":
+            return value, {"path": name}  # A photographed sheet is cited by its path.
         if kind not in ("line", "page", "paragraph") or not number.isdigit():
             return None
         return value, {"path": name, kind: int(number)}
@@ -923,10 +966,10 @@ def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> S
         stem = name.rsplit(".", 1)[0]
         in_force: list[tuple[datetime, str, list[Source]]] = []
         for other in incident.find(stem.lstrip("/") + "_*"):
-            parts = [
-                (unit.locator, " ".join(unit.text.split()))
-                for unit in workspace.documents.units(other.lstrip("/"))
-            ]
+            try:
+                parts = _units(incident, workspace, other)
+            except (Unreadable, ValueError, RuntimeError, OSError, LookupError):
+                continue  # Not read: it cannot be told to be in force.
             whole = " ".join(text for _, text in parts)
             hit = next(((loc, m) for loc, t in parts for m in [re.search(pattern, t)] if m), None)
             if hit is None or row[reference] not in whole:
@@ -935,7 +978,12 @@ def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> S
             if not signed or re.search(r"not signed|unsigned|draft|withdrawn", whole, re.I):
                 continue
             start = re.search(r"[Ee]ffective (?:from|as of|on) (\S+?)[.,;]?(?:\s|$)", whole)
-            since = parse_time(start[1] if start else signed[1] + "T00:00:00Z")
+            stated = start[1] if start else signed[1] + "T00:00:00Z"
+            day = re.match(r"\d{4}-\d\d-\d\d", stated)
+            if not is_time(stated) and not day:
+                continue
+            # A time that was misread still has its day.
+            since = parse_time(stated if is_time(stated) or not day else day[0] + "T00:00:00Z")
             if since > incident.now:
                 continue
             kind, _, number = hit[0].partition(":")
@@ -1536,7 +1584,12 @@ def scanned_indicators(incident: Incident, request: str, workspace: Workspace) -
     paths = list(dict.fromkeys(re.findall(r"/[\w./-]+\.(?:jpe?g|png)\b", request)))
     if not paths or not re.search(r"domain", request, re.IGNORECASE) or keys_of(request):
         return None
-    if not re.search(r"contacted", request, re.IGNORECASE):
+    never = re.search(
+        r"\b(none|never|nobody|no one|not|n't)\b[^.?]{0,80}\bcontact|\bno (request|contact)s?\b",
+        request,
+        re.IGNORECASE,
+    )
+    if not never and not re.search(r"contacted", request, re.IGNORECASE):
         return None
     absent = bool(re.search(r"missing|not show|n't show|absent|gap", request, re.IGNORECASE))
     model = workspace.model() if workspace.model else None
@@ -1549,6 +1602,23 @@ def scanned_indicators(incident: Incident, request: str, workspace: Workspace) -
         kind = "image/png" if path.lower().endswith(".png") else "image/jpeg"
         seen += "\n\n" + str(read(data, kind, "every domain name, host name and address"))
     words = _listed(seen)
+    if never and not absent:
+        # The pages' own entries that no event of any agent ever went to, in any status.
+        reached = {domain_of(event.target) for event in incident.events}
+        entries = sorted(
+            word
+            for word in words
+            if re.search(r"\.[a-z]{2,}$", word)
+            and not re.search(r"\.(jpe?g|png|pdf|md|csv|txt|jsonl?|docx|xlsx|ods)$", word)
+        )
+        if not entries:
+            return None
+        value = [
+            entry
+            for entry in entries
+            if not any(host == entry or host.endswith("." + entry) for host in reached)
+        ]
+        return value, [{"path": path} for path in paths]
 
     def shown(domain: str) -> bool:
         return domain in words or any(word.endswith("." + domain) for word in words)
