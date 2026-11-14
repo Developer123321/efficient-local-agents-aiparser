@@ -17,6 +17,7 @@ import base64
 import binascii
 import codecs
 import csv
+import hashlib
 import html
 import json
 import re
@@ -33,6 +34,21 @@ STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?(?:Z|[+-]\d\d:\d\d)?")
 RANGE = re.compile(r"([A-Za-z]+-)(\d+)\s*\.\.\s*(?:[A-Za-z]+-)?(\d+)")
 DOMAIN = re.compile(r"\b((?:[a-z0-9-]+\.)+[a-z]{2,})\b", re.IGNORECASE)
 TICKET = re.compile(r"\b[A-Z]{2,}-\d+\b")
+# A sheet the runbook leaves rules to: named after the word, or by a name that holds it.
+SHEET = r"/[\w./-]+\.(?:jpe?g|png|md|txt|pdf|docx)\b"
+ORDER = re.compile(
+    rf"\border\b[^.\n/]{{0,40}}({SHEET})|(?<![\w.])(/[\w./-]*order[\w-]*\.(?:jpe?g|png|md|txt|pdf|docx))\b",
+    re.IGNORECASE,
+)
+PICTURE = re.compile(r"\.(?:jpe?g|png)$", re.IGNORECASE)
+NOT_IN_FORCE = re.compile(r"\b(typed|cop(y|ies)|earlier|old|superseded|replaced|draft)\b", re.I)
+# What the small model read on a sheet and answered about one of its items. Every task
+# of a run carries the same sheet: the same bytes and the same question are read once.
+_SEEN: dict[str, str] = {}
+_RULED: dict[tuple[str, str], bool] = {}
+WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "five": 5, "ten": 10}
+WORDS |= {"fifteen": 15, "twenty": 20, "thirty": 30, "forty-five": 45, "sixty": 60}
+WORDS |= {"ninety": 90}
 # What makes a sentence an approval, and what takes one back.
 APPROVED = re.compile(r"\b(approved|approval|authori[sz]ed|signed off|cleared)\b", re.IGNORECASE)
 NOT_APPROVED = re.compile(
@@ -500,6 +516,29 @@ class Incident:
             self._cache[name] = read_csv(self.path(name))
         return self._cache[name]
 
+    def seen(self, name: str) -> str:
+        """What the small model reads on a picture of the task, line by line.
+
+        Read once per run and picture. The reading is data like any file of the
+        workspace: code parses it, and whoever drew the picture wrote it.
+        """
+        try:
+            data = self.path(name).read_bytes()
+        except OSError as exc:
+            raise Unreadable(name) from exc
+        key = hashlib.sha256(data).hexdigest()
+        if key not in _SEEN:
+            model = self.model() if self.model else None
+            read = getattr(model, "describe", None)
+            if read is None:
+                raise Unreadable("no reader for a picture")
+            kind = "image/png" if name.lower().endswith(".png") else "image/jpeg"
+            try:
+                _SEEN[key] = str(read(data, kind))
+            except (OSError, RuntimeError, ValueError, LookupError) as exc:
+                raise Unreadable("picture not read") from exc
+        return _SEEN[key]
+
     def find(self, pattern: str) -> list[str]:
         """Workspace paths (with a leading slash) that match a glob below the root."""
         return sorted("/" + p.relative_to(self.root).as_posix() for p in self.root.glob(pattern))
@@ -551,6 +590,70 @@ class Incident:
                 return line
         raise Unreadable(f"no rule {heading}")
 
+    @cached_property
+    def order(self) -> str:
+        """The standing order the runbook leaves rules to, as text; "" when it names none.
+
+        A photographed sheet is read by the small model. Its reading is the operator's
+        rule like the runbook: code picks the item and applies it. What stands below the
+        signature is not the signer's.
+        """
+        named: list[str] = []
+        for found in ORDER.finditer(self.runbook):
+            name = found[1] or found[2]
+            before = self.runbook[max(0, found.start(1 if found[1] else 2) - 60) : found.start()]
+            if NOT_IN_FORCE.search(before.rsplit(".", 1)[-1]) or name in named:
+                continue
+            if name.lower() not in ("/agents.md", "/runbook.md") and self.has(name):
+                named.append(name)
+        if not named:
+            # Named in other words: the sheet a rule that counts or binds points to.
+            for heading in ("Exfiltrated customer records", "A rotation takes"):
+                try:
+                    line = self.rule(heading)
+                except Unreadable:
+                    continue
+                named += [
+                    name
+                    for name in re.findall(rf"(?<![\w.]){SHEET}", line, re.IGNORECASE)
+                    if name.lower() not in ("/agents.md", "/runbook.md") and self.has(name)
+                ]
+        if not named:
+            return ""
+        name = named[0]
+        if PICTURE.search(name):
+            seen = self.seen(name)
+        else:
+            seen = "\n".join(text for _, text in self.notes(name))
+        lines: list[str] = []
+        for line in seen.splitlines():
+            lines.append(line.strip())
+            if re.match(r"\W*signed\b", line, re.IGNORECASE):
+                break
+        if not any(lines):
+            raise Unreadable("standing order")
+        return "\n".join(lines)
+
+    def _ordered(self, topic: str) -> str:
+        """The items of the standing order that speak of `topic`; the whole order if none."""
+        items: list[str] = []
+        for line in self.order.splitlines():
+            if re.match(r"\s*\(?\d+[.)]\s", line) or not items or not line:
+                items.append(line)
+            else:
+                items[-1] += " " + line
+        hits = [item for item in items if re.search(topic, item, re.IGNORECASE)]
+        return " ".join(hits or [item for item in items if item]).strip()
+
+    def _ruled(self, topic: str, question: str) -> bool:
+        """A yes or no the standing order gives on one topic, read once per run."""
+        item = self._ordered(topic)
+        if not item:
+            raise Unreadable("standing order")
+        if (item, question) not in _RULED:
+            _RULED[item, question] = self._reads(item, question)
+        return _RULED[item, question]
+
     def _reads(self, line: str, question: str) -> bool:
         """A yes or no about one sentence of the runbook, from the small model.
 
@@ -582,6 +685,11 @@ class Incident:
 
     @cached_property
     def blocked_count(self) -> bool:
+        if self.order:
+            return self._ruled(
+                r"block|stopp|denied|refus|prevent|intercept|attempt",
+                "Do blocked transfer attempts count as exfiltrated records?",
+            )
         line = self.rule("Exfiltrated customer records")
         no = r"blocked (attempts|transfers) (do not|don't|never) count|only successful|"
         no += r"blocked (attempts|transfers) are (excluded|ignored|not counted)|"
@@ -599,6 +707,12 @@ class Incident:
 
     @cached_property
     def deduplicate(self) -> bool:
+        if self.order:
+            return self._ruled(
+                r"repeat|twice|duplicat|re-?sen[dt]|overlap|distinct|\bonce\b|\bagain\b|"
+                r"more than one",
+                "Is a record that was sent more than once counted only once (deduplicated)?",
+            )
         line = self.rule("Exfiltrated customer records")
         once = (
             r"not double-counted|count(ed|s)? (only )?once|deduplicate by|unique records|distinct"
@@ -620,6 +734,8 @@ class Incident:
             return True
         if re.search(r"first successful|that succeeded|completed transfer", line, re.I):
             return False
+        if self.order and re.search(r"\bthat counts\b|\border\b", line, re.IGNORECASE):
+            return self.blocked_count  # The first transfer that counts, as the order counts.
         return self._reads(
             line, "Can a blocked transfer attempt be the event that sets the detection time?"
         )
@@ -1308,6 +1424,12 @@ class Incident:
     @cached_property
     def consumers_bind(self) -> bool:
         """Whether a freeze of a service that uses the token also blocks its rotation."""
+        if self.order:
+            return self._ruled(
+                r"consum|own service|depend|used by|downstream|which services",
+                "Does a freeze of a service that only consumes (uses) the token also block "
+                "the token's rotation?",
+            )
         line = self.rule("A rotation takes")
         if not re.search(r"consum|used by|depend", line, re.IGNORECASE):
             return False
@@ -1325,6 +1447,29 @@ class Incident:
             "token's rotation?",
         )
 
+    @cached_property
+    def rotation_buffer(self) -> timedelta:
+        """The time to keep free before and after a freeze that binds a rotation."""
+        if not self.order:
+            buffer = re.search(r"(\d+)-minute buffer", self.rule("A rotation takes"))
+            return timedelta(minutes=int(buffer[1])) if buffer else timedelta(0)
+        item = self._ordered(r"buffer|margin|\bgap\b|clear of|distance")
+        if re.search(r"\bno (buffer|margin|gap)\b|\bnone\b|not needed", item, re.IGNORECASE):
+            return timedelta(0)
+        found = re.search(r"(\d+)\s*-?\s*(min|hour|h\b)", item, re.IGNORECASE)
+        if found:
+            return timedelta(minutes=int(found[1]) * (1 if found[2].lower() == "min" else 60))
+        if re.search(r"\bhalf an hour\b", item, re.IGNORECASE):
+            return timedelta(minutes=30)
+        if re.search(r"\bquarter of an hour\b", item, re.IGNORECASE):
+            return timedelta(minutes=15)
+        words = "|".join(sorted(WORDS, key=len, reverse=True))
+        found = re.search(rf"\b({words})[\s-]+(min|hour)", item, re.IGNORECASE)
+        if found:
+            unit = 1 if found[2].lower() == "min" else 60
+            return timedelta(minutes=WORDS[found[1].lower()] * unit)
+        return timedelta(0)
+
     def rotation_slot(self, token: str) -> tuple[datetime, list[Source]]:
         """The first full hour at which a token may be rotated, and the rows that decide it."""
         line = self.rule("A rotation takes")
@@ -1336,8 +1481,7 @@ class Incident:
         services = {row["svc"]}
         if self.consumers_bind:
             services |= {name.strip() for name in row["consumers"].split(";") if name.strip()}
-        buffer = re.search(r"(\d+)-minute buffer", line)
-        margin = timedelta(minutes=int(buffer[1])) if buffer else timedelta(0)
+        margin = self.rotation_buffer
         binding = [entry for entry in self.calendar if entry["svc"] in services]
         start = self.now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         blockers: list[dict[str, Any]] = []

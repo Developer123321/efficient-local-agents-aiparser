@@ -235,8 +235,11 @@ Defence, all in code ([arena_run.py](../src/hacklab/event/arena_run.py)):
   operator files or a CSV registry; `write` only below `/drafts/`.
 - Every URL in an answer, a message or a draft is defanged.
 - Comments in ODT and cell notes in ODS are not read as content.
-- Images are not read in the submitted profile: `image_text` cannot reach
-  the model, and a task that needs a picture is answered without it. The
+- The loop reads no images in the submitted profile. Solver code has
+  Gemma 4 transcribe the pictures a task rests on (an open ticket, the
+  standing order the runbook names, a photographed status report, scanned
+  indicator pages) and parses the transcript itself, so `image_text` reaches
+  a parser, not a decision. The
   only allowed reader is Gemma 4 itself (no OCR). With `"image"` in
   `[agent] tools` (`configs/image-read.toml`) the model can ask for one
   picture of the task; what Gemma 4 reads in it comes back as one evidence

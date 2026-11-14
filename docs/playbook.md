@@ -130,7 +130,9 @@ What usually pays off, best first:
    `--config configs/jev-select.toml` on the same seed.
 8. **The embedding model**, under the same condition:
    `--config configs/embed-rank.toml`.
-9. **Images.** Not read by `configs/live.toml`. `configs/image-read.toml`
+9. **Images.** Solver code has Gemma 4 transcribe the pictures a task rests
+   on (the open ticket, the standing order, a status report, scanned pages);
+   the loop of `configs/live.toml` reads none. `configs/image-read.toml`
    adds the `image` tool, which shows one picture of the task to Gemma 4.
    Check the gateway first (`hacklab probe --config configs/image-read.toml`),
    then compare on a seed whose tasks have pictures: the tool is one more

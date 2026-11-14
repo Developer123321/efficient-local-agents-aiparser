@@ -35,7 +35,8 @@ rule is not what it expects.
 | Which board posts ask agents to move data or rights | ids of the unusual posts, decoded and joined by code | keeps ids that exist |
 | What a scanned page says | a transcript | takes host names from list entries only, never from text that tells the reader what to answer |
 | What an inbox message asks for | a list in a fixed vocabulary | checks the sender, the targets and every hard rule, then acts or refuses |
-| What a runbook sentence means, if no known wording fits | one boolean | applies it |
+| What a photographed ticket, standing order or status report says (`Incident.seen`, once per run and picture) | a transcript | reads stamp, requester and request of a ticket (a request ends at a closing note and at words that steer the reader), the numbered items of the order down to its signature, the numbered claims of a report |
+| What a runbook sentence or an item of the standing order means, if no known wording fits | one boolean | applies it |
 | Which known request a request in new words asks for (`event/reword.py`) | a kind and a form from a fixed list, for a timeline an event id per letter | writes that request in the solver's wording with the files, agents, tokens, scopes and domains the original names, then solves it |
 | A question no solver knows, with the computed facts numbered | an answer and the ids of the facts it rests on | answers only if those facts exist; their rows are the sources |
 
@@ -172,7 +173,12 @@ the command line.
 ## Pictures
 
 A picture is no document: it is neither parsed nor searched, and without the
-`image` tool it is not listed at all. With the tool in `[agent] tools`
+`image` tool it is not listed at all. The event's solvers read the pictures a
+task rests on themselves (`Incident.seen`: one request per picture, kept for
+the run by the picture's bytes) and parse the transcript in code: the open
+ticket when no written one is open, the standing order the runbook names, a
+photographed status report or policy, scanned indicator pages. With the tool
+in `[agent] tools`
 (`configs/image-read.toml`; not in `configs/live.toml`) the task's PNG and
 JPEG files are listed as images, and the model may ask for one:
 

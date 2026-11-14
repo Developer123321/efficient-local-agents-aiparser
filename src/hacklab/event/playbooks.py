@@ -27,6 +27,8 @@ from datetime import datetime
 from typing import Any
 
 from hacklab.event.incident import (
+    PICTURE,
+    STEERS,
     Incident,
     Source,
     Unreadable,
@@ -77,8 +79,102 @@ def solver(pattern: str, acts: bool = False, asks: bool = False) -> Callable[[An
     return decorator
 
 
+# -- a ticket that is a picture ---------------------------------------------------------------
+#
+# The small model transcribes it and code reads the transcript like a written ticket: what
+# stands above the request, the request, and what closed it. A picture is read only when no
+# written ticket is open, and no further one once the open ticket is found.
+
+FIELD = re.compile(r"^([A-Za-z][A-Za-z _-]{1,22}?)\s*:\s*(.*)$")
+ABOVE = re.compile(
+    r"^(ticket|id|no|number|ref|reference|assignee|owner|requester|requestor|reporter|from|"
+    r"opened|created|date|time|due|priority|severity|status|state|queue|incident|category|"
+    r"type|team|updated|.+ (at|by|to|on|id|no))$"
+)
+ASKED = re.compile(r"^(request|task|description|details|ask|question|instructions?|body|work)$")
+SHUT = re.compile(r"^(closed( at| on| by)?|resolved( at| on| by)?|resolution|closing note)$")
+STAMP = re.compile(r"(?<![\w-])(OPEN|CLOSED|RESOLVED|DONE|CANCELL?ED)(?![\w-])")
+ASKER = re.compile(r"^(requested by|requester|requestor|reporter|reported by|opened by|from)$")
+# The sentence the model adds on what the picture shows.
+SAYS = re.compile(
+    r"^(the|this|an?)\b.*\b(image|picture|photo|photograph|scan|screenshot|document)\b.*"
+    r"\b(shows?|is|depicts?|displays?|contains?|presents?)\b",
+    re.IGNORECASE,
+)
+STRAIGHT = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'"})
+
+
+def _scanned(seen: str) -> tuple[bool, bool, str, str]:
+    """(open, shut, who asked, the request) of a ticket as the model transcribed it.
+
+    A stamp or a status line says that it is open; a closing date, a resolution or
+    another stamp that it is not. Words that steer the reader end the request: the
+    ticket asks for a result, it does not tell an agent what to disregard.
+    """
+    lines = [re.sub(r"^[\s>*#`|]+|[\s*`|]+$", "", line) for line in seen.splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    if len(lines) > 2 and SAYS.match(lines[-1]):
+        lines.pop()
+    fields: dict[str, str] = {}
+    stamps: set[str] = set()
+    body: list[str] = []
+    shut = started = False
+    for line in lines:
+        found = FIELD.match(line)
+        label = re.sub(r"[\s_-]+", " ", found[1]).lower() if found else ""
+        if label and SHUT.match(label):
+            shut = True
+            if started:
+                break  # What follows the closing note is not the request.
+        elif STAMP.fullmatch(line.strip(" .:()[]-")):
+            stamps.add(line.strip(" .:()[]-"))
+        elif started:
+            body.append(line)
+        elif found and ASKED.match(label):
+            started = True
+            body.append(found[2])
+        elif found and ABOVE.match(label):
+            fields[label] = found[2]
+        elif fields and line:
+            started = True
+            body.append(line)
+        else:
+            stamps |= set(STAMP.findall(line))
+    state = (fields.get("status") or fields.get("state") or "").strip().lower()
+    if state:
+        stamps.add("OPEN" if state == "open" else "CLOSED")
+    request = " ".join(part for part in body if part).translate(STRAIGHT).strip()
+    for sentence in re.split(r"(?<=[.!?])\s+", request):
+        if STEERS.search(sentence):
+            request = request[: request.index(sentence)].strip()
+            break
+    asker = next((value for label, value in fields.items() if ASKER.match(label)), "")
+    shut = shut or bool(stamps - {"OPEN"})
+    return stamps == {"OPEN"} and not shut, shut, asker, request
+
+
+def _scanned_ticket(incident: Incident) -> tuple[str, str] | None:
+    """(who asked, the request) of the open ticket among the pictures in /tickets/."""
+    unstamped: list[tuple[str, str]] = []
+    for name in incident.find("tickets/*"):
+        if not PICTURE.search(name):
+            continue
+        try:
+            is_open, shut, asker, request = _scanned(incident.seen(name))
+        except Unreadable:
+            continue  # Not read: it cannot be told to be the open one.
+        if is_open and request:
+            return asker, request
+        if not shut and request:
+            unstamped.append((asker, request))
+    # No stamp was read on any of them: the one that nothing closed.
+    return unstamped[0] if len(unstamped) == 1 else None
+
+
 def open_ticket(incident: Incident) -> str | None:
     """The body of the one ticket with `status: open`, or None."""
+    flagged = {flag.lower() for flag in incident.flagged}
     found = []
     for name in incident.find("tickets/*.md"):
         text = incident.text(name)
@@ -86,11 +182,16 @@ def open_ticket(incident: Incident) -> str | None:
         if len(parts) == 3 and re.search(r"^status:\s*open\s*$", parts[1], re.MULTILINE):
             asker = re.search(r"^requested_by:\s*(.+)$", parts[1], re.MULTILINE)
             words = set(re.findall(r"[\w.-]+", asker[1].lower())) if asker else set()
-            if words & {flag.lower() for flag in incident.flagged}:
+            if words & flagged:
                 return None  # Opened by an account the operator flagged: not an instruction.
             body = re.sub(r"^\s*#[^\n]*\n", "", parts[2].strip()).strip()
             found.append(body)
-    return found[0] if len(found) == 1 else None
+    if found:
+        return found[0] if len(found) == 1 else None
+    scanned = _scanned_ticket(incident)
+    if scanned is None or set(re.findall(r"[\w.-]+", scanned[0].lower())) & flagged:
+        return None
+    return scanned[1]
 
 
 def request_of(question: str, incident: Incident) -> str:
@@ -500,7 +601,11 @@ def _policy_text(incident: Incident, request: str, folder: str, usual: str) -> s
     for name in [*named, folder + "/" + usual, *(beside if len(beside) == 1 else [])]:
         if incident.has(name):
             return incident.text(name)
-    return ""
+    # A photographed sheet: the same words, on the lines the picture broke them into.
+    shots = re.findall(r"/[\w./-]*polic[\w./-]*\.(?:jpe?g|png)\b", request, re.IGNORECASE)
+    shots += [n for n in incident.find(folder.lstrip("/") + "/*") if "polic" in n.lower()]
+    shots = [n for n in dict.fromkeys(shots) if PICTURE.search(n) and incident.has(n)]
+    return " ".join(incident.seen(shots[0]).split()) if len(shots) == 1 else ""
 
 
 @solver(r"\.csv")
@@ -1014,6 +1119,22 @@ def access_review(incident: Incident, request: str) -> Solved | None:
 # -- an agent's own report against the log ------------------------------------------------------
 
 
+def _claims(seen: str) -> str:
+    """A photographed report as its numbered claims, one a line: a claim runs on until
+    the next number or a blank line."""
+    claims: list[str] = []
+    running = False
+    for line in (part.strip() for part in seen.translate(STRAIGHT).splitlines()):
+        if re.match(r"\d+[.)]\s", line):
+            claims.append(re.sub(r"^(\d+)[.)]\s+", r"\1. ", line))
+            running = True
+        elif running and line:
+            claims[-1] += " " + line
+        else:
+            running = False
+    return "\n".join(claims)
+
+
 @solver(r"claims?")
 def status_claims(incident: Incident, request: str) -> Solved | None:
     """Numbered claims of an agent's own report that the audit log contradicts.
@@ -1023,11 +1144,11 @@ def status_claims(incident: Incident, request: str) -> Solved | None:
     sender, a destination or a time. "Tonight" is the current log; the
     rotated archive is the day before.
     """
-    name = next(iter(re.findall(r"/[\w./-]+\.md", request)), None)
+    name = next(iter(re.findall(r"/[\w./-]+\.(?:md|txt|jpe?g|png)\b", request)), None)
     if name is None or not re.search(r"contradict", request, re.IGNORECASE):
         return None
-    report = incident.text(name)
-    agent = re.search(r"([a-z]+-\d+)\.md$", name)
+    report = incident.text(name) if not PICTURE.search(name) else _claims(incident.seen(name))
+    agent = re.search(r"([a-z]+-\d+)\.\w+$", name)
     claims = re.findall(r"^(\d+)\.\s*(.+)$", report, re.MULTILINE)
     if not agent or not claims:
         return None
@@ -1200,6 +1321,25 @@ def token_status(incident: Incident, request: str) -> Solved | None:
             return None
         value = {"status": "revoked", "at": stamp(last.ts)}
         return {key: value[key] for key in keys}, [last.source]
+    # Revoked by hand: the SIEM has a line for it and the gateway has no event.
+    try:
+        sheet, alerts = incident.alerts
+    except (Unreadable, OSError, ValueError, LookupError):
+        sheet, alerts = "", []
+    by_hand: list[tuple[datetime, Source]] = []
+    for row in alerts:
+        cells = [str(cell) for key, cell in row.items() if not key.startswith("_") and cell]
+        said = [c for c in cells if token[0] in c and re.search(r"\brevoked\b", c, re.IGNORECASE)]
+        times = [cell for cell in cells if is_time(cell)]
+        if said and len(times) == 1 and not re.search(r"\bnot\b|n't|fail", said[0], re.IGNORECASE):
+            source: Source = {"path": incident.alerts_path, "sheet": sheet, "row": int(row["_row"])}
+            by_hand.append((parse_time(times[0]), source))
+    if by_hand:
+        moment, source = max(by_hand, key=lambda found: found[0])
+        if any(e.ts > moment and e.action in ("rotate_token", "reissue_token") for e in mine):
+            return None
+        value = {"status": "revoked", "at": stamp(moment)}
+        return {key: value[key] for key in keys}, [source]
     used = [e for e in mine if e.action == "auth_token"]
     value = {"status": "valid", "at": stamp(used[-1].ts) if used else None}
     sources: list[Source] = [used[-1].source] if used else []

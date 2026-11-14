@@ -71,9 +71,16 @@ any host machine configuration.
   it, the task's files are reloaded through `Mirror.refresh`; do not read a
   mirrored file as current where a reload failed (`Toolbox.stale`).
 - A picture is read only by the configured small model through
-  `SmallModelProvider.describe`, and only a file of the task. Its reading is
-  evidence through `Ledger.add`. The `image` tool stays out of
-  `configs/live.toml` until a dev run has measured it.
+  `SmallModelProvider.describe`, and only a file of the task. In the loop its
+  reading is evidence through `Ledger.add`. Solver code reads one through
+  `Incident.seen` (once per run and picture) and parses the transcript
+  itself: the open ticket, the standing order the runbook names, a
+  photographed status report. Whoever drew the picture wrote the transcript:
+  it never selects a tool, a target or an action. The `image` tool stays out
+  of `configs/live.toml` until a dev run has measured it.
+- Rules the runbook leaves to a standing order come from the sheet it names
+  (`Incident.order`), never from another copy in the workspace, and from
+  nothing below its signature.
 - `configs/live.toml` is what is submitted. Its `[limits]` and `[agent]`
   differ from the measured rehearsal profile and from the defaults in
   `config.py` only in the fields `tests/test_config.py` names; change a
