@@ -16,9 +16,10 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -57,8 +58,22 @@ PASSING = re.compile(r"arena_(unreachable|request_failed|http_(429|5\d\d))")
 RESUBMIT_PAUSES = (5.0, 15.0, 30.0, 60.0, 120.0)
 
 
+# How long one stage of a run waits in all for a platform that is away. A request
+# that hangs takes the client minutes by itself: after one such try the stage moves on.
+AWAY_SECONDS = 150.0
+
+
 class Away(Exception):
     """The platform did not hand out a task's files: the task waits for it."""
+
+
+def _rounds() -> Iterator[float]:
+    """The pauses before another try, for as long as a stage may wait."""
+    begun = time.monotonic()
+    for pause in RESUBMIT_PAUSES:
+        if time.monotonic() - begun + pause > AWAY_SECONDS:
+            return
+        yield pause
 
 
 def defang(value: Any) -> Any:
@@ -350,19 +365,22 @@ def solve_task(
     tracker: Any,
     deadline: float | None = None,
     patient: bool = False,
+    files: bool = True,
 ) -> tuple[dict[str, Any], Answer, str]:
     """One task of a run: the submission body, our answer behind it, the id of its receipts.
 
     A `patient` caller gets `Away` when the platform is away while the files are
-    fetched, and comes back later: an answer handed in cannot be changed.
+    fetched, and comes back later: an answer handed in cannot be changed. Without
+    `files` they are not asked for again.
     """
     task_id, instruction = str(task["task_id"]), str(task.get("instruction") or "")
-    try:
-        root: Path | None = mirror.workspace(run_id, task_id)
-    except (ArenaError, OSError) as exc:
-        if patient and PASSING.fullmatch(str(exc)):
-            raise Away(str(exc)) from exc
-        root = None  # Without a mirror the platform's own read and search serve.
+    root: Path | None = None  # Without a mirror the platform's own read and search serve.
+    if files:
+        try:
+            root = mirror.workspace(run_id, task_id)
+        except (ArenaError, OSError) as exc:
+            if patient and PASSING.fullmatch(str(exc)):
+                raise Away(str(exc)) from exc
     tools = arena_tools(
         arena,
         run_id,
@@ -528,7 +546,7 @@ def run(
     arena = arena or Arena.from_env()
     try:
         specs = None
-        for pause in (*RESUBMIT_PAUSES, None):
+        for pause in chain(_rounds(), [None]):
             try:
                 specs = arena.tools()
                 break
@@ -543,7 +561,7 @@ def run(
             specs = []  # The mirrored files and our own tools still answer.
             say("the platform's tool list is unavailable: its tools are not offered")
         meta = {**_git_meta(), **({"note": note[:500]} if note else {})}
-        for pause in (*RESUBMIT_PAUSES, None):
+        for pause in chain(_rounds(), [None]):
             try:
                 started = arena.start_run(kind, seed if kind == "dev" else None, meta or None)
                 break
@@ -615,7 +633,7 @@ def run(
                 shown = " | ".join(map(str, feedback)) if isinstance(feedback, list) else feedback
                 say(f"  {task_id} L{task.get('level')} {body['outcome']} {cause} {shown}".rstrip())
 
-        def work(task: dict, patient: bool = True) -> None:
+        def work(task: dict, patient: bool = True, files: bool = True) -> None:
             task_id = str(task.get("task_id"))
             # Worked out by an earlier process of this run and never handed in:
             # sent as it is, not paid for again.
@@ -625,7 +643,7 @@ def run(
             body, cause = dict(EMPTY), ""
             try:
                 body, answer, receipt = solve_task(
-                    arena, mirror, run_id, task, specs, config, tracker, deadline, patient
+                    arena, mirror, run_id, task, specs, config, tracker, deadline, patient, files
                 )
                 cause = answer.cause
                 with lock:
@@ -643,7 +661,7 @@ def run(
         with ThreadPoolExecutor(max(1, min(workers, 16))) as pool:
             list(pool.map(work, tasks))
         # Files that did not come: again when the platform is back, in the end without them.
-        for pause in RESUBMIT_PAUSES:
+        for pause in _rounds():
             if not deferred or not in_time(pause):
                 break
             arena.sleep(pause)
@@ -651,9 +669,9 @@ def run(
             with ThreadPoolExecutor(max(1, min(workers, 16))) as pool:
                 list(pool.map(work, late))
         for task in list(deferred):
-            work(task, False)
+            work(task, False, False)
         by_id = {str(task.get("task_id")): task for task in tasks}
-        for pause in RESUBMIT_PAUSES:
+        for pause in _rounds():
             again = [name for name, entry in waiting.items() if PASSING.fullmatch(entry[2])]
             if not again or not in_time(pause):
                 break
@@ -687,7 +705,7 @@ def run(
             # Starting again continues the same run and hands in what is stored.
             finish = False
             summary["finish_skipped"] = "final_run_with_unsubmitted_tasks"
-        for pause in (0.0, *RESUBMIT_PAUSES) if finish else ():
+        for pause in chain([0.0], _rounds()) if finish else ():
             if pause:
                 if not in_time(pause):
                     break

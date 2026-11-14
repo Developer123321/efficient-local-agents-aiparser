@@ -1209,3 +1209,20 @@ def test_a_run_starts_when_the_platform_comes_back(platform, tmp_path, monkeypat
     )
     assert sorted(platform.submitted) == ["t01", "t02"] and platform.finished == 1
     assert summary["submit_errors"] == [] and any("starting the run again" in x for x in lines)
+
+
+def test_a_stage_waits_for_the_platform_only_so_long(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(arena_run.time, "monotonic", lambda: clock[0])
+    # Tries that fail at once: every pause that still fits into the stage's time.
+    waited = []
+    for pause in arena_run._rounds():
+        waited.append(pause)
+        clock[0] += pause
+    assert waited == [5.0, 15.0, 30.0, 60.0]
+    # A try that hangs for the client's own five minutes: none after it.
+    clock[0], waited = 0.0, []
+    for pause in arena_run._rounds():
+        waited.append(pause)
+        clock[0] += pause + 300
+    assert waited == [5.0]
