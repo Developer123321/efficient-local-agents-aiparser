@@ -54,7 +54,11 @@ EMPTY = {"outcome": "OK", "answer": None, "sources": []}
 PASSING = re.compile(r"arena_(unreachable|request_failed|http_(429|5\d\d))")
 # Pauses before failed submissions are sent again at the end of a run: longer
 # than the client's own retries, which span about eight seconds.
-RESUBMIT_PAUSES = (5.0, 15.0)
+RESUBMIT_PAUSES = (5.0, 15.0, 30.0, 60.0, 120.0)
+
+
+class Away(Exception):
+    """The platform did not hand out a task's files: the task waits for it."""
 
 
 def defang(value: Any) -> Any:
@@ -345,12 +349,19 @@ def solve_task(
     config: Config,
     tracker: Any,
     deadline: float | None = None,
+    patient: bool = False,
 ) -> tuple[dict[str, Any], Answer, str]:
-    """One task of a run: the submission body, our answer behind it, the id of its receipts."""
+    """One task of a run: the submission body, our answer behind it, the id of its receipts.
+
+    A `patient` caller gets `Away` when the platform is away while the files are
+    fetched, and comes back later: an answer handed in cannot be changed.
+    """
     task_id, instruction = str(task["task_id"]), str(task.get("instruction") or "")
     try:
         root: Path | None = mirror.workspace(run_id, task_id)
-    except (ArenaError, OSError):
+    except (ArenaError, OSError) as exc:
+        if patient and PASSING.fullmatch(str(exc)):
+            raise Away(str(exc)) from exc
         root = None  # Without a mirror the platform's own read and search serve.
     tools = arena_tools(
         arena,
@@ -516,15 +527,31 @@ def run(
     owned = arena is None
     arena = arena or Arena.from_env()
     try:
-        try:
-            specs = arena.tools()
-        except ArenaError as exc:
-            if exc.status in (401, 403):
-                raise  # The key is wrong: no run can start either.
+        specs = None
+        for pause in (*RESUBMIT_PAUSES, None):
+            try:
+                specs = arena.tools()
+                break
+            except ArenaError as exc:
+                if exc.status in (401, 403):
+                    raise  # The key is wrong: no run can start either.
+                if pause is None or not PASSING.fullmatch(str(exc)):
+                    break
+                say("the platform is away: asking for its tools again")
+                arena.sleep(pause)
+        if specs is None:
             specs = []  # The mirrored files and our own tools still answer.
             say("the platform's tool list is unavailable: its tools are not offered")
         meta = {**_git_meta(), **({"note": note[:500]} if note else {})}
-        started = arena.start_run(kind, seed if kind == "dev" else None, meta or None)
+        for pause in (*RESUBMIT_PAUSES, None):
+            try:
+                started = arena.start_run(kind, seed if kind == "dev" else None, meta or None)
+                break
+            except ArenaError as exc:
+                if pause is None or not PASSING.fullmatch(str(exc)):
+                    raise
+                say("the platform is away: starting the run again")
+                arena.sleep(pause)
         run_id = str(started["run_id"])
         tasks = [task for task in started.get("tasks", []) if isinstance(task, dict)]
         total = len(tasks)
@@ -558,6 +585,11 @@ def run(
         receipts: list[str] = []
         # Per task whose submission has not arrived: the body, the cause, the error.
         waiting: dict[str, tuple[dict, str, str]] = {}
+        # Tasks whose files the platform did not hand out.
+        deferred: list[dict] = []
+
+        def in_time(pause: float) -> bool:
+            return deadline is None or time.monotonic() + pause < deadline
 
         def keep(task: dict, body: dict, cause: str, reply: dict) -> None:
             try:
@@ -583,7 +615,7 @@ def run(
                 shown = " | ".join(map(str, feedback)) if isinstance(feedback, list) else feedback
                 say(f"  {task_id} L{task.get('level')} {body['outcome']} {cause} {shown}".rstrip())
 
-        def work(task: dict) -> None:
+        def work(task: dict, patient: bool = True) -> None:
             task_id = str(task.get("task_id"))
             # Worked out by an earlier process of this run and never handed in:
             # sent as it is, not paid for again.
@@ -593,11 +625,15 @@ def run(
             body, cause = dict(EMPTY), ""
             try:
                 body, answer, receipt = solve_task(
-                    arena, mirror, run_id, task, specs, config, tracker, deadline
+                    arena, mirror, run_id, task, specs, config, tracker, deadline, patient
                 )
                 cause = answer.cause
                 with lock:
                     receipts.append(receipt)
+            except Away:
+                with lock:
+                    deferred.append(task)
+                return
             except Exception:
                 cause = "local_setup_failed"  # The task is still submitted: silence scores 0 too.
             with lock:
@@ -606,10 +642,20 @@ def run(
 
         with ThreadPoolExecutor(max(1, min(workers, 16))) as pool:
             list(pool.map(work, tasks))
+        # Files that did not come: again when the platform is back, in the end without them.
+        for pause in RESUBMIT_PAUSES:
+            if not deferred or not in_time(pause):
+                break
+            arena.sleep(pause)
+            late, deferred[:] = list(deferred), []
+            with ThreadPoolExecutor(max(1, min(workers, 16))) as pool:
+                list(pool.map(work, late))
+        for task in list(deferred):
+            work(task, False)
         by_id = {str(task.get("task_id")): task for task in tasks}
         for pause in RESUBMIT_PAUSES:
             again = [name for name, entry in waiting.items() if PASSING.fullmatch(entry[2])]
-            if not again:
+            if not again or not in_time(pause):
                 break
             arena.sleep(pause)
             for task_id in again:
@@ -641,7 +687,11 @@ def run(
             # Starting again continues the same run and hands in what is stored.
             finish = False
             summary["finish_skipped"] = "final_run_with_unsubmitted_tasks"
-        if finish:
+        for pause in (0.0, *RESUBMIT_PAUSES) if finish else ():
+            if pause:
+                if not in_time(pause):
+                    break
+                arena.sleep(pause)
             try:
                 closed = arena.finish(run_id)
                 (folder / "finish.json").write_text(
@@ -652,8 +702,12 @@ def run(
                     {key: closed[key] for key in (*keys, "final_score") if key in closed}
                 )
                 summary["details"] = str(folder / "finish.json")
+                summary.pop("finish_error", None)
+                break
             except (ArenaError, OSError) as exc:
                 summary["finish_error"] = str(exc)
+                if not PASSING.fullmatch(str(exc)):
+                    break  # Refused, not away: asking again changes nothing.
         return summary
     finally:
         if owned:

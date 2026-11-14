@@ -197,9 +197,13 @@ JPEG files are listed as images, and the model may ask for one:
 - **When it fails.** An invalid picture, no model, a refused or empty reply:
   the model gets an error line and the task goes on.
 
-Whether the gateway accepts pictures, what one costs and how well Gemma 4
-reads them is unmeasured. `hacklab probe --config configs/image-read.toml`
-sends one small white picture to find out the first.
+Measured on 14 November through OpenRouter: a photographed ticket is about
+315 input tokens whatever its size, a full transcript 130 to 270 output
+tokens, $0.0002 a reading; a closed ticket answered in one word costs half.
+Nine transcribed requests equalled the true request word for word except
+backticks. The loop's `image` tool itself is unmeasured;
+`hacklab probe --config configs/image-read.toml` sends one small white
+picture to see whether a gateway accepts pictures at all.
 
 ## What counts as a table
 

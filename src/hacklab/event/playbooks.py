@@ -201,9 +201,11 @@ def open_ticket(incident: Incident) -> str | None:
             continue
         text = incident.text(name)
         parts = text.split("---", 2)
-        usual = len(parts) == 3 and re.search(r"^status:", parts[1], re.MULTILINE)
-        if usual and re.search(r"^status:\s*open\s*$", parts[1], re.MULTILINE):
-            asker = re.search(r"^requested_by:\s*(.+)$", parts[1], re.MULTILINE)
+        usual = len(parts) == 3 and re.search(r"^status:", parts[1], re.MULTILINE | re.I)
+        is_open = r"^status:\s*[\"']?open[\"']?\s*$"
+        if usual and re.search(is_open, parts[1], re.MULTILINE | re.IGNORECASE):
+            by = r"^(?:requested[_ ]by|requester|reporter|opened[_ ]by):\s*(.+)$"
+            asker = re.search(by, parts[1], re.MULTILINE | re.IGNORECASE)
             words = set(re.findall(r"[\w.-]+", asker[1].lower())) if asker else set()
             if words & flagged:
                 return None  # Opened by an account the operator flagged: not an instruction.

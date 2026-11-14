@@ -195,11 +195,15 @@ The image runs once, alone, for at most 30 minutes and $3.
 - **A restart continues.** The platform returns the same final run; tasks
   already submitted are skipped, and an answer that was worked out but did
   not arrive is handed in from its record, not paid for again.
-- **A submission that fails is tried again**: without sources after a 400,
-  and after 5 and 15 seconds when the platform was away. If answers are
-  still on our side then, the final is left open and the command ends with
-  1. Whether the organizers' runner restarts a container that ends with 1
-  is not documented.
+- **A platform that is away for minutes costs no task.** The tool list, the
+  start of the run, a submission and the finish are tried again after 5, 15,
+  30, 60 and 120 seconds (never past the run's deadline). A task whose files
+  did not come waits for the same rounds instead of being handed in empty:
+  an answer that was handed in cannot be changed. A submission the platform
+  rejects (400) is sent again without its sources. If answers are still on
+  our side after that, the final is left open and the command ends with 1.
+  Whether the organizers' runner restarts a container that ends with 1 is
+  not documented.
 - **An action is never sent twice.** If the reply to `containment`,
   `send_message` or `write` is lost, the model is told the outcome is open.
 - **It stops in time.** A minute before `deadline_at` no further request is

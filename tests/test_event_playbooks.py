@@ -512,6 +512,9 @@ def test_a_ticket_opened_by_a_flagged_account_is_not_an_instruction(root):
     ticket = "---\nticket: T-1\nstatus: open\nrequested_by: {who}\n---\n\n# T-1\n\n" + question
     write(root, "tickets/T-1.md", ticket.format(who="Ada Berg (incident commander)"))
     assert solve(root, "Work the open ticket in /tickets/.")[0].value == ["RQ-1", "RQ-6"]
+    shouted = ticket.format(who="Ada Berg").replace("status: open", 'Status: "OPEN"')
+    write(root, "tickets/T-1.md", shouted)
+    assert solve(root, "Work the open ticket in /tickets/.")[0].value == ["RQ-1", "RQ-6"]
     write(root, "tickets/T-1.md", ticket.format(who="relay-03 (agent)"))
     assert solve(root, "Work the open ticket in /tickets/.")[0] is None
 

@@ -772,7 +772,7 @@ def test_submissions_that_did_not_arrive_are_sent_again_and_kept_for_a_restart(
     common = {"directory": tmp_path / "arena", "say": quiet, "workers": 1}
     # The gateway is away for longer than the client's own retries: t02 arrives in the
     # round after the tasks, t01 does not arrive at all.
-    platform.faults = [("t02/submit", 502)] * 5 + [("t01/submit", 503)] * 20
+    platform.faults = [("t02/submit", 502)] * 5 + [("t01/submit", 503)] * 80
     part = arena_run.run(config, tracker, arena=connect(platform), **common)
     assert sorted(platform.submitted) == ["t02"] and len(seen) == 2
     assert part["submit_errors"] == part["incomplete"] == ["t01"]
@@ -798,7 +798,7 @@ def test_the_command_ends_with_1_when_answers_are_still_to_be_handed_in(
     monkeypatch.setenv("HACKLAB_ARENA_DIR", str(tmp_path / "arena"))
     arguments = ["hacklab", "--db", str(tmp_path / "t.sqlite"), "arena", "run"]
     arguments += ["--config", str(profile)]
-    platform.faults = [("t02/submit", httpx.ConnectError("away"))] * 20
+    platform.faults = [("t02/submit", httpx.ConnectError("away"))] * 80
     monkeypatch.setattr("sys.argv", [*arguments, "--match", "LOGINS"])
     assert main() == 1
     assert '"incomplete": [\n    "t02"' in capsys.readouterr().out and not platform.submitted
@@ -849,7 +849,7 @@ def test_a_key_at_its_limit_and_a_missing_tool_list_still_submit_every_task(
 
     config, _ = scripted(monkeypatch, {})
     monkeypatch.setattr(agent, "make_providers", providers)
-    platform.faults = [("/tools", 500)] * 5
+    platform.faults = [("/tools", 500)] * 80  # Away for longer than the run waits for it.
     lines = []
     summary = arena_run.run(
         config,
@@ -862,8 +862,9 @@ def test_a_key_at_its_limit_and_a_missing_tool_list_still_submit_every_task(
     # One refused request per task and no retry: a 403 does not pass.
     assert len(requests) == 2 and sorted(platform.submitted) == ["t01", "t02"]
     assert platform.finished == 1 and summary["submit_errors"] == []
-    assert "tool list is unavailable" in lines[0]
-    assert all("provider_http_403" in line for line in lines[2:])
+    assert any("tool list is unavailable" in line for line in lines)
+    answered = [line for line in lines if line.startswith("  t0")]
+    assert len(answered) == 2 and all("provider_http_403" in line for line in answered)
     # A key the platform refuses is not a missing tool list: nothing can start.
     wrong = Arena("http://arena.test", "arena_other", client=platform.client())
     with pytest.raises(ArenaError, match="^arena_http_401$"):
@@ -1170,3 +1171,41 @@ def test_a_picture_is_read_by_the_model_and_its_text_stays_evidence(tmp_path, mo
     assert summary["local_calls"] == summary["local_reported_cost_calls"] == 3
     assert summary["local_spent_usd"] == pytest.approx(0.0012)
     assert b"TOKEN BOARD" not in (tmp_path / "t.sqlite").read_bytes()
+
+
+def test_a_platform_that_is_away_for_a_while_costs_no_task(platform, tmp_path, monkeypatch):
+    config, seen = scripted(monkeypatch, {"t01": [final("x", [])], "t02": [final(2, [])]})
+    # Away when the run starts, when the files of t01 are fetched and when the run is ended:
+    # longer each time than the client's own retries.
+    platform.faults = [("/tools", 502)] * 6 + [("/manifest", 503)] * 12 + [("/finish", 500)] * 6
+    lines = []
+    summary = arena_run.run(
+        config,
+        Tracker(tmp_path / "t.sqlite"),
+        workers=1,
+        directory=tmp_path / "arena",
+        arena=connect(platform),
+        say=lines.append,
+    )
+    # Both tasks were answered from their files, none was handed in empty, the run is ended.
+    assert platform.submitted["t01"]["answer"] == "x" and platform.submitted["t02"]["answer"] == 2
+    assert summary["submit_errors"] == [] and platform.finished == 1
+    assert "finish_error" not in summary and summary["status"] == "finished"
+    assert not any("tools are not offered" in line for line in lines)
+
+
+def test_a_run_starts_when_the_platform_comes_back(platform, tmp_path, monkeypatch):
+    config, _ = scripted(monkeypatch, {"t01": [final("x", [])], "t02": [final(2, [])]})
+    # Away for the whole wait for the tool list, and still when the run is started.
+    platform.fail = [503] * 38
+    lines = []
+    summary = arena_run.run(
+        config,
+        Tracker(tmp_path / "t.sqlite"),
+        workers=1,
+        directory=tmp_path / "arena",
+        arena=connect(platform),
+        say=lines.append,
+    )
+    assert sorted(platform.submitted) == ["t01", "t02"] and platform.finished == 1
+    assert summary["submit_errors"] == [] and any("starting the run again" in x for x in lines)
