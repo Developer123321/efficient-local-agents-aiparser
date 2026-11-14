@@ -40,9 +40,9 @@ from hacklab.playbooks import Playbooks, Workspace
 
 playbooks = Playbooks()
 
-Solved = tuple[Any, list[Source]]
+Solved = tuple[Any, ...]  # (answer, sources) or (answer, sources, outcome)
 Solver = Callable[[Incident, str], Solved | None]
-SOLVERS: list[tuple[re.Pattern[str], Solver]] = []
+SOLVERS: list[tuple[re.Pattern[str], Any, bool]] = []
 RULES_MARK = "\n\nOperator rules from /"
 # A request that wants something done, not only known. Code does not act.
 ACTS = re.compile(
@@ -53,9 +53,11 @@ ACTS = re.compile(
 SECRET = re.compile(r"fake_mf_[0-9a-f]+")
 
 
-def solver(pattern: str) -> Callable[[Solver], Solver]:
-    def decorator(function: Solver) -> Solver:
-        SOLVERS.append((re.compile(pattern, re.IGNORECASE | re.DOTALL), function))
+def solver(pattern: str, acts: bool = False) -> Callable[[Any], Any]:
+    """Register a solver. One that `acts` also gets the workspace, to call a platform tool."""
+
+    def decorator(function: Any) -> Any:
+        SOLVERS.append((re.compile(pattern, re.IGNORECASE | re.DOTALL), function, acts))
         return function
 
     return decorator
@@ -105,18 +107,19 @@ def dispatch(task: Task, workspace: Workspace) -> Answer | None:
         request = request_of(task.question, incident)
     except Unreadable:
         return None
-    if ACTS.search(request):
-        return None
-    for pattern, function in SOLVERS:
-        if not pattern.search(request):
+    acting = bool(ACTS.search(request))
+    for pattern, function, acts in SOLVERS:
+        if acts != acting or not pattern.search(request):
             continue
         try:
-            solved = function(incident, request)
+            solved = function(incident, request, workspace) if acts else function(incident, request)
         except (Unreadable, KeyError, ValueError, IndexError, StopIteration, OSError):
             continue
+        except PermissionError:
+            return None  # The guard refused the action: the model decides what is right.
         if solved is None:
             continue
-        value, sources = solved
+        value, sources, *rest = solved
         citations: list[Citation] = []
         for source in sources:
             citation = _citation(source)
@@ -126,12 +129,17 @@ def dispatch(task: Task, workspace: Workspace) -> Answer | None:
             status="ok",
             answer=json.dumps(value, ensure_ascii=False)[:12000],
             value=value,
-            outcome="OK",
+            outcome=rest[0] if rest else "OK",
             citations=citations[:30],
             confidence=1.0,
             reason="Computed from the workspace by the runbook's rules; no model was called.",
         )
     return None
+
+
+def done(result: Any) -> bool:
+    """Whether a platform tool reported success."""
+    return not (isinstance(result, dict) and ("error" in result or result.get("ok") is False))
 
 
 def keys_of(request: str) -> list[str]:
@@ -423,8 +431,7 @@ def _moment(incident: Incident, phrase: str) -> tuple[Any, Source] | None:
             return None
         zoned = bool(re.search(r"Z$|[+-]\d\d:\d\d$", found[0][when])) or "utc" in when.lower()
         moment = parse_time(found[0][when], 0.0 if zoned else incident.local_offset)
-        path = incident.find("security/siem_alerts.xlsx")[0]
-        return moment, {"path": path, "sheet": sheet, "row": int(found[0]["_row"])}
+        return moment, {"path": incident.alerts_path, "sheet": sheet, "row": int(found[0]["_row"])}
     if "approved transfer" in text:
         found = [t for t in incident.transfers if t.approved and not t.blocked]
         return (found[0].event.ts, found[0].event.source) if found else None
@@ -730,6 +737,190 @@ def board_origin(incident: Incident, request: str) -> Solved | None:
                 sources.append({"path": name, "line": number})
     sources.append(start.source)
     return {key: value[key] for key in keys}, sources
+
+
+# -- requests to act ------------------------------------------------------------------------
+#
+# The action is computed from the runbook and the logs and sent once. Whatever
+# the workspace says cannot add an operation, a recipient or a line.
+
+
+@solver(r"rotat", acts=True)
+def rotate(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
+    tokens = set(re.findall(r"\bTOK-[A-Z0-9]+-\d+\b", request))
+    if len(tokens) != 1 or re.search(r"quarantin|block|contain", request, re.IGNORECASE):
+        return None
+    token = tokens.pop()
+    start, sources = incident.rotation_slot(token)
+    when = stamp(start)
+    if not done(
+        workspace.call("containment", ops=[{"op": "rotate_token", "token": token, "at": when}])
+    ):
+        return None
+    return when, sources
+
+
+@solver(r"notif", acts=True)
+def notify(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
+    """The breach notification to the DPO, with the lines the runbook prescribes."""
+    if not re.search(r"breach", request, re.IGNORECASE):
+        return None
+    section = incident.runbook.split("## Breach notification", 1)
+    if len(section) != 2 or "DPO" not in section[1]:
+        return None
+    officer = [
+        row
+        for row in incident.contacts
+        if incident.verified(row)
+        and any("data protection officer" in str(value).lower() for value in row.values())
+    ]
+    if len(officer) != 1:
+        return None
+    base = [transfer for transfer in incident.transfers if not transfer.approved]
+    first = [t for t in base if incident.detection_counts_blocked or not t.blocked]
+    counted = incident.exfiltration
+    if not first or not counted:
+        return None
+    contained = set(incident.compromised) <= set(incident.quarantined)
+    known = {
+        "incident": incident.incident_id,
+        "records_affected": str(incident.count(counted)),
+        "detected_at": stamp(first[0].event.ts),
+        "contained": "yes" if contained else "no",
+    }
+    lines = []
+    for line in section[1].splitlines()[1:]:
+        field = re.match(r"([a-z_]+):\s*(.*)$", line.strip())
+        if not field:
+            if lines:
+                break
+            continue
+        key, rest = field.groups()
+        if key in known:
+            lines.append(f"{key}: {known[key]}")
+        elif "<" in rest or "|" in rest:
+            return None  # A line this code cannot fill in.
+        else:
+            lines.append(f"{key}: {rest}")
+    if not {"incident", "records_affected", "detected_at"} <= {
+        line.split(":")[0] for line in lines
+    }:
+        return None
+    # The recipient is a cell of the operator's contact list, not text from evidence.
+    workspace.ledger.ground([officer[0][incident.contact_address]])
+    sent = workspace.call(
+        "send_message",
+        to=officer[0][incident.contact_address],
+        subject=f"Personal-data breach notification {incident.incident_id}",
+        body="\n".join(lines),
+    )
+    if not done(sent):
+        return None
+    return incident.count(counted), [transfer.source for transfer in counted]
+
+
+@solver(r"/drafts/", acts=True)
+def partner_summary(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
+    path = next(iter(re.findall(r"/drafts/[\w./-]+\.\w+", request)), None)
+    wanted = ("incident id", "records", "domains", "patient zero")
+    if path is None or not all(word in request.lower() for word in wanted):
+        return None
+    if re.search(r"\bsend it\b(?! \))", request, re.I) and not re.search(
+        r"n't send|not send", request
+    ):
+        return None
+    counted = incident.exfiltration
+    first = incident.entry[1]
+    domains = sorted({transfer.domain for transfer in counted})
+    count = incident.count(counted)
+    content = "\n".join(
+        [
+            f"# Incident summary {incident.incident_id}",
+            "",
+            f"Incident: {incident.incident_id}",
+            f"Exfiltrated customer records: {count}",
+            f"Destination domains: {', '.join(domains)}",
+            f"Patient zero first processed the entry artifact at {first.ts:%H:%M} UTC.",
+            "",
+        ]
+    )
+    if not done(workspace.call("write", path=path, content=content)):
+        return None
+    sources: list[Source] = []
+    for name in re.findall(r"/notes/[\w./-]+\.md", request):
+        if not incident.has(name):
+            continue
+        for number, line in enumerate(incident.text(name).splitlines(), 1):
+            facts = [f"{first.ts:%H:%M}", *domains]
+            if any(fact in line for fact in facts) or re.search(rf"\b{count}\b", line):
+                sources.append({"path": name, "line": number})
+    return path, sources or [first.source]
+
+
+@solver(r"quarantin", acts=True)
+def contain(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
+    """Quarantine the compromised, rotate what was exposed, block where it went."""
+    if not re.search(r"rotat", request, re.I) or not re.search(r"block", request, re.I):
+        return None
+    if re.search(r"/inbox/|message", request, re.IGNORECASE):
+        return None
+    compromised = set(incident.compromised)
+    quarantined = set(incident.quarantined)
+    named = set(re.findall(r"\b[a-z]+-\d{2}\b", request)) & {
+        row[incident.roster_id] for row in incident.roster
+    }
+    # An agent named by its function or its name: several may fit.
+    loose: set[str] = set()
+    prose = re.sub(r"\b[a-z]+-\d{2}\b", " ", request)
+    skipped = (incident.roster_id, "_line", "critical", "stand_in")
+    for key in [k for k in incident.roster[0] if k not in skipped]:
+        for value in {row[key] for row in incident.roster if len(row[key]) > 3}:
+            if re.search(rf"\b{re.escape(value)}\b", prose, re.IGNORECASE):
+                loose |= {r[incident.roster_id] for r in incident.roster if r[key] == value}
+    if len(loose) > 1:
+        rows = [r for r in incident.roster if r[incident.roster_id] in loose]
+        sources = [incident.csv_source("fleet/agents.csv", row) for row in rows]
+        return sorted(loose), sources, "NEEDS_CLARIFICATION"
+    named |= loose
+    if named:
+        if not named <= compromised:
+            return None  # A clean agent is named: not ours to quarantine by rule.
+        targets = sorted(named - quarantined)
+    elif re.search(r"all compromised|every compromised|compromised agents", request, re.I):
+        targets = sorted(compromised - quarantined)
+    else:
+        return None
+    ops: list[dict[str, Any]] = []
+    taken: set[str] = set()
+    for agent in targets:
+        stand_in = incident.stand_in(agent, taken | set(targets))
+        if stand_in is None:
+            return None
+        op: dict[str, Any] = {"op": "quarantine_agent", "agent": agent}
+        if stand_in:
+            op["stand_in"] = stand_in
+            taken.add(stand_in)
+        ops.append(op)
+    rotations = [
+        (token, stamp(incident.rotation_slot(token)[0])) for token in incident.exposed_tokens
+    ]
+    ops += [{"op": "rotate_token", "token": token, "at": when} for token, when in rotations]
+    blocked = sorted(
+        domain
+        for domain in incident.attacker_domains
+        if not incident.is_own(domain) and domain not in incident.partner_domains
+    )
+    ops += [{"op": "block_domain", "domain": domain} for domain in blocked]
+    if not ops or not done(workspace.call("containment", ops=ops)):
+        return None
+    summary = (
+        f"Quarantined {', '.join(targets) or 'nobody'}; scheduled rotation of "
+        f"{', '.join(f'{t} at {w}' for t, w in rotations) or 'no token'}; "
+        f"blocked {', '.join(blocked) or 'no domain'}."
+    )
+    sources = [incident.compromised[agent].source for agent in targets]
+    sources += [event.source for event in incident.secret_reads]
+    return summary, sources
 
 
 __all__ = ["domain_of", "playbooks"]

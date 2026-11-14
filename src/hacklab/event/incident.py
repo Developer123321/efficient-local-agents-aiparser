@@ -212,33 +212,78 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         raise Unreadable(path.name) from exc
 
 
-def read_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
-    """The first sheet of a workbook as rows with `_row`; the header is found by its width."""
-    from openpyxl import load_workbook
+def _ods_grid(path: Path) -> tuple[str, list[tuple[int, list[str]]]]:
+    """The first sheet of an OpenDocument spreadsheet: its name and (row number, cells)."""
+    import zipfile
+    from xml.etree import ElementTree
 
+    table_ns = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
+    text_ns = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
+    with zipfile.ZipFile(path) as archive:
+        root = ElementTree.fromstring(archive.read("content.xml"))
+    sheet = next(root.iter(table_ns + "table"), None)
+    if sheet is None:
+        raise Unreadable(path.name)
+    grid: list[tuple[int, list[str]]] = []
+    number = 0
+    for row in sheet.iter(table_ns + "table-row"):
+        repeat = int(row.get(table_ns + "number-rows-repeated", "1"))
+        cells: list[str] = []
+        for cell in row:
+            if not cell.tag.endswith("table-cell"):
+                continue
+            # Direct paragraphs only: a cell note is a comment, not content.
+            text = " ".join("".join(p.itertext()) for p in cell.findall(text_ns + "p")).strip()
+            columns = int(cell.get(table_ns + "number-columns-repeated", "1"))
+            cells += [text] * (columns if text else min(columns, 64))
+        if not any(cells):
+            number += repeat
+            continue
+        for _ in range(min(repeat, 1000)):
+            number += 1
+            grid.append((number, cells))
+    return str(sheet.get(table_ns + "name") or ""), grid
+
+
+def read_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
+    """The first sheet of a workbook (xlsx or ods) as rows with `_row`.
+
+    Title lines above the table fill one cell and the header fills most, so
+    the header is found by its width; hidden rows are rows like any other.
+    """
     try:
-        book = load_workbook(path, read_only=False, data_only=True)
+        if path.suffix.lower() == ".ods":
+            title, grid = _ods_grid(path)
+        else:
+            from openpyxl import load_workbook
+
+            sheet = load_workbook(path, read_only=False, data_only=True).worksheets[0]
+            title = sheet.title
+            grid = [
+                (number, ["" if cell is None else str(cell).strip() for cell in cells])
+                for number, cells in enumerate(sheet.iter_rows(values_only=True), 1)
+            ]
+    except Unreadable:
+        raise
     except Exception as exc:
         raise Unreadable(path.name) from exc
-    sheet = book.worksheets[0]
     header: list[str] | None = None
     rows: list[dict[str, str]] = []
-    for number, cells in enumerate(sheet.iter_rows(values_only=True), 1):
-        values = ["" if cell is None else str(cell).strip() for cell in cells]
+    for number, values in grid:
         filled = sum(1 for value in values if value)
         if header is None:
-            # Title lines above the table fill one cell; the header fills most.
             if filled >= max(3, len(values) // 2):
                 header = values
             continue
-        if filled < max(2, len(header) // 2):
+        if filled < max(2, len([name for name in header if name]) // 2):
             continue  # A blank line or a totals line below the table.
         row = dict(zip(header, values, strict=False))
+        row.pop("", None)
         row["_row"] = str(number)
         rows.append(row)
     if header is None:
         raise Unreadable(path.name)
-    return sheet.title, rows
+    return title, rows
 
 
 @dataclass
@@ -495,10 +540,14 @@ class Incident:
     @cached_property
     def alerts(self) -> tuple[str, list[dict[str, str]]]:
         """The SIEM's alerts: the sheet name and its rows."""
-        names = self.find("security/siem_alerts.xlsx")
+        names = [n for n in self.find("security/siem_alerts.*") if n.endswith((".xlsx", ".ods"))]
         if not names:
             raise Unreadable("no SIEM alerts")
         return read_sheet(self.root / names[0].lstrip("/"))
+
+    @cached_property
+    def alerts_path(self) -> str:
+        return next(n for n in self.find("security/siem_alerts.*") if n.endswith((".xlsx", ".ods")))
 
     @cached_property
     def contacts(self) -> list[dict[str, str]]:
@@ -678,7 +727,7 @@ class Incident:
             if name.endswith(".csv"):
                 rows = self.table(name)
                 sources = [self.csv_source(name, row) for row in rows]
-            elif name.endswith(".xlsx"):
+            elif name.endswith((".xlsx", ".ods")):
                 sheet, rows = read_sheet(self.root / name.lstrip("/"))
                 sources = [{"path": name, "sheet": sheet, "row": int(r["_row"])} for r in rows]
             else:
@@ -856,3 +905,96 @@ class Incident:
             if {"private_data", "untrusted_input", "outbound"} <= reached:
                 found.add(agent)
         return found
+
+    # -- containment -----------------------------------------------------------------
+
+    @cached_property
+    def tokens(self) -> list[dict[str, str]]:
+        """The token inventory with `id`, `svc`, `owner` and `consumers` columns."""
+        agents = {row[self.roster_id] for row in self.roster}
+        return canon(
+            self.table("fleet/tokens.csv"),
+            id=(("secret_id", "token_id", "token"), {"first": True}),
+            svc=(("svc", "service"), {}),
+            owner=(("owner_agent", "owner"), {"where": lambda value: value in agents}),
+            consumers=(
+                ("consumer_services", "used_by", "consumers"),
+                {"whole": lambda values: any(";" in value for value in values)},
+            ),
+        )
+
+    @cached_property
+    def calendar(self) -> list[dict[str, Any]]:
+        """Active entries of the change calendar with UTC `start` and `end`."""
+        rows = canon(
+            self.table("ops/change_calendar.csv"),
+            id=(("entry_id", "id"), {"first": True}),
+            svc=(("svc", "service"), {}),
+            kind=(("kind", "type"), {"whole": lambda values: "freeze" in values}),
+            start=(("start", "from", "begin"), {}),
+            end=(("end", "to", "until"), {}),
+            state=(
+                ("status", "outcome", "state"),
+                {"whole": lambda values: "active" in values and len(set(values)) < 6},
+            ),
+        )
+        found = []
+        for row in rows:
+            if row["state"].lower() != "active":
+                continue
+            entry: dict[str, Any] = dict(row)
+            for key in ("start", "end"):
+                zoned = bool(re.search(r"Z$|[+-]\d\d:\d\d$", row[key]))
+                entry[key] = parse_time(row[key], 0.0 if zoned else self.local_offset)
+            found.append(entry)
+        return found
+
+    def rotation_slot(self, token: str) -> tuple[datetime, list[Source]]:
+        """The first full hour at which a token may be rotated, and the rows that decide it."""
+        line = self.rule("A rotation takes")
+        if not re.search(r"one hour", line) or not re.search(r"full hour", line):
+            raise Unreadable("rotation rule")
+        row = next((r for r in self.tokens if r["id"] == token), None)
+        if row is None:
+            raise Unreadable("token not in inventory")
+        services = {row["svc"]}
+        if re.search(r"consum", line, re.IGNORECASE):
+            services |= {name.strip() for name in row["consumers"].split(";") if name.strip()}
+        buffer = re.search(r"(\d+)-minute buffer", line)
+        margin = timedelta(minutes=int(buffer[1])) if buffer else timedelta(0)
+        binding = [entry for entry in self.calendar if entry["svc"] in services]
+        start = self.now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        last: dict[str, Any] | None = None
+        for _ in range(24 * 60):
+            hit = None
+            for entry in binding:
+                pad = margin if entry["kind"] == "freeze" else timedelta(0)
+                if start < entry["end"] + pad and start + timedelta(hours=1) > entry["start"] - pad:
+                    hit = entry
+                    break
+            if hit is None:
+                sources = [self.csv_source("fleet/tokens.csv", row)]
+                if last is not None:
+                    sources.append(self.csv_source("ops/change_calendar.csv", last))
+                return start, sources
+            last = hit
+            start += timedelta(hours=1)
+        raise Unreadable("no rotation slot")
+
+    @cached_property
+    def exposed_tokens(self) -> list[str]:
+        """Tokens read within an attack trace, in the order they were read."""
+        return list(dict.fromkeys(event.target for event in self.secret_reads))
+
+    def stand_in(self, agent: str, taken: set[str]) -> str | None:
+        """A designated stand-in for a critical agent; "" if the agent needs none."""
+        row = next((r for r in self.roster if r[self.roster_id] == agent), None)
+        if row is None or "critical" not in row or "stand_in" not in row:
+            raise Unreadable("roster columns")
+        if not row["critical"]:
+            return ""
+        unusable = set(self.compromised) | set(self.quarantined) | taken
+        for name in (part.strip() for part in row["stand_in"].split(";")):
+            if name and name not in unusable:
+                return name
+        return None
