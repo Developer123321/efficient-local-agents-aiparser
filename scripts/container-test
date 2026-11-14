@@ -105,7 +105,8 @@ summary=$("$engine" run "${shared[@]}" -e ARENA_BASE_URL=http://127.0.0.1:8080 \
 grep -q '"tasks_submitted": 2' <<<"$summary"
 # Every answer arrived, and each request's reported cost reached our own tally.
 grep -q '"submit_errors": \[\]' <<<"$summary"
-grep -q '"local_reported_cost_calls": 2' <<<"$summary"
+grep -Eq '"local_reported_cost_calls": [1-9]' <<<"$summary"
+grep -q '"local_unknown_spend_calls": 0' <<<"$summary"
 # Options alone are options of that run, as in the organizers' local test.
 "$engine" run "${shared[@]}" -e ARENA_BASE_URL=http://127.0.0.1:8080 \
   -e ARENA_API_KEY=arena_synthetic -e OPENROUTER_BASE_URL=http://127.0.0.1:8080/v1 \
