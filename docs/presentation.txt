@@ -1,0 +1,35 @@
+Hello everyone.
+
+Our project tackles The MuggingFace Incident: a hijacked swarm of agents attacking a model hub. Our agent plays the night shift. It investigates what happened, identifies compromised agents and exposed data, and carries out authorized containment actions.
+
+The challenge combines accuracy, cost, and security. The evidence includes logs, messages, spreadsheets, documents, and scanned pages. Some of that evidence contains instructions planted by attackers. An agent has to understand those files while keeping the attacker's instructions from controlling its behavior.
+
+Our main design decision was to give code and the language model different jobs.
+
+Code reads structured data, follows the attack timeline, counts transferred records, checks permissions, and validates actions. The model handles small language tasks: interpreting a message, reading a scanned page, or matching an unfamiliar question to a known task type.
+
+We use Gemma four, the thirty-one-billion-parameter model provided by the organizers. In our submitted configuration, the other optional models remain disabled because we had no event-run measurement showing that they improved the result enough to justify their cost.
+
+We arrived at this architecture through measurement. Our first real task using the general model loop took twelve steps, cost about four US cents, and reached its step limit without producing an answer. Repeatedly sending a large workspace to the model was expensive and unreliable.
+
+We then built playbooks: small programs for recurring investigation tasks. Each playbook checks the files, columns, and rules it needs. Rules are read from the current workspace, because different scenarios can count duplicates, blocked transfers, or approvals differently.
+
+Where language understanding is necessary, the model returns a constrained decision. Code checks that decision before using it. The general tool-calling loop is disabled in the submitted profile. The model does not receive tools to operate directly.
+
+Here are the measured results.
+
+Our best complete development run earned full credit on all forty-eight tasks. It made twelve model requests and cost approximately a third of one US cent for the entire run. The platform reported an accuracy score of one hundred percent and a combined score of one point zero.
+
+The first demo submission also passed the organizers' container check. It submitted its single test task successfully and received full credit. That established that the packaged agent could build, reach the gateway, and submit an answer in their environment.
+
+A later run on another previously unseen scenario scored ninety-eight point eight percent, at a cost of roughly a quarter of one US cent. Forty-five tasks earned full credit, and three earned partial credit.
+
+The latest documented run exposed a substantial gap. Its accuracy fell to sixty-six point one percent. Sixteen tasks went unanswered because their tickets were scanned pictures, while our ticket discovery expected text files. We already supported some scanned indicator pages, but that support did not cover the ticket workflow. The journal records ticket transcription as the proposed repair; its benefit still needs a measured run.
+
+Security also shaped the design. Messages can go only to verified recipients. Drafts stay within the permitted directory. Outgoing links are made non-clickable, and secret values are checked before an answer leaves. After an action, the agent reloads the task's files so later decisions use current state.
+
+Our results show both the value and the limits of this approach. Carefully scoped model decisions, backed by code, delivered a perfect development run at very low model cost. A change in document format then revealed how much end-to-end coverage still matters. These are development results, and performance on the secret final scenario remains unmeasured.
+
+The lesson we take forward is to spend model reasoning where language understanding adds value, and make every resulting action pass explicit checks in code. Then measure the whole workflow on fresh scenarios, including the formats that challenge its assumptions.
+
+Thank you.
