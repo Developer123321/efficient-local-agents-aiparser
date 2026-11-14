@@ -35,6 +35,7 @@ from hacklab.event.incident import (
     column,
     decodings,
     domain_of,
+    inert,
     is_time,
     parse_time,
     stamp,
@@ -121,7 +122,7 @@ def _citation(source: Source) -> Citation:
 
 @playbooks.register(r".")
 def dispatch(task: Task, workspace: Workspace) -> Answer | None:
-    incident = Incident(workspace.documents.root, workspace.model)
+    incident = Incident(workspace.documents.root, workspace.model, workspace.documents.units)
     try:
         request = request_of(task.question, incident)
     except Unreadable:
@@ -808,16 +809,13 @@ def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> S
 # -- MCP servers --------------------------------------------------------------------------
 
 
-def _descriptions(node: Any, key: str = "") -> list[str]:
-    """Every description in a manifest: the server's, each tool's, each parameter's."""
+def _descriptions(node: Any) -> list[str]:
+    """Every text in a manifest: descriptions, and any other string a reader would see."""
     if isinstance(node, dict):
-        found = []
-        for name, value in node.items():
-            found += _descriptions(value, str(name))
-        return found
+        return [text for value in node.values() for text in _descriptions(value)]
     if isinstance(node, list):
-        return [text for item in node for text in _descriptions(item, key)]
-    return [node] if isinstance(node, str) and key == "description" else []
+        return [text for item in node for text in _descriptions(item)]
+    return [node] if isinstance(node, str) else []
 
 
 @solver(r"\bMCP\b")
@@ -991,19 +989,28 @@ def status_claims(incident: Incident, request: str) -> Solved | None:
     wrong: list[int] = []
     sources: list[Source] = []
     for number, claim in claims:
-        carried = re.match(r"I carried out the request ([\w-]+) delegated to me", claim)
-        if carried:
+        handled = re.match(
+            r"I (.{3,40}?) the (?:request|task|work|job) ([\w-]+) delegated to me", claim
+        )
+        if handled:
+            said_no = re.search(
+                r"declin|refus|reject|ignor|did not|didn't|never|not carr|turned down", handled[1]
+            )
+            sender = handled[2]
             mine = [e for e in incident.events if e.agent == who and "/audit/" in e.path]
             refused = [
                 e
                 for e in mine
-                if e.target == carried[1] and (e.action == "declined" or e.status == "declined")
+                if e.target == sender and (e.action == "declined" or e.status == "declined")
             ]
-            asked = [e for e in incident.events if kinds["asked"](e) and e.agent == carried[1]]
+            asked = [e for e in incident.events if kinds["asked"](e) and e.agent == sender]
             if not refused and not asked:
                 return None  # Nothing was delegated: what the claim means is not ours to say.
-            done_it = [e for e in mine if e.action == "delegate_result" and e.target == carried[1]]
-            proof: list[Any] = refused[:1] or ([] if done_it else [None])
+            done_it = [e for e in mine if e.action == "delegate_result" and e.target == sender]
+            if said_no:
+                proof: list[Any] = done_it[:1]  # It says it refused; the log shows the result.
+            else:
+                proof = refused[:1] or ([] if done_it else [None])
         else:
             if re.search(r"delegat", claim, re.IGNORECASE):
                 kind = "asked" if re.search(r"receiv|got|was asked", claim, re.I) else "granted"
@@ -1029,6 +1036,12 @@ def status_claims(incident: Incident, request: str) -> Solved | None:
                 r"\ball\b.* (?:went|were sent|go) to ([a-z0-9.-]+\.[a-z]+)", claim, re.I
             )
             denies = re.search(r"\b(no|not|never|none|didn't|nothing)\b", claim, re.IGNORECASE)
+            amount = re.search(
+                r"(?<![\w:.-])(\d[\d,]*)\s+(?:[a-z-]+\s+){0,2}?"
+                r"(records?|transfers?|secrets?|requests?|delegations?|times)\b",
+                claim,
+                re.IGNORECASE,
+            )
             if edge and moment:
                 ends = tonight[:1] if edge[1].lower() in ("first", "earliest") else tonight[-1:]
                 same = ends and ends[0].ts.replace(second=0) == moment.replace(second=0)
@@ -1037,6 +1050,12 @@ def status_claims(incident: Incident, request: str) -> Solved | None:
                 proof = [e for e in tonight if domain_of(e.target) != only[1].lower()][:1]
                 if proof:
                     proof += [e for e in earlier if domain_of(e.target) != only[1].lower()][-3:]
+            elif amount:
+                if moment and re.search(r"\bafter\b|\bsince\b", claim, re.IGNORECASE):
+                    tonight = [e for e in tonight if e.ts > moment]
+                elif moment and re.search(r"\bbefore\b|\buntil\b", claim, re.IGNORECASE):
+                    tonight = [e for e in tonight if e.ts < moment]
+                proof = [] if _holds(incident, claim, amount, tonight) else (tonight[:10] or [None])
             else:
                 elsewhen: list[Any] = [None]
                 if moment and re.search(r"\bafter\b|\bsince\b", claim, re.IGNORECASE):
@@ -1069,6 +1088,42 @@ def status_claims(incident: Incident, request: str) -> Solved | None:
     return sorted(wrong), sources
 
 
+def _holds(incident: Incident, claim: str, amount: re.Match[str], events: list[Any]) -> bool:
+    """Whether a stated number fits what the log holds, under any reading of it.
+
+    A count of records may mean each record once or each time it was sent,
+    with or without the attempts that were blocked; a claim is contradicted
+    only when no reading gives its number.
+    """
+    stated = int(amount[1].replace(",", ""))
+    done = [e for e in events if e.status == "ok"]
+    if amount[2].lower().startswith("record"):
+        totals = {
+            incident.count(group, distinct=each)
+            for group in (events, done)
+            for each in (True, False)
+        }
+    else:
+        totals = {len(events), len(done)}
+    low, high = min(totals), max(totals)
+    bound = re.search(
+        r"\b(at least|no fewer than|more than|over|at most|no more than|up to|fewer than|"
+        r"less than|under)\b",
+        claim,
+        re.IGNORECASE,
+    )
+    word = bound[1].lower() if bound else ""
+    if word in ("at least", "no fewer than"):
+        return high >= stated
+    if word in ("more than", "over"):
+        return high > stated
+    if word in ("at most", "no more than", "up to"):
+        return low <= stated
+    if word in ("fewer than", "less than", "under"):
+        return low < stated
+    return stated in totals
+
+
 @solver(r"valid.{0,80}revoked|revoked.{0,80}valid")
 def token_status(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
@@ -1088,10 +1143,11 @@ def token_status(incident: Incident, request: str) -> Solved | None:
     sources: list[Source] = [used[-1].source] if used else []
     if not sources:
         # No event at all: the humans' handover is what speaks of the token.
-        for name in incident.find("reports/*.md"):
-            for number, line in enumerate(incident.text(name).splitlines(), 1):
-                if token[0] in line:
-                    sources.append({"path": name, "line": number})
+        for name in incident.find("reports/*.*"):
+            for locator, text in incident.notes(name):
+                kind, _, number = locator.partition(":")
+                if token[0] in text and kind in ("line", "page", "paragraph") and number.isdigit():
+                    sources.append({"path": name, kind: int(number)})
     return {key: value[key] for key in keys}, sources
 
 
@@ -1197,7 +1253,8 @@ def injected_posts(incident: Incident, request: str, workspace: Workspace) -> So
     for group, text in items:
         ids = "+".join(post["id"] for post in group)
         decoded = [extra for extra in decodings(text)[1:] if extra.strip()]
-        lines.append(f"{ids}: {text[:700]}" + "".join(f" [decoded: {d[:500]}]" for d in decoded))
+        line = f"{ids}: {text[:700]}" + "".join(f" [decoded: {d[:500]}]" for d in decoded)
+        lines.append(inert(line))
     model = workspace.model() if workspace.model else None
     if model is None:
         return None
@@ -1665,7 +1722,7 @@ def inbox(incident: Incident, request: str, workspace: Workspace) -> Solved | No
     reply = model.complete(
         [
             {"role": "system", "content": INBOX_RULES},
-            {"role": "user", "content": body.strip()[:4000]},
+            {"role": "user", "content": inert(body.strip()[:4000])},
         ],
         {"type": "object", "properties": {"requests": {"type": "array"}}, "required": ["requests"]},
     )
@@ -1796,6 +1853,134 @@ def inbox(incident: Incident, request: str, workspace: Workspace) -> Solved | No
         done_text.append(f"sent a message to {to}")
         source.append(incident.csv_source("contacts.csv", contact))
     return "Carried out the request: " + "; ".join(done_text) + ".", source
+
+
+# -- a question no solver knows -----------------------------------------------------------------
+#
+# The last attempt, for questions only: code lays out what it computed about
+# the incident, each line with an id and its sources, and the model answers
+# from those lines in one request. It sees no file and no tool, and its
+# answer passes the same checks as any other.
+
+BRIEF_RULES = """You answer one question about a security incident from the numbered facts \
+below, which were computed from the logs. Use only these facts. Reply with one JSON object and \
+nothing else: {"answer": <the answer in exactly the format the question asks for>, \
+"facts": ["F1", ...]} where "facts" lists the ids of the facts the answer rests on. If the \
+facts do not settle the question, reply {"answer": null, "facts": []}. Do not guess. Times \
+are UTC; write them as YYYY-MM-DDTHH:MM:SSZ unless the question asks otherwise. Sort lists \
+when the question says so."""
+
+
+def _facts(incident: Incident) -> list[tuple[str, list[Source]]]:
+    """What code knows about the incident, one line each with the rows it rests on."""
+    facts: list[tuple[str, list[Source]]] = []
+
+    def add(make: Callable[[], None]) -> None:
+        try:
+            make()
+        except (Unreadable, LookupError, ValueError, StopIteration, OSError, RuntimeError):
+            pass  # A part of the workspace this code cannot read: left out.
+
+    def basics() -> None:
+        facts.append((f"incident {incident.incident_id}; now {stamp(incident.now)}", []))
+        facts.append((f"our own domain: {incident.own_domain}", []))
+
+    def entry() -> None:
+        copy, first = incident.entry
+        text = f"entry artifact (quarantined copy) {copy}; patient zero {first.agent} first "
+        facts.append((text + f"processed it at {stamp(first.ts)}", [first.source]))
+
+    def compromised() -> None:
+        for agent, event in incident.compromised.items():
+            text = f"compromised agent {agent}: first attacker-directed action "
+            facts.append((text + f"{event.action} at {stamp(event.ts)}", [event.source]))
+
+    def secrets() -> None:
+        for event in incident.secret_reads:
+            text = f"secret read in the attack: {event.agent} read {event.target} at "
+            facts.append((text + stamp(event.ts), [event.source]))
+
+    def transfers() -> None:
+        counted = incident.exfiltration
+        for transfer in incident.transfers:
+            state = "blocked" if transfer.blocked else "successful"
+            ticket = "approved by change ticket" if transfer.approved else "not approved"
+            counts = "counts as exfiltration" if transfer in counted else "does not count"
+            size = incident.count([transfer], True)
+            text = f"transfer at {stamp(transfer.event.ts)} by {transfer.event.agent} to "
+            text += f"{transfer.domain}: {size} records, {state}, {ticket}, {counts}"
+            facts.append((text, [transfer.source, transfer.event.source]))
+        total = incident.count(counted)
+        text = f"exfiltrated customer records under the runbook's rules: {total}"
+        facts.append((text, [transfer.source for transfer in counted]))
+        text = f"distinct exfiltrated customer records: {incident.count(counted, True)}"
+        facts.append((text, [transfer.source for transfer in counted]))
+
+    def domains() -> None:
+        for domain, event in incident.attacker_domains.items():
+            if incident.is_own(domain) or domain in incident.partner_domains:
+                continue
+            text = f"attacker domain our agents contacted: {domain} (first at {stamp(event.ts)})"
+            facts.append((text, [event.source]))
+
+    def held() -> None:
+        for agent, source in incident.quarantined.items():
+            facts.append((f"quarantined now: {agent}", [source]))
+
+    def roster() -> None:
+        skipped = ("_line", incident.roster_stand_in, incident.roster_critical)
+        involved = set(incident.compromised) | {t.event.agent for t in incident.transfers}
+        for row in incident.roster:
+            agent = row[incident.roster_id]
+            if agent not in involved:
+                continue
+            cells = [f"{key} {row[key]}" for key in row if key not in skipped and row[key]]
+            sources = [incident.csv_source("fleet/agents.csv", row)]
+            try:
+                contact = incident.owner_contact(agent)
+                cells.append(f"owner's verified e-mail {contact[incident.contact_address]}")
+                sources.append(incident.csv_source("contacts.csv", contact))
+            except Unreadable:
+                pass
+            facts.append(("roster: " + "; ".join(cells), sources))
+
+    for part in (basics, entry, compromised, secrets, transfers, domains, held, roster):
+        add(part)
+    return facts
+
+
+@solver(r".", asks=True)
+def brief(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
+    """One model reading of computed facts, for a question no solver above answered."""
+    model = workspace.model() if workspace.model else None
+    if model is None or re.search(r"/inbox/|/drafts/", request):
+        return None
+    facts = _facts(incident)
+    if len(facts) < 6:
+        return None  # Too little is known for an answer to rest on.
+    lines = [f"F{number}: {text}" for number, (text, _) in enumerate(facts, 1)]
+    reply = model.complete(
+        [
+            {"role": "system", "content": BRIEF_RULES},
+            {
+                "role": "user",
+                "content": inert("\n".join(lines)[:24000] + "\n\nQuestion: " + request[:3000]),
+            },
+        ],
+        {"type": "object", "properties": {"answer": {}, "facts": {"type": "array"}}},
+    )
+    if not isinstance(reply, dict) or reply.get("answer") in (None, "", [], {}):
+        return None
+    used = reply.get("facts")
+    if not isinstance(used, list) or not used:
+        return None  # An answer that rests on nothing we gave it.
+    sources: list[Source] = []
+    for name in used:
+        found = re.fullmatch(r"F(\d+)", str(name))
+        if not found or not 1 <= int(found[1]) <= len(facts):
+            return None
+        sources += [source for source in facts[int(found[1]) - 1][1] if source not in sources]
+    return reply["answer"], sources
 
 
 __all__ = ["domain_of", "playbooks"]

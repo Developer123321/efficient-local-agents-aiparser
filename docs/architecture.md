@@ -19,6 +19,37 @@ Task
   -> Answer      always, also after an error
 ```
 
+## At the event: solvers, and no loop
+
+The submitted profile (`configs/live.toml`) stops after the first line of the
+picture above. `event/incident.py` reads a task's workspace into facts (attack
+traces from the audit log, compromised agents, transfers that count under the
+runbook's rules, attacker domains, exposed tokens, permissions, the change
+calendar), and `event/playbooks.py` holds one solver per kind of question. A
+solver checks what it relies on and returns `None` when a file, a column or a
+rule is not what it expects.
+
+| The model is asked | For | What code does with the reply |
+| --- | --- | --- |
+| Which board posts ask agents to move data or rights | ids of the unusual posts, decoded and joined by code | keeps ids that exist |
+| What a scanned page says | a transcript | takes host names from list entries only, never from text that tells the reader what to answer |
+| What an inbox message asks for | a list in a fixed vocabulary | checks the sender, the targets and every hard rule, then acts or refuses |
+| What a runbook sentence means, if no known wording fits | one boolean | applies it |
+| A question no solver knows, with the computed facts numbered | an answer and the ids of the facts it rests on | answers only if those facts exist; their rows are the sources |
+
+Nothing else reaches a model, and no model sees a tool. Workspace text shown
+to the model has markup that imitates the turns of a chat rewritten first
+(`incident.inert`). A task no solver
+answers ends with cause `no_solver`, an empty answer and no request
+(`[agent] fallback = "none"`): in the dev run that measured it the loop spent
+about $0.33 of $0.335 for 1.13 of 9 points. `HACKLAB_FALLBACK=loop` switches
+the loop back on for a comparison run.
+
+What leaves is checked once more in code: a message goes only to a verified
+row of the contact list, a draft only below `/drafts/`, an answer never
+carries a secret value or anything that works as a link, and no file outside
+the task's workspace is read.
+
 ## Files
 
 | File | Owns |
