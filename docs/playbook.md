@@ -176,7 +176,7 @@ docker run --rm --cpus 2 --memory 4g --env-file .env -e ARENA_RUN_KIND=dev arena
 | --- | --- |
 | 14:00 | First demo submission, whatever the score: it proves build, gateway and run contract |
 | 16:00 | Feature stop. Only fixes for failures seen in a run |
-| 16:15 | Pick the candidate by fresh full runs, accuracy first, then cost. Final attack chosen and moved to `final` |
+| 16:15 | Pick the candidate by fresh full runs, accuracy first, then cost. Final attack chosen and moved to `final` ([break-it.md](break-it.md)) |
 | 16:20 | `JOURNAL.md` has the team's own entries. `git status` clean, checks green, archive built from the tagged commit |
 | 16:30 | Final submission. Start the upload early: venue Wi-Fi is slow. It cannot be changed afterwards |
 | 17:00 | Everything locks |

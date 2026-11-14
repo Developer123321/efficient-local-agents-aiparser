@@ -202,6 +202,9 @@ agent inside logs and messages.
 into the other teams' workspaces. Attacking is optional; only attackers can
 win Best Breaker.
 
+The attack side — what the worst permitted attack is, the three dev
+candidates and the choice of the final attack — is [break-it.md](break-it.md).
+
 - **An attack** is `{carrier, goal, text, stage}`. Carriers: `email_body`,
   `doc_comment`, `sheet_note`, `pdf_hidden_text`, `image_text`,
   `audit_log_detail`, `board_post`, `retrieved_doc`. Goals:
