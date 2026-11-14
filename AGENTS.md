@@ -3,7 +3,7 @@
 This repository holds a small-model agent harness for "The MuggingFace
 Incident" (Efficient Local Agents Hackathon, 14 November 2026), a rehearsal
 scenario, and a portable development VM. Read README.md, docs/architecture.md
-and docs/hackathon.md first; on the day also docs/playbook.md. It does not own
+and docs/hackathon.md first; on the day also docs/playbook.md and JOURNAL.md. It does not own
 any host machine configuration.
 
 ## Checks
@@ -45,17 +45,28 @@ any host machine configuration.
   that can raise out of it or wait without a bound. When the harness ends a
   task itself, the answer carries a fixed `cause` code; add one for a new
   way to stop.
-- What the team writes on the day lives in `src/hacklab/event/` (playbooks,
-  skills, the kit adapter): it ships inside the package, so the image needs
-  no new COPY line. `examples/` holds worked examples only.
-- `configs/live.toml` is what is submitted. Its `[limits]`, `[agent]` and
-  `[guard]` equal the measured profile and the defaults in `config.py`
-  (`tests/test_config.py`); change a value in all three, with a number.
+- What is specific to the event lives in `src/hacklab/event/`: the Task API
+  client and mirror (`arena.py`), the run (`arena_run.py`), the rules for the
+  model (`arena-rules.md`), playbooks and skills. It ships inside the
+  package, so the image needs no new COPY line. `examples/` holds worked
+  examples only.
+- The platform's tools that change something (`containment`, `send_message`,
+  `write`) are offered only when the instruction asks to act, and their
+  recipients, paths and URLs are checked in code (`arena_run.arena_tools`).
+  A new platform tool is mutating unless it is listed in `READ_ONLY`.
+- Every task of a run is submitted, whatever failed. Do not add a path in
+  `arena_run.run` that skips `submit`, and do not finish a final run that
+  left tasks out.
+- `configs/live.toml` is what is submitted. Its `[limits]` and `[agent]`
+  differ from the measured rehearsal profile and from the defaults in
+  `config.py` only in the fields `tests/test_config.py` names; change a
+  value with a dev-run number and a `JOURNAL.md` entry.
+- `JOURNAL.md` at the repository root is part of the submission. Add an
+  entry for every design decision and mark `decided_by` honestly.
 - Jev is a native System One provider, never a chat model. Use the linked
   `typesafe-ai` skill when designing Jev questions or thresholds.
-- Jev and the embedding model are optional at run time. The evaluation
-  container may have no route to them, so no code path may fail a task
-  because one of them is missing or unreachable.
+- Jev and the embedding model are optional at run time. No code path may
+  fail a task because one of them is missing or unreachable.
 - Only the models the organizers provide may make run-time decisions: Gemma 4
   31B (`[model]`), Jev 1.14.0 (`[jev]`) and Qwen3 Embedding (`[embedding]`).
   Do not add any other model, embedder, reranker or classifier to the agent.
@@ -79,6 +90,9 @@ any host machine configuration.
   no bodies. Do not add any other body logging.
 - The submission image runs with the cache off, without a trace directory and
   without `[budget]` limits.
+- `.state/arena/` holds task files and, after a dev run, expected answers.
+  They are for people. Never copy them into prompts, playbooks, skills,
+  tests or the repository.
 - Quotes validate provenance, not truth. Do not claim accuracy, optimality or
   a result that was not measured on the actual model and data.
 

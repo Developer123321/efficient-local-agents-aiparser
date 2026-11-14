@@ -137,6 +137,10 @@ class AgentConfig(StrictModel):
     # Either a path, or "package:folder" for a folder inside an installed
     # package, which is found wherever the working directory is.
     skills: str = ""
+    # A text file with the event's standing rules, appended to the system
+    # prompt: outcome codes, answer shapes, what never to do. Our own text,
+    # paid for on every call. A path, or "package:file" like `skills`.
+    rules: str = ""
     # "package.module:attribute" of a hacklab.playbooks.Playbooks instance:
     # deterministic solvers that answer a recognised task without a model call.
     playbooks: str = Field(default="", pattern=r"^([A-Za-z_][\w.]*:[A-Za-z_]\w*)?$")
@@ -218,9 +222,44 @@ def load_config(path: Path | None = None) -> Config:
     for env, key in [("EMBEDDING_BASE_URL", "base_url"), ("EMBEDDING_MODEL_NAME", "model")]:
         if os.environ.get(env):
             data.setdefault("embedding", {})[key] = os.environ[env]
+    _openrouter(data)
     if os.environ.get("HACKLAB_CACHE_MODE"):
         data.setdefault("cache", {})["mode"] = os.environ["HACKLAB_CACHE_MODE"]
     return Config.model_validate(data)
+
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+
+
+def _openrouter(data: dict) -> None:
+    """The event hands out one OpenRouter key for all three models.
+
+    With OPENROUTER_API_KEY in the environment, the small model, Jev and the
+    embedding model are reached through OPENROUTER_BASE_URL (the organizers'
+    gateway in the final, OpenRouter itself otherwise) under the model names
+    the event fixes. It wins over the older SMALL_MODEL_*, TYPESAFE_* and
+    EMBEDDING_* variables: a key left over in .env must not answer for the
+    event's key.
+    """
+    if not os.environ.get("OPENROUTER_API_KEY") or data["model"].get("provider") != "openai":
+        return
+    base = (os.environ.get("OPENROUTER_BASE_URL") or OPENROUTER_URL).rstrip("/")
+    data["model"].update(
+        api_key_env="OPENROUTER_API_KEY",
+        base_url=base,
+        model=os.environ.get("ARENA_MAIN_MODEL") or "google/gemma-4-31b-it",
+    )
+    data.setdefault("jev", {}).update(
+        api_key_env="OPENROUTER_API_KEY",
+        # Jev sits beside the chat API: .../api/v1 -> .../api/alpha/decisions.
+        base_url=base.removesuffix("/v1") + "/alpha/decisions",
+        model=os.environ.get("ARENA_JEV_MODEL") or "typesafe/jev-1.14",
+    )
+    data.setdefault("embedding", {}).update(
+        api_key_env="OPENROUTER_API_KEY",
+        base_url="",
+        model=os.environ.get("ARENA_EMBED_MODEL") or "qwen/qwen3-embedding-8b",
+    )
 
 
 def read_secret(env_name: str) -> str:

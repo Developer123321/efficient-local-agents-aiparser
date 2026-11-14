@@ -434,16 +434,20 @@ def test_doctor_names_what_would_cost_answers_and_strict_fails_on_it(tmp_path, m
     report = json.loads(captured.out)
     assert code == 0 and report["problems"] == []
     assert report["playbooks"]["reference"] == "hacklab.event.playbooks:playbooks"
-    assert report["skills"]["files"] >= 2
+    assert report["rules"] == "hacklab.event:arena-rules.md" and not report["arena_key_present"]
     assert set(report["container_engines"]) == {"docker", "podman"}
+    # The rehearsal profile still finds its recipes.
+    code, captured = run(monkeypatch, capsys, ["doctor", "--config", "configs/openrouter.toml"])
+    assert json.loads(captured.out)["skills"]["files"] >= 2
     broken = tmp_path / "broken.toml"
     broken.write_text(
         '[agent]\nplaybooks = "not_in_the_image:playbooks"\n'
         f'skills = "{(tmp_path / "no-skills").as_posix()}"\n'
+        'rules = "hacklab.event:no-such-rules.md"\n'
     )
     code, captured = run(monkeypatch, capsys, ["doctor", "--config", str(broken)])
     report = json.loads(captured.out)
-    assert code == 0 and len(report["problems"]) == 2
+    assert code == 0 and len(report["problems"]) == 3
     assert report["playbooks"]["solvers"] is None and report["skills"]["files"] == 0
     assert run(monkeypatch, capsys, ["doctor", "--strict", "--config", str(broken)])[0] == 1
 

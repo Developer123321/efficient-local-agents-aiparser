@@ -1,5 +1,53 @@
 # What was actually tested
 
+## 14 November 2026, the Harness Arena API (same workstation)
+
+The organizers published the Task API and the starter kit. Added: the client
+and file mirror (`event/arena.py`), the run (`event/arena_run.py`,
+`hacklab arena run`), the event's rules for the model, typed answers and
+outcomes, ODT and ODS reading, the OpenRouter routing by environment, the
+image's run contract. Removed: the placeholder kit adapter.
+
+| Check | Result |
+| --- | --- |
+| `bash scripts/check` (Ruff format and lint, `pytest`) | Passed, **306 tests** on Python 3.15 |
+| Shellcheck on `scripts/container-test` | Passed |
+| `hacklab arena run` against `hacklab mock-server` over HTTP on the host | Two tasks mirrored, submitted and the run finished; the model requests of that first try went to the address in `.env` and were refused with 401 (see below) |
+| `bash scripts/vm-smoke` (disposable guest, rootless Podman) | Passed, including `scripts/container-test`: the image started without a command ran a two-task run against a stand-in gateway, submitted both and finished; a second start had nothing left to do |
+
+The platform in these checks is our own stand-in, written from the API
+documentation. The VM ran before two later changes, each covered by the fast
+gate only: a final run started with a task filter is not finished, and the
+documentation.
+
+One mistake while testing: the first HTTP try of `arena run` loaded the
+repository's `.env`, so two chat requests with the stand-in's synthetic task
+text went to the address configured there and were refused (401). No task
+data of the event was involved. `OPENROUTER_API_KEY` now decides the address
+whenever it is set, and the tests isolate every such variable.
+
+Not verified:
+
+- **Anything against the real arena or Gemma 4.** No platform key and no
+  OpenRouter key were used. Field names of the real replies (`run_id`,
+  `tasks`, `deadline_at`, the manifest, the feedback) follow the
+  documentation; a difference shows on the first `arena run --tasks t01`.
+- **The results of `query_logs`, `containment`, `threat_intel` and
+  `access_path`.** Their shapes are not in the documentation; citing a
+  `query_logs` event relies on a file and a line appearing in its text.
+- **Jev and embeddings through OpenRouter.** The request and reply shapes at
+  `/api/alpha/decisions` are assumed from TypeSafe's own API. Both are off in
+  the submitted profile.
+- **Images.** PNG and JPG are not read; a task that needs one is answered
+  without it.
+- **The action gate and the recipient list.** Whether `ACTION_WORDS` matches
+  every task that needs an action, and whether a legitimate recipient is
+  ever refused, shows only in dev feedback.
+- **The limits of `configs/live.toml`**, the time to the first submission
+  (the organizers' check waits about a minute) and behaviour at the $3 limit.
+- **Posting attacks and uploading the archive.** The client has the calls;
+  the CLI only lists (`arena payloads`, `arena submissions`).
+
 ## 14 November 2026, the announced models (same workstation)
 
 The models were announced: Gemma 4 31B, Jev 1.14.0, Qwen3 Embedding. Added:
@@ -45,7 +93,7 @@ changed, and the fast gate ran again.
 | `scripts/portability-test` inside the guest | `scripts/setup --check` passed in stock `ubuntu:24.04`, `ubuntu:22.04` and `debian:12` containers: uv from the official installer, Python 3.15.2 fetched by uv, Ruff 0.17.4 through uv, 279 tests each |
 | Replay of the recorded model runs (no request sent) | Identical to before the changes: 7, 6 and 5 of 9 on seeds 7, 8, 9 with 31, 30 and 27 calls, all served from the cache |
 | Rehearsal incident, 40 seeds | Playbooks answered all 9 tasks of every seed with 0 model calls; seed 7 is byte-identical to the data generated before |
-| Wheel contents | `hacklab/event/skills/*.md`, `adapter.py` and `playbooks.py` are in the built wheel |
+| Wheel contents | `hacklab/event/skills/*.md`, the kit adapter of that day and `playbooks.py` are in the built wheel |
 
 `scripts/container-test` ran inside the guest with rootless Podman:
 
@@ -94,10 +142,9 @@ requests. Nothing was sent to a model while hardening.
   smaller stand-in, and three seeds of our own scenario. Whether thinking,
   JSON mode and temperature 0 behave on Gemma 4 as assumed is open, and so is
   whether ordering search hits with the embedding model gains anything.
-- **The organizers' side.** Starter kit, task and answer format, the
-  container's run contract, how the models are reached inside the container,
-  prices, scoring formula, rate limits. The Dockerfile's `CMD` is a
-  placeholder.
+- **The organizers' side.** See the entry of 14 November above: the Task
+  API, the gateway and the run contract are implemented from the
+  documentation and tested against a stand-in only.
 - **Jev and the embedding model in the final run.** Whether the container
   has a route to them is unknown. The fallbacks were tested with a stand-in,
   not with a real outage.
@@ -106,10 +153,10 @@ requests. Nothing was sent to a model while hardening.
   Debian containers. Docker, Docker Desktop, macOS (bash 3.2), Git Bash, WSL 2,
   Apple Silicon and `HACKLAB_PLATFORM` were written for and shellchecked, not
   run.
-- **The new seams against a real kit.** `event/adapter.py` (the kit's model
-  function, snapshots, tool calls from playbooks), the tolerant task reader of
-  `submit` and the log formats (logfmt, JSON lines without a suffix,
-  multi-table JSON) are covered by tests on synthetic data only.
+- **Seams for other kits.** A model function instead of HTTP
+  (`run_task(model=...)`), tool calls from playbooks, the tolerant task
+  reader of `submit` and the log formats (logfmt, JSON lines without a
+  suffix, multi-table JSON) are covered by tests on synthetic data only.
 - **Retries against a real rate limit.** The pauses were tested with a fake
   clock.
 - **The Bob variant on this tree.** `vm-smoke --bob` last passed one commit

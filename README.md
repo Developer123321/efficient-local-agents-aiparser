@@ -17,7 +17,7 @@ decision at a time.
 | | Read | Time |
 | --- | --- | --- |
 | 1 | This page | 3 min |
-| 2 | [Rules and open questions](docs/hackathon.md) | 5 min |
+| 2 | [Rules of the event](docs/hackathon.md) | 5 min |
 | 3 | [Plan for Saturday](docs/playbook.md) | 5 min |
 
 Look up the rest when you need it:
@@ -57,21 +57,26 @@ evaluation machine with `HACKLAB_PLATFORM=linux/amd64 bash scripts/container-tes
 Shortcuts with [just](https://just.systems): `just laptop`, `just check`,
 `just practice`, `just container-test`.
 
-## Talk to a model
+## Run against the event
 
 ```sh
-cp .env.example .env && chmod 600 .env     # then enter URL, model name and key
+cp .env.example .env && chmod 600 .env     # ARENA_API_KEY and OPENROUTER_API_KEY
+uv run hacklab arena me                    # is the platform key right?
 uv run hacklab probe --config configs/live.toml
+uv run hacklab arena run --tasks t01 --note "first contact"
+uv run hacklab arena run --note "what this run tries"
 ```
 
-`probe` sends one small request to each enabled model and shows whether URL,
-key and reply format fit. Keys live only in `.env`, which Git ignores. To
-include the embedding model, set `EMBEDDING_MODEL_NAME` and probe
-`configs/embed-rank.toml`.
+`arena run` starts a dev run, answers its tasks with `configs/live.toml`,
+submits every one and finishes the run; the summary shows accuracy and cost.
+What was submitted and what the platform answered is under
+`.state/arena/runs/`. More commands: [the plan](docs/playbook.md#a-first-run).
 
-To rehearse on Gemma 4 31B outside the event, put an OpenRouter key into
-`.env` as `SMALL_MODEL_API_KEY`, set `SMALL_MODEL_NAME=google/gemma-4-31b-it`
-and run `just practice-live 7 configs/openrouter.toml`.
+Keys live only in `.env`, which Git ignores. `probe` sends one small request
+to each enabled model and shows whether address, key and reply format fit.
+
+To submit: commit, `git archive -o submission.tar.gz HEAD`, upload on the
+dashboard. [`JOURNAL.md`](JOURNAL.md) needs the team's own entries.
 
 ## What is where
 
@@ -79,7 +84,8 @@ and run `just practice-live 7 configs/openrouter.toml`.
 | --- | --- |
 | Solve a task type in code, without the model | `src/hacklab/event/playbooks.py`, worked example `examples/event_playbooks.py` |
 | Give the model a recipe for one task type | `src/hacklab/event/skills/` |
-| Plug in the organizers' starter kit | `src/hacklab/event/adapter.py` |
+| Change how a run, a tool or an answer reaches the platform | `src/hacklab/event/arena_run.py`, `arena.py` |
+| Change the event's standing rules for the model | `src/hacklab/event/arena-rules.md` |
 | Change prompt, loop or final checks | `src/hacklab/agent.py` |
 | Change a model or agent setting | `configs/live.toml`, the profile that is submitted |
 | Try the embedding model or Jev | `configs/embed-rank.toml`, `configs/jev-select.toml` |
@@ -101,5 +107,6 @@ image without another line in the Dockerfile. All commands:
    cases ([how](docs/benchmarks.md)).
 
 The rehearsal data was written for this repository, and the benchmark
-numbers come from a stand-in model. Nothing was measured on Gemma 4 or on the
-event's data yet.
+numbers come from a stand-in model. The arena integration was tested against
+a stand-in platform only: nothing was run on the real arena or on Gemma 4
+when it was written ([what was tested](VERIFICATION.md)).

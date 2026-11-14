@@ -16,6 +16,7 @@ import re
 import threading
 import zipfile
 from collections import Counter, OrderedDict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation, localcontext
@@ -23,6 +24,7 @@ from email import message_from_bytes, policy
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
+from xml.etree import ElementTree
 
 from pydantic import Field, ValidationError
 
@@ -78,6 +80,8 @@ SUPPORTED = TEXT_SUFFIXES | {
     ".pdf",
     ".docx",
     ".xlsx",
+    ".odt",
+    ".ods",
 }
 # A log under these names is often structured: one JSON object or one run of
 # key=value pairs per line. Such a file is read as a table.
@@ -328,6 +332,86 @@ class _HTMLText(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self._hidden:
             self.parts.append(data)
+
+
+_ODF_TEXT = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
+_ODF_TABLE = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
+_ODF_OFFICE = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
+# Reviewer comments, cell notes and tracked changes are not the document's text.
+_ODF_ASIDE = {
+    _ODF_OFFICE + "annotation",
+    _ODF_OFFICE + "annotation-end",
+    _ODF_TEXT + "tracked-changes",
+    _ODF_TEXT + "note",
+}
+
+
+def _odf_text(node: ElementTree.Element) -> str:
+    """The text of one OpenDocument paragraph or heading, without comments."""
+    parts: list[str] = []
+
+    def walk(element: ElementTree.Element, top: bool) -> None:
+        if element.tag not in _ODF_ASIDE:
+            if element.tag == _ODF_TEXT + "tab":
+                parts.append("\t")
+            elif element.tag == _ODF_TEXT + "line-break":
+                parts.append("\n")
+            elif element.tag == _ODF_TEXT + "s":
+                count = element.get(_ODF_TEXT + "c") or "1"
+                parts.append(" " * (int(count) if count.isdigit() else 1))
+            parts.append(element.text or "")
+            for child in element:
+                walk(child, False)
+        if not top:
+            parts.append(element.tail or "")
+
+    walk(node, True)
+    return "".join(parts)
+
+
+def _odf_paragraphs(body: ElementTree.Element) -> list[ElementTree.Element]:
+    """Paragraphs and headings in document order, outside comments."""
+    found: list[ElementTree.Element] = []
+
+    def walk(element: ElementTree.Element) -> None:
+        for child in element:
+            if child.tag in _ODF_ASIDE:
+                continue
+            if child.tag in (_ODF_TEXT + "p", _ODF_TEXT + "h"):
+                found.append(child)
+            else:
+                walk(child)
+
+    walk(body)
+    return found
+
+
+def _ods_rows(body: ElementTree.Element) -> Iterator[tuple[str, int, list[str]]]:
+    """(sheet, 1-based row as the sheet shows it, cell texts) of every non-empty row."""
+
+    def repeated(element: ElementTree.Element, name: str) -> int:
+        value = element.get(_ODF_TABLE + name) or "1"
+        return int(value) if value.isdigit() else 1
+
+    for table in body.iter(_ODF_TABLE + "table"):
+        sheet = table.get(_ODF_TABLE + "name") or "Sheet"
+        number = 0
+        for row in table.iter(_ODF_TABLE + "table-row"):
+            repeat = repeated(row, "number-rows-repeated")
+            cells: list[str] = []
+            for cell in row:
+                if cell.tag.endswith("table-cell") and len(cells) < MAX_COLUMNS:
+                    # Direct paragraphs only: a cell note is an annotation, not content.
+                    text = "\n".join(_odf_text(p) for p in cell if p.tag == _ODF_TEXT + "p")
+                    span = repeated(cell, "number-columns-repeated")
+                    cells.extend([text] * min(span, MAX_COLUMNS - len(cells)))
+            while cells and not cells[-1].strip():
+                cells.pop()
+            if cells:
+                # A filled row repeated a million times is padding, not data.
+                for extra in range(min(repeat, 50)):
+                    yield sheet, number + extra + 1, cells
+            number += repeat
 
 
 def _html_lines(content: str) -> list[str]:
@@ -730,6 +814,7 @@ class ToolRegistry:
             raise ToolError("Unsupported document format")
         units: list[Unit] = []
         columns: list[str] = []
+        headers_by_sheet: dict[str, list[str]] = {}
         extracted_chars = 0
 
         def append(unit: Unit) -> None:
@@ -854,6 +939,31 @@ class ToolRegistry:
                 raise
             except Exception as exc:
                 raise ToolError("DOCX could not be parsed") from exc
+        elif suffix in {".odt", ".ods"}:
+            self._archive_guard(path)
+            try:
+                with zipfile.ZipFile(path) as archive:
+                    body = ElementTree.fromstring(archive.read("content.xml"))
+                if suffix == ".odt":
+                    # Non-empty paragraphs and headings in document order, numbered
+                    # from 1: the locator the event asks for. Comments are left out.
+                    texts = [_odf_text(node) for node in _odf_paragraphs(body)]
+                    for i, text in enumerate((text for text in texts if text.strip()), 1):
+                        append(Unit(f"paragraph:{i}", text))
+                else:
+                    for sheet, number, cells in _ods_rows(body):
+                        if sheet not in headers_by_sheet:
+                            headers_by_sheet[sheet] = self._headers(cells)
+                            columns.extend(c for c in headers_by_sheet[sheet] if c not in columns)
+                            continue
+                        names = headers_by_sheet[sheet]
+                        values = dict.fromkeys(names)
+                        values.update(zip(names, cells, strict=False))
+                        append(Unit(f"sheet:{sheet}:row:{number}", self._row_text(values), values))
+            except ToolError:
+                raise
+            except Exception as exc:
+                raise ToolError("OpenDocument file could not be parsed") from exc
         elif suffix == ".xlsx":
             from openpyxl import load_workbook
 

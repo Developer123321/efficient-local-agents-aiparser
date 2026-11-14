@@ -78,8 +78,19 @@ def system_prompt(config: Config, toolbox: Toolbox) -> str:
         )
     if config.guard.allowed_actions:
         parts.append("Action types: " + ", ".join(config.guard.allowed_actions))
+    if config.agent.rules:
+        parts.append(_rules(config.agent.rules))
     parts.append("Tools:\n" + toolbox.describe())
     return "\n".join(parts)
+
+
+@functools.lru_cache(maxsize=8)
+def _rules(reference: str) -> str:
+    """`[agent] rules`: the event's standing rules, our own text, part of the system prompt."""
+    try:
+        return skill_directory(reference).read_text(encoding="utf-8").strip()[:6000]
+    except (OSError, UnicodeError):
+        return ""  # Reported by `doctor`; a task still runs on the general prompt.
 
 
 @functools.lru_cache(maxsize=1)
@@ -520,10 +531,12 @@ def _finalize(
     listed = toolbox.result(reference) if reference else _retyped(split_items(text), toolbox)
     if reference and listed is None:
         problems.append("unknown_result_id")
+    value = None if result.value is None else ledger.compactor.expand(result.value)
     if listed is None:
         text = _as_computed(text, toolbox)
     if listed is not None:
         text = ", ".join(listed.values)
+        value = list(listed.values)
         support(listed.evidence)
     actions: list[Action] = []
     by_type: dict[str, list[str]] = {}
@@ -557,8 +570,10 @@ def _finalize(
         problems.append("evidence_changed_on_disk")
     accepted, rejected = toolbox.guard.check(actions)
     problems += rejected
-    if result.status == "ok":
-        if not text.strip() and not accepted:
+    # A refusal of the event may have no answer text and nothing to cite.
+    refusal = result.outcome not in ("", "OK")
+    if result.status == "ok" and not refusal:
+        if not text.strip() and not accepted and not toolbox.acted:
             problems.append("ok_answer_is_empty")
         if not citations and len(ledger):
             # Something citable was shown, so the answer has to name its support.
@@ -569,6 +584,8 @@ def _finalize(
     answer = Answer(
         status=result.status,
         answer=text[:12000],
+        value=value,
+        outcome=result.outcome,
         citations=citations,
         actions=accepted,
         confidence=result.confidence,

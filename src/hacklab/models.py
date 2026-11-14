@@ -1,5 +1,6 @@
 """Shared, strict task and output contracts. Benchmark labels never enter a Task."""
 
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -36,9 +37,17 @@ class Action(ModelReply):
     reason: str = Field(default="", max_length=500)
 
 
+# The event's result codes; "" when the model named none.
+OUTCOMES = ("OK", "DENIED_SECURITY", "NEEDS_CLARIFICATION", "UNSUPPORTED")
+
+
 class Answer(StrictModel):
     status: Literal["ok", "abstain", "error"]
     answer: str = Field(max_length=12000)
+    # The event grades a typed answer: `value` is the list, number or object
+    # the model wrote, or the values of a list result; None for plain text.
+    value: Any = None
+    outcome: str = Field(default="", max_length=40)
     citations: list[Citation] = Field(default_factory=list, max_length=30)
     actions: list[Action] = Field(default_factory=list, max_length=2000)
     confidence: float = Field(default=0.0, ge=0, le=1)
@@ -77,6 +86,9 @@ class FinalResult(ModelReply):
 
     status: Literal["ok", "abstain", "error"] = "ok"
     answer: str = Field(default="", max_length=12000)
+    # The answer as the model wrote it when it is not text: a list, number or object.
+    value: Any = None
+    outcome: str = Field(default="", max_length=40)
     # A list result such as "r3": code writes all of its values as the answer.
     answer_from: str | None = Field(default=None, max_length=200)
     evidence: list[str] = Field(default_factory=list, max_length=30)
@@ -89,13 +101,32 @@ class FinalResult(ModelReply):
     def _answer_references(cls, value: Any) -> Any:
         return ", ".join(map(str, value)) if isinstance(value, list) else value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _typed_answer(cls, data: Any) -> Any:
+        """Keep a list, number or object answer as written, beside its text form."""
+        if isinstance(data, dict) and not isinstance(data.get("answer"), (str, type(None))):
+            data = {**data, "value": data["answer"]}
+        return data
+
+    @field_validator("outcome", mode="before")
+    @classmethod
+    def _outcome_code(cls, value: Any) -> Any:
+        code = str(value or "").strip().upper().replace(" ", "_")
+        return code if code in OUTCOMES else ""
+
     @field_validator("answer", mode="before")
     @classmethod
     def _answer_text(cls, value: Any) -> Any:
         if isinstance(value, list):
-            return ", ".join(str(item) for item in value)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return str(value)
+            return ", ".join(
+                item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+                for item in value
+            )[:12000]
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)[:12000]
+        if isinstance(value, (bool, int, float)):
+            return json.dumps(value)
         return "" if value is None else value
 
     @field_validator("evidence", mode="before")

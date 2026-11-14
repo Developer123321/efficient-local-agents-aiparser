@@ -82,7 +82,9 @@ This table exists because of a mistake found on 13 November: the profile to
 be submitted had tighter limits than the profile that was measured. Replaying
 the recorded runs under those limits turned the `secrets` and `contain` tasks
 into abstentions before the model was asked (7 of 9 became 6, 6 became 5).
-The two profiles are now equal and a test keeps them so.
+The rehearsal profiles are equal and a test keeps them so. `configs/live.toml`
+has since been raised for the event's tasks; the test lists the fields in
+which it may differ, and none of those values is measured.
 
 ## Budget
 

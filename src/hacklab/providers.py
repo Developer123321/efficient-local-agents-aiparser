@@ -225,7 +225,15 @@ def _usage(payload: Any, provider: str) -> tuple[int | None, int | None]:
         return None, None
     usage = payload["usage"]
     if provider == "jev":
-        return _token(usage.get("input_tokens")), _token(usage.get("output_tokens"))
+        # TypeSafe's own API names them input/output; OpenRouter's route prompt/completion.
+        tokens = [
+            _token(usage.get(own)) if own in usage else _token(usage.get(routed))
+            for own, routed in (
+                ("input_tokens", "prompt_tokens"),
+                ("output_tokens", "completion_tokens"),
+            )
+        ]
+        return tokens[0], tokens[1]
     if provider == "embedding":
         # An embedding reply reports the prompt only; nothing is generated.
         prompt = _token(usage.get("prompt_tokens"))
@@ -834,7 +842,8 @@ class JevProvider(_OptionalProvider):
             raise ProviderError("typesafe_key_missing")
         # A gateway may be given as a host or an API prefix instead of the full path.
         endpoint = config.base_url.rstrip("/")
-        if not endpoint.endswith("/systemone"):
+        # OpenRouter serves the same contract under /api/alpha/decisions.
+        if not endpoint.endswith(("/systemone", "/decisions")):
             endpoint += "/systemone" if endpoint.endswith("/v1") else "/v1/systemone"
         super().__init__(
             provider="jev",
@@ -869,7 +878,7 @@ class JevProvider(_OptionalProvider):
 
         def parse(payload: Any) -> tuple[str, float]:
             answer = payload.get("answers", {}).get("choice")
-            if not isinstance(answer, dict) or answer.get("type") != "choice":
+            if not isinstance(answer, dict) or answer.get("type", "choice") != "choice":
                 raise ProviderError("jev_answer_type_invalid")
             choice, confidence = answer.get("choice"), answer.get("confidence")
             if choice not in criteria:
@@ -904,7 +913,7 @@ class JevProvider(_OptionalProvider):
                 raise ProviderError("jev_answer_ids_invalid")
             result = {}
             for key, answer in answers.items():
-                if not isinstance(answer, dict) or answer.get("type") != "noul":
+                if not isinstance(answer, dict) or answer.get("type", "noul") != "noul":
                     raise ProviderError("jev_answer_type_invalid")
                 probability = answer.get("noul")
                 if (

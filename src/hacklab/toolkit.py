@@ -31,7 +31,19 @@ _ENCODED = re.compile(r"[A-Za-z0-9+/_-]{16,}={0,2}")
 # A value that reads as encoded data or a digest rather than as a label.
 _OPAQUE = re.compile(r"(?=.*[0-9])(?=.*[A-Za-z])[A-Za-z0-9+/=_]{16,}")
 # Arguments of a mutating tool that explain the action instead of naming its target.
-_FREE_TEXT = {"reason", "comment", "note", "justification", "message", "description"}
+_FREE_TEXT = {
+    "reason",
+    "comment",
+    "note",
+    "justification",
+    "message",
+    "description",
+    "subject",
+    "body",
+    "content",
+    "text",
+    "path",
+}
 SIGNATURES = {
     "search": "search(query, limit=5): best-matching evidence lines across the task documents",
     "read": (
@@ -202,6 +214,8 @@ class Toolbox:
         self.extra = {spec.name: spec for spec in extra}
         self.builtin = [name for name in config.agent.tools if name in SIGNATURES]
         self.results: dict[str, Result] = {}
+        # A tool that changes something has run: the task may be done without an answer text.
+        self.acted = False
         # Numbers the tools computed, as written: an answer repeats them exactly.
         self.numbers: list[str] = []
         self.used = False  # whether any tool ran for this task
@@ -640,6 +654,9 @@ class Toolbox:
             return Observation(error=f"Unknown tool; available: {', '.join(self.names())}")
         self.used = True
         arguments = self.ledger.compactor.expand(arguments)
+        if isinstance(arguments.get("document"), str):
+            # A task names files as /logs/x.jsonl; documents are relative to the root.
+            arguments = {**arguments, "document": arguments["document"].lstrip("/")}
         spec = self.extra.get(name) if name not in self.builtin else None
         try:
             memo = json.dumps([name, arguments], sort_keys=True, default=str)
@@ -783,6 +800,7 @@ class Toolbox:
             return Observation(error=f"Arguments do not match {spec.signature.split(':')[0]}")
         # Counted only once the tool has run: a failed call may be retried.
         self.guard.commit(accepted)
+        self.acted = self.acted or spec.mutating
         rows = to_rows(result)
         lines = [
             self.ledger.add(

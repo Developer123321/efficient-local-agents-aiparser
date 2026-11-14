@@ -24,10 +24,10 @@ Task
 | File | Owns |
 | --- | --- |
 | `agent.py` | Order of work, the loop, repair, final checks |
-| `event/` | What the team writes on the day: playbooks, skills, the starter-kit adapter |
+| `event/` | The event: the Task API client and file mirror (`arena.py`), one run (`arena_run.py`), the rules for the model, playbooks, skills |
 | `playbooks.py` | Registry of code-only solvers and the workspace they work in |
 | `toolkit.py` | Tool list for the prompt, result rendering, the organizers' tools |
-| `tools.py` | Document access, search, tables, arithmetic |
+| `tools.py` | Document access (text, PDF, DOCX, ODT, XLSX, ODS), search, tables, arithmetic |
 | `forensics/` | Decoding, indicators, timestamps, propagation, attack phases |
 | `evidence.py` | Every row shown to the model, its ID, citations |
 | `guard.py` | Injection scan, placeholders for secrets, action guard |
@@ -35,7 +35,7 @@ Task
 | `tracking.py` | A receipt for every request |
 | `benchmark.py` | Scoring, comparison, failure view |
 | `practice.py` | Rehearsal incident and its playbooks |
-| `cli.py` | Commands and the submission adapter |
+| `cli.py` | Commands: `arena run` for the event, `submit` for a task file |
 | `config.py`, `models.py` | Settings and the data shapes |
 
 ## Where tokens go, and what saves them
@@ -152,45 +152,66 @@ The time column is found by its usual names, else by its values: the column
 whose every value is a timestamp. A damaged line stays readable as text. A
 binary file is refused, not guessed at.
 
-## The organizers' tools
+## The event's platform
 
-Wrap each starter-kit function and pass the list to `run_task`:
+`hacklab arena run` ([arena_run.py](../src/hacklab/event/arena_run.py)) is
+what the submission image executes. Per run: read the tool list, start or
+continue the run, work the tasks easy level first on a few threads, finish.
+Per task:
+
+1. **Mirror.** [`Mirror`](../src/hacklab/event/arena.py) fetches the run's
+   manifest once and every distinct file once by its SHA-256, then copies
+   the task's files into a directory of its own. Our `search`, `read` and
+   `table` work there on every format; the platform's `read` and `search`
+   are not offered. Without a manifest the task's `workspace.zip` is used;
+   without either, the platform's own tools.
+2. **Question.** The instruction, then `/AGENTS.md` quoted as the operator's
+   rules, then the names of the operator files it mentions. The system
+   prompt ends with the event's standing rules
+   ([arena-rules.md](../src/hacklab/event/arena-rules.md), `[agent] rules`).
+3. **Tools.** The platform's tools are wrapped as `ToolSpec`s; their results
+   pass the ledger like any other. `query_logs`, `access_path`,
+   `threat_intel` and `get_containment` only look. Every other platform tool
+   counts as one that changes something: it is offered only when the
+   instruction contains a word of action (`ACTION_WORDS`), it passes the
+   action guard, `send_message` is refused for a recipient that neither the
+   instruction, the operator files nor a CSV registry names, `write` outside
+   `/drafts/` is refused, and URLs in what is sent are defanged.
+4. **Answer.** `to_arena` turns the `Answer` into `{outcome, answer,
+   sources}`: the typed value (a list stays a list), one of the four
+   outcomes, and each citation as path plus one locator in the platform's
+   terms (`line`, `record`, `sheet` and `row`, `paragraph`, `page`), at most
+   ten. URLs in the answer are defanged.
+5. **Submit.** Always, also after a local failure: then with an empty `OK`
+   answer and the cause in `.state/arena/runs/RUN/TASK.json`.
+
+A tool can be wrapped by hand the same way:
 
 ```python
 from hacklab.toolkit import ToolSpec
 
-tools = [
-    ToolSpec.from_function(kit.get_agent_log),
-    ToolSpec.from_function(kit.quarantine_agent, mutating=True),
-]
+tools = [ToolSpec("containment", "containment(ops): ...", handler, mutating=True)]
+run_task(task, root, config, tracker, tools)
 ```
 
 `mutating=True` sends the call through the action guard first. A failing tool
-gives the model an error line, never an exception.
+gives the model an error line, never an exception. A playbook calls a
+platform tool with `workspace.call("containment", ops=[...])`; a mutating
+tool passes the action guard there too.
 
-[`hacklab.event.adapter`](../src/hacklab/event/adapter.py) does this wrapping
-and the rest of the seam: `solve(question, task_id=..., data_dir=...,
-kit_tools=[...])` returns the answer as a plain dict in the organizers'
-shape. Three things a kit may bring are covered:
-
-- **Its own model client.** `model=kit.chat` sends every request through
-  that function instead of our HTTP client. Budgets, receipts, the replay
-  cache and the request timeout apply as before; a call that hangs is given
-  up after `timeout_seconds`.
-- **Data only through tools.** `snapshot(directory, name, rows)` writes what
-  a kit tool returned as a document, so that `table`, `after` and `graph`
-  work on it and every row can be cited.
-- **Actions from code.** A playbook calls a kit tool with
-  `workspace.call("quarantine_agent", agent="a7")`; a mutating tool passes
-  the action guard there too.
+With `OPENROUTER_API_KEY` in the environment, `config._openrouter` points all
+three models at `OPENROUTER_BASE_URL` (default: OpenRouter itself) under the
+event's model names, whatever the profile's own addresses say; Jev is then asked
+at `/api/alpha/decisions`.
 
 ## Limits and privacy
 
 - Each task has limits for steps, calls, time, context and output tokens
   (`[limits]`). Every HTTP attempt counts, including Jev and retries. The
-  defaults in `config.py` equal `configs/live.toml`, which equals the profile
-  the benchmark numbers come from; `tests/test_config.py` keeps the three
-  together.
+  defaults in `config.py` equal the profile the benchmark numbers come from.
+  `configs/live.toml` differs from them in the fields that
+  `tests/test_config.py` lists, each with its reason in the file; those
+  values are unmeasured.
 - When the harness itself ends a task (a limit, a provider failure, the end
   of the run), the answer carries a fixed `cause` such as
   `token_budget_exhausted_before_request`. `hacklab failures` groups by it.
@@ -202,14 +223,13 @@ shape. Three things a kit may bring are covered:
   task data. Both live in the ignored `.state/` directory and are off in the
   submission image.
 
-## Adapt at the opening
+## Adapt during the day
 
-1. Map the organizers' task and answer format in `event/adapter.py`
-   (`to_kit`, `MUTATING`) and set the image's `CMD`.
-2. Wrap their tools; set `allowed_actions` and `protected_targets`.
-3. Confirm URL, key and reply format with `hacklab probe`: one request to
-   the small model, one to Jev and one to the embedding model, each if
-   enabled. Only the OpenAI-compatible chat and embeddings APIs are
-   implemented.
-4. Write a playbook or a skill per task type, with held-out cases.
-5. Measure one change at a time ([benchmarks](benchmarks.md)).
+1. Read a failing task's record and trace before changing anything
+   ([playbook](playbook.md#read-a-run)).
+2. A task type code can answer: a playbook. One the model gets wrong for a
+   nameable reason: a skill, or a line in `arena-rules.md`.
+3. A platform tool whose result the model misreads: shape the result in
+   `arena_tools`, not in the prompt.
+4. Measure one change at a time on a replayed seed and on a fresh run, and
+   write it into `JOURNAL.md`.

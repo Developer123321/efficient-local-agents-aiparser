@@ -1,10 +1,15 @@
 # configs/live.toml plus Jev: it judges the finished answer and drops clearly
 # irrelevant preloaded passages before the generator reads them. Compare with
-# live.toml on the same cases; tests/test_config.py keeps everything outside
-# [jev] equal to live.toml. Needs TYPESAFE_API_KEY.
+# live.toml on the same dev seed; tests/test_config.py keeps everything
+# outside [jev] equal to live.toml. With OPENROUTER_API_KEY set, Jev is asked
+# at OpenRouter's /api/alpha/decisions as typesafe/jev-1.14; the model and
+# address below are TypeSafe's own API, used with TYPESAFE_API_KEY.
 [model]
 provider = "openai"
 response_format = "json_object"
+input_usd_per_million = 0.20
+output_usd_per_million = 0.40
+extra_body = { usage = { include = true }, provider = { order = ["deepinfra/fp8", "crusoe", "novita"], only = ["deepinfra/fp8", "crusoe", "novita"], allow_fallbacks = true } }
 
 [jev]
 enabled = true
@@ -20,7 +25,8 @@ inventory = true
 preload_documents_under = 40
 tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
 playbooks = "hacklab.event.playbooks:playbooks"
-skills = "hacklab.event:skills"
+rules = "hacklab.event:arena-rules.md"
+on_unverified = "answer"
 
 [guard]
 injection = "flag"
@@ -30,16 +36,16 @@ require_grounded_targets = true
 max_actions = 200
 
 [limits]
-max_steps = 8
-max_calls = 16
+max_steps = 12
+max_calls = 24
 max_retries = 1
 http_retries = 3
 timeout_seconds = 60
 task_timeout_seconds = 300
-max_context_chars = 24000
+max_context_chars = 48000
 max_observation_chars = 4000
 max_output_tokens = 3000
-max_total_tokens = 120000
+max_total_tokens = 600000
 
 [cache]
 mode = "off"

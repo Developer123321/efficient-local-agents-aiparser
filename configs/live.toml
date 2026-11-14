@@ -1,16 +1,24 @@
-# The candidate profile: what the submission image runs. The event's models
-# are Gemma 4 31B (small model), Jev 1.14.0 and Qwen3 Embedding. Set URL, model
-# name and key in .env. base_url is the API prefix BEFORE /chat/completions,
-# for example https://host/v1; a complete URL with a query string is used as
-# it is. This adapter assumes an OpenAI-compatible API.
+# The candidate profile: what the submission image runs (`hacklab arena run`).
+# All three models are reached through OpenRouter with the one key the event
+# hands out: OPENROUTER_API_KEY in .env, in the final the organizers' gateway
+# (OPENROUTER_BASE_URL). Model names are fixed by the event: Gemma 4 31B
+# (ARENA_MAIN_MODEL overrides), typesafe/jev-1.14, qwen/qwen3-embedding-8b.
 #
-# [agent] and [limits] were measured on 13 November on a stand-in (Granite 4.2
-# 8B), before the model was known; nothing here is measured on Gemma 4 yet.
-# tests/test_config.py keeps them equal to configs/openrouter.toml. Change a
-# value here only together with a benchmark number.
+# Nothing here is measured on the event's tasks yet. [limits] and [agent]
+# started from the rehearsal profile (configs/openrouter.toml, Granite 4.2 8B)
+# and differ where the event's rules require it; each difference says why.
+# Change a value only together with a dev-run number.
 [model]
 provider = "openai"
 response_format = "json_object"
+# DeepInfra's fp8 endpoint, where the event runs the model: OpenRouter's list
+# price on 14 November. Scored cost is the key's real usage, not this estimate.
+input_usd_per_million = 0.20
+output_usd_per_million = 0.40
+# The final's gateway pins these endpoints on every request, in this order;
+# dev runs use the same so that cost and behaviour match. usage.include asks
+# OpenRouter to report the cost of each request.
+extra_body = { usage = { include = true }, provider = { order = ["deepinfra/fp8", "crusoe", "novita"], only = ["deepinfra/fp8", "crusoe", "novita"], allow_fallbacks = true } }
 # If the endpoint rejects a request, these are the usual reasons:
 # response_format = "none"   # the endpoint knows no JSON mode
 # max_tokens_parameter = "max_completion_tokens"
@@ -20,8 +28,8 @@ response_format = "json_object"
 # chat_template_kwargs.enable_thinking = true or any reasoning_effort switches
 # it on. Thinking is paid output; on the stand-in model only "low" was worth
 # it. Ask how the event's endpoint is set up, then pin one and measure:
-# extra_body = { chat_template_kwargs = { enable_thinking = false } }   # off
-# extra_body = { reasoning_effort = "low" }                             # on
+# On OpenRouter add reasoning = { effort = "low" } (or "none") to extra_body
+# above; without it the endpoint's default applies.
 # JSON mode: one vLLM release ignored response_format for Gemma 4 with thinking
 # off (vllm-project/vllm#39130). A reply outside JSON costs a repair turn; if
 # `hacklab failures` shows model_content_must_be_json_text, try "json_schema".
@@ -33,9 +41,11 @@ response_format = "json_object"
 # output_usd_per_million = 0.0
 
 [jev]
-# Off until a benchmark on the day's cases shows a gain after its cost: as a
-# judge on the stand-in model, Jev lowered accuracy and raised cost
-# (docs/benchmarks.md). configs/jev-select.toml is this file with Jev on.
+# Off until a dev run shows a gain after its cost: as a judge on the stand-in
+# model, Jev lowered accuracy and raised cost (docs/benchmarks.md).
+# configs/jev-select.toml is this file with Jev on. With OPENROUTER_API_KEY
+# set, Jev is asked at OpenRouter's /api/alpha/decisions as typesafe/jev-1.14;
+# the two lines below are TypeSafe's own API, used with TYPESAFE_API_KEY.
 enabled = false
 model = "jev-1.14.0"
 base_url = "https://api.typesafe.ai/v1/systemone"
@@ -45,10 +55,10 @@ base_url = "https://api.typesafe.ai/v1/systemone"
 threshold = 0.7  # TypeSafe's suggested starting point, not a measured optimum.
 
 [embedding]
-# Qwen3 Embedding, the third provided model. Off until a benchmark shows a
-# gain: configs/embed-rank.toml is this file with it on. Model name and
-# address come from EMBEDDING_MODEL_NAME and EMBEDDING_BASE_URL; without an
-# address and a key of its own it uses the small model's.
+# Qwen3 Embedding, the third provided model. Off until a dev run shows a
+# gain: configs/embed-rank.toml is this file with it on. With
+# OPENROUTER_API_KEY set it is qwen/qwen3-embedding-8b at the small model's
+# address; EMBEDDING_MODEL_NAME and EMBEDDING_BASE_URL override.
 enabled = false
 
 [agent]
@@ -61,12 +71,16 @@ preload_documents_under = 40
 # Every tool costs prompt tokens on every call. Remove what the scenario does
 # not need; add "phases" if tasks ask about attack stages.
 tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
-# Code-only solvers, tried first, and recipes for the model. Both live inside
-# the package, so they are in the image without another COPY line.
+# Code-only solvers, tried first, and the event's standing rules for the
+# model. Both live inside the package, so they are in the image without
+# another COPY line. No skills yet: the rehearsal's recipes describe another
+# answer format; write one when a dev-run trace shows a wrong turn.
 playbooks = "hacklab.event.playbooks:playbooks"
-skills = "hacklab.event:skills"
+rules = "hacklab.event:arena-rules.md"
+# A wrong answer and no answer both score 0 here, so what passed the checks
+# is submitted instead of an abstention.
+on_unverified = "answer"
 # thought_chars = 300        # Schema-guided reasoning; costs output tokens.
-# on_unverified = "answer"   # If a wrong answer costs no more than an abstention.
 # decimal_separator = "comma"  # Fix once the data's convention is known; default "auto".
 
 [guard]
@@ -81,22 +95,24 @@ max_actions = 200
 # protected_targets = ["night-shift", "hub-scanner"]
 
 [limits]
-max_steps = 8
-max_calls = 16
+# The event's tasks need more hops than the rehearsal's (the starter kit
+# allows 25 steps), and every prompt carries the operator rules: more steps,
+# more context and a token allowance that holds them. Not measured.
+max_steps = 12
+max_calls = 24
 max_retries = 1
 # Attempts after a rate limit, a server error or a lost connection; they wait
 # 0.5, 1 and 2 seconds. Each attempt counts against max_calls.
 http_retries = 3
 timeout_seconds = 60
 task_timeout_seconds = 300
-max_context_chars = 24000
+max_context_chars = 48000
 max_observation_chars = 4000  # One tool result; resent with every later step.
 max_output_tokens = 3000
 # Checked before each request against the request's size in BYTES plus the
-# output allowance, which is about four times its tokens. 16000 turned every
-# task of more than three steps into an abstention; the rehearsal's longest
-# task needed 30000.
-max_total_tokens = 120000
+# output allowance, which is about four times its tokens: twelve requests of
+# up to 48000 characters each must fit.
+max_total_tokens = 600000
 # max_cost_usd = 0.02  # Requires all enabled prices to be explicitly configured.
 
 # The team's development allowance across all runs in this tracking database.

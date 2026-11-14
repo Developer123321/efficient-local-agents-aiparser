@@ -99,23 +99,32 @@ def test_every_shipped_profile_is_valid_and_ships_with_cache_and_allowance_off(m
 CONFIGS = Path(__file__).parents[1] / "configs"
 
 
-def test_the_candidate_profile_is_the_measured_one():
+def test_the_candidate_profile_differs_from_the_measured_one_only_where_the_event_requires():
     live = load_config(CONFIGS / "live.toml")
     measured = load_config(CONFIGS / "openrouter.toml")
-    # The numbers in docs/benchmarks.md come from openrouter.toml. The profile
-    # that is submitted once had tighter limits than the one that was measured,
-    # and lost whole task categories to its own token budget.
-    assert live.limits == measured.limits
-    assert live.agent.model_dump(exclude={"playbooks"}) == measured.agent.model_dump(
-        exclude={"playbooks"}
+    # The numbers in docs/benchmarks.md come from openrouter.toml, the rehearsal
+    # profile. The submitted profile follows it except for what the event's
+    # rules changed; a difference that is not named here is a mistake.
+    event_limits = {"max_steps", "max_calls", "max_context_chars", "max_total_tokens"}
+    assert live.limits.model_dump(exclude=event_limits) == measured.limits.model_dump(
+        exclude=event_limits
     )
+    # More hops, the operator rules in every prompt, and room for both.
+    assert all(getattr(live.limits, name) > getattr(measured.limits, name) for name in event_limits)
+    assert live.limits.max_total_tokens >= live.limits.max_steps * live.limits.max_context_chars
+    event_agent = {"playbooks", "skills", "rules", "on_unverified"}
+    assert live.agent.model_dump(exclude=event_agent) == measured.agent.model_dump(
+        exclude=event_agent
+    )
+    # A wrong answer and no answer both score 0 at the event.
+    assert (live.agent.on_unverified, measured.agent.on_unverified) == ("answer", "abstain")
     scenario = {"allowed_actions", "protected_targets"}
     assert live.guard.model_dump(exclude=scenario) == measured.guard.model_dump(exclude=scenario)
     assert live.model.response_format == measured.model.response_format
-    # Jev stays off until a benchmark on the day's cases shows a gain.
+    # Jev stays off until a dev run shows a gain.
     assert live.jev.enabled is False
-    # A profile written from scratch starts from the same limits.
-    assert live.limits.model_dump(exclude={"http_retries"}) == Limits().model_dump(
+    # A profile written from scratch starts from the measured limits.
+    assert measured.limits.model_dump(exclude={"http_retries"}) == Limits().model_dump(
         exclude={"http_retries"}
     )
     assert live.guard.max_actions == GuardConfig().max_actions
@@ -135,14 +144,16 @@ def test_the_candidate_profile_finds_its_solvers_and_recipes_wherever_it_runs(
     tmp_path, monkeypatch
 ):
     from hacklab import playbooks
-    from hacklab.agent import skill_files
+    from hacklab.agent import _rules, skill_files
 
     live = load_config(CONFIGS / "live.toml")
     # Both are named by package, not by path: the image's working directory
     # and the team's laptops need not agree.
     monkeypatch.chdir(tmp_path)
     assert isinstance(playbooks.load(live.agent.playbooks), playbooks.Playbooks)
-    assert len(skill_files(live.agent.skills)) >= 2
+    assert "DENIED_SECURITY" in _rules(live.agent.rules)
+    rehearsal = load_config(CONFIGS / "openrouter.toml")
+    assert len(skill_files(rehearsal.agent.skills)) >= 2
 
 
 def test_guard_and_agent_settings_are_validated():

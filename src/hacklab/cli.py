@@ -86,6 +86,8 @@ def doctor(config: Config) -> dict:
         if not recipes:
             where = skill_directory(config.agent.skills)
             problems.append(f"no skill file with a match: line in {str(where)!r}")
+    if config.agent.rules and not skill_directory(config.agent.rules).is_file():
+        problems.append(f"rules file {config.agent.rules!r} cannot be found")
     return {
         "python": platform.python_version(),
         "platform": f"{platform.system()} {platform.machine()}",
@@ -105,6 +107,8 @@ def doctor(config: Config) -> dict:
         "cache_mode": config.cache.mode,
         "playbooks": {"reference": config.agent.playbooks or None, "solvers": solvers},
         "skills": {"reference": config.agent.skills or None, "files": recipes},
+        "rules": config.agent.rules or None,
+        "arena_key_present": bool(read_secret("ARENA_API_KEY")),
         "guards": {
             "injection": config.guard.injection,
             "compact_secrets": config.guard.compact_secrets,
@@ -276,10 +280,65 @@ def parser() -> argparse.ArgumentParser:
     decode.add_argument("--key", action="append", default=[])
     indicators = commands.add_parser("iocs")
     indicators.add_argument("file", type=Path)
+    arena = commands.add_parser("arena", help="The event's Task API (ARENA_API_KEY in .env)")
+    actions = arena.add_subparsers(dest="arena_command", required=True)
+    run = actions.add_parser("run", help="Start a run, answer its tasks, finish it")
+    run.add_argument("--config", type=Path)
+    run.add_argument(
+        "--kind",
+        choices=("dev", "final"),
+        default=os.environ.get("ARENA_RUN_KIND") or "dev",
+        help="Default: $ARENA_RUN_KIND, else dev. The final is started by the organizers.",
+    )
+    run.add_argument("--seed", type=int, help="Replay the tasks of an earlier dev run")
+    run.add_argument("--tasks", help="Only these task ids, comma-separated, e.g. t01,t03")
+    run.add_argument("--level", help="Only these levels, comma-separated, e.g. 1 or 1,2")
+    run.add_argument("--limit", type=int, help="At most this many of the selected tasks")
+    run.add_argument("--workers", type=int, default=4, help="Tasks worked on side by side")
+    run.add_argument("--note", default="", help="One line about this run for the dashboard")
+    run.add_argument(
+        "--no-finish", action="store_true", help="Leave the run open: no score, no answers"
+    )
+    for name in ("me", "payloads", "submissions"):
+        actions.add_parser(name)
+    show = actions.add_parser("show", help="A run with grades; a finished dev run with answers")
+    show.add_argument("run_id")
     server = commands.add_parser("mock-server")
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8080)
     return app
+
+
+def _profile(args: argparse.Namespace) -> Path | None:
+    """`--config`, or for an arena run the candidate profile beside the working directory."""
+    given = getattr(args, "config", None)
+    if given is None and args.command == "arena" and Path("configs/live.toml").is_file():
+        return Path("configs/live.toml")
+    return given
+
+
+def _arena_directory() -> Path:
+    return Path(os.environ.get("HACKLAB_ARENA_DIR") or ".state/arena")
+
+
+def _arena(args: argparse.Namespace) -> int:
+    """Read-only views of the team's state on the platform."""
+    from hacklab.event.arena import Arena
+
+    arena = Arena.from_env()
+    try:
+        if args.arena_command == "show":
+            found = arena.run(args.run_id)
+            target = _arena_directory() / "runs" / Path(args.run_id).name / "run.json"
+            _private_json(target, found)
+            keys = ("run_id", "kind", "seed", "status", "accuracy", "cost_usd", "cost_score")
+            summary = {key: found.get(key) for key in (*keys, "final_score")}
+            emit({**summary, "tasks": len(found.get("tasks", [])), "details": str(target)})
+        else:
+            emit(getattr(arena, args.arena_command)())
+    finally:
+        arena.close()
+    return 0
 
 
 def _read_task(path: Path) -> Task:
@@ -521,7 +580,9 @@ def main() -> int:
 
             serve(args.host, args.port)
             return 0
-        config = load_config(getattr(args, "config", None))
+        if args.command == "arena" and args.arena_command != "run":
+            return _arena(args)
+        config = load_config(_profile(args))
         if args.command == "doctor":
             report = doctor(config)
             emit(report)
@@ -560,6 +621,25 @@ def main() -> int:
             return int(answer.status == "error")
         elif args.command == "submit":
             emit(_submit(args, config, tracker))
+        elif args.command == "arena":
+            from hacklab.event.arena_run import run
+
+            if not 1 <= args.workers <= 16:
+                raise ValueError("workers must be 1..16")
+            summary = run(
+                config,
+                tracker,
+                kind=args.kind,
+                seed=args.seed,
+                only=args.tasks.split(",") if args.tasks else None,
+                levels=[int(level) for level in args.level.split(",")] if args.level else None,
+                limit=args.limit,
+                workers=args.workers,
+                note=args.note,
+                directory=_arena_directory(),
+                finish=not args.no_finish,
+            )
+            emit(summary)
         return 0
     except Exception as exc:
         # Provider exceptions and validation errors may contain user inputs; never echo bodies.

@@ -67,7 +67,7 @@ stock Ubuntu and Debian containers (`scripts/portability-test`).
 
 The agent is evaluated in a container, so the image is part of what must
 work. `just container-test` builds the [Dockerfile](../Dockerfile) and then
-checks, with no network at all:
+checks, with no network beyond a stand-in on a local address:
 
 1. the rehearsal incident is solved by the playbooks;
 2. the candidate profile finds its playbooks and skills inside the image
@@ -75,8 +75,11 @@ checks, with no network at all:
    model over a local address, with the baseline and the candidate profile;
 3. Jev and the embedding model work over a local address, and the agent
    still answers when they are absent;
-4. the container cannot reach the internet;
-5. the agent runs as an unprivileged user and cannot change its own code.
+4. started without a command and with only the event's five variables, the
+   container runs a two-task run against a stand-in gateway, submits both
+   tasks and finishes; started again, it finds nothing left to do;
+5. the container cannot reach the internet;
+6. the agent runs as an unprivileged user and cannot change its own code.
 
 It uses `docker` when present, else `podman`; `CONTAINER_ENGINE` picks one.
 Only the build needs the registries and PyPI. On an ARM laptop,

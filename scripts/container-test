@@ -96,6 +96,19 @@ answered /work/answers-embedding.jsonl
 answered /work/answers-without-embedding.jsonl
 echo 'embedding: reachable through a local route; without a model name, 9 answers and no error'
 
+# 3c. The event's run contract: started without a command and with nothing but
+# the organizers' five variables, the container starts a run on the Task API,
+# mirrors the workspaces, submits every task and finishes the run.
+summary=$("$engine" run "${shared[@]}" -e ARENA_BASE_URL=http://127.0.0.1:8080 \
+  -e ARENA_API_KEY=arena_synthetic -e OPENROUTER_BASE_URL=http://127.0.0.1:8080/v1 \
+  -e OPENROUTER_API_KEY=synthetic -e ARENA_RUN_KIND=dev "$image")
+grep -q '"tasks_submitted": 2' <<<"$summary"
+# Options alone are options of that run, as in the organizers' local test.
+"$engine" run "${shared[@]}" -e ARENA_BASE_URL=http://127.0.0.1:8080 \
+  -e ARENA_API_KEY=arena_synthetic -e OPENROUTER_BASE_URL=http://127.0.0.1:8080/v1 \
+  -e OPENROUTER_API_KEY=synthetic "$image" --tasks t01 --no-finish | grep -q '"tasks": 0'
+echo 'arena: a run of two tasks submitted and finished through a local gateway address'
+
 # 4. The agent's network namespace must not reach the internet.
 probe='python -c "import socket; socket.create_connection((\"1.1.1.1\", 443), 3)" 2>/dev/null'
 if inside "$probe" "${shared[@]}"; then
