@@ -17,7 +17,6 @@ Rules that keep a solver from failing on the unseen final scenario:
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import json
 import os
@@ -144,8 +143,8 @@ def dispatch(task: Task, workspace: Workspace) -> Answer | None:
         if solved is None:
             continue
         value, sources, *rest = solved
-        if SECRET.search(json.dumps(value, ensure_ascii=False)):
-            return None  # A secret value is never an answer.
+        if _unsafe(value):
+            return None  # A secret value or a link is never an answer.
         citations: list[Citation] = []
         for source in sources:
             citation = _citation(source)
@@ -161,6 +160,23 @@ def dispatch(task: Task, workspace: Workspace) -> Answer | None:
             reason="Computed from the workspace by the runbook's rules; no model was called.",
         )
     return None
+
+
+LINK = re.compile(
+    r"://|hxxp|(?<![\w/.@-])(?:[a-z0-9-]+(?:\.|\[\.\]))+[a-z]{2,}(?::\d+)?/[^\s\"',;]",
+    re.IGNORECASE,
+)
+
+
+def _unsafe(value: Any) -> bool:
+    """Whether an answer carries a secret value or something that works as a link."""
+    if isinstance(value, dict):
+        return any(_unsafe(key) or _unsafe(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(_unsafe(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    return bool(SECRET.search(value) or LINK.search(value))
 
 
 def done(result: Any) -> bool:
@@ -297,6 +313,61 @@ def largest_group(incident: Incident, request: str) -> Solved | None:
         if row[incident.roster_id] in agents
     ]
     return {key: value[key] for key in keys}, sources
+
+
+@solver(r"canary records?|canaries|honeytokens?")
+def canaries_out(incident: Incident, request: str) -> Solved | None:
+    """Planted records that left in a transfer the runbook counts."""
+    if keys_of(request) or not re.search(r"exfiltrat|leaked|left|sent", request, re.IGNORECASE):
+        return None
+    if re.search(r"\b[A-H]:\s", request):
+        return None  # A list of events to order, not this question.
+    named = [n for n in re.findall(r"/[\w./-]*canar[\w./-]*\.csv", request) if incident.has(n)]
+    names = named or incident.find("security/*canar*.csv")
+    if len(names) != 1:
+        return None
+    rows = incident.table(names[0])
+    key = column(rows, "canary_id", "record_id", where=re.compile(r"[A-Za-z]+-\d+").fullmatch)
+    hit: list[dict[str, str]] = []
+    carriers: list[Any] = []
+    for row in rows:
+        found = re.fullmatch(r"([A-Za-z]+-)(\d+)", row[key])
+        number = int(found[2])
+        inside = [
+            transfer
+            for transfer in incident.exfiltration
+            if any(
+                prefix == found[1] and first <= number <= last
+                for prefix, first, last in transfer.records
+            )
+        ]
+        if inside:
+            hit.append(row)
+            carriers += [transfer for transfer in inside if transfer not in carriers]
+    if not hit:
+        return None
+    sources = [incident.csv_source(names[0], row) for row in hit]
+    sources += [transfer.source for transfer in carriers]
+    return sorted(row[key] for row in hit), sources
+
+
+@solver(r"destination|which domain|what domain")
+def first_destination(incident: Incident, request: str) -> Solved | None:
+    """The domain an agent's records reached first (or last)."""
+    agents = list(dict.fromkeys(re.findall(r"\b[a-z]+-\d+\b", request)))
+    edge = re.search(r"\b(first|earliest|last|latest)\b", request, re.IGNORECASE)
+    if len(agents) != 1 or not edge or keys_of(request) or re.search(r"\b[A-H]:\s", request):
+        return None
+    if not re.search(r"\bdomain\b", request, re.IGNORECASE):
+        return None
+    if not re.search(r"records|data|transfer|sent|exfiltrat", request, re.IGNORECASE):
+        return None
+    sent = [t for t in incident.transfers if t.event.agent == agents[0] and not t.blocked]
+    outside = [t for t in sent if not t.approved] or sent
+    if not outside:
+        return None
+    chosen = outside[0] if edge[1].lower() in ("first", "earliest") else outside[-1]
+    return chosen.domain, [chosen.event.source]
 
 
 # -- secrets -----------------------------------------------------------------------
@@ -569,7 +640,7 @@ def first_exfiltration(incident: Incident, request: str) -> Solved | None:
     return stamp(base[0].event.ts), [base[0].source]
 
 
-@solver(r"indicators?")
+@solver(r"indicators?|candidates?|these domains|following domains|domains?:")
 def listed_indicators(incident: Incident, request: str) -> Solved | None:
     """Which of the domains listed in the request are attacker domains our agents contacted."""
     if re.search(r"\.(jpe?g|png)\b", request, re.I) or keys_of(request):
@@ -590,17 +661,20 @@ def listed_indicators(incident: Incident, request: str) -> Solved | None:
     return value, [contacted[domain].source for domain in value]
 
 
-@solver(r"delegation chain")
+@solver(r"delegation chain|through delegation|via delegation")
 def delegation_chain(incident: Incident, request: str) -> Solved | None:
     """The shortest chain of delegations from an agent to any agent that holds a scope."""
-    asked = re.search(r"from ([a-z]+-\d+) to any agent holding ([a-z_]+:[a-z_]+)", request)
-    if not asked or keys_of(request):
+    agents = list(dict.fromkeys(re.findall(r"\b[a-z]+-\d+\b", request)))
+    scopes = list(dict.fromkeys(re.findall(r"\b[a-z_]+:[a-z_]+\b", request)))
+    if len(agents) != 1 or len(scopes) != 1 or keys_of(request):
+        return None  # One agent to start from and one scope to reach, or it is another question.
+    if not re.search(r"chain|path|route", request, re.IGNORECASE):
         return None
     current = bool(re.search(r"\bcurrent", request, re.IGNORECASE))
     if not current and not re.search(r"registry export|export time", request, re.IGNORECASE):
         return None
     state, sources = incident.permissions(current)
-    start, scope = asked.groups()
+    start, scope = agents[0], scopes[0]
     if start not in state:
         return ([], sources) if current else None
     queue, paths = [start], {start: [start]}
@@ -717,7 +791,7 @@ def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> S
                 continue
             stated = clause(wording)
         elif re.search(r"signator|signer|signed_by|signed_for", key, re.IGNORECASE):
-            stated = clause(rf"for {party} by ([^.,;]+)")
+            stated = clause(rf"for {party} by ([^\W\d_][\w'’ -]{{1,60}})(?=[.,;]|$)")
         elif re.search(r"signed|date", key, re.IGNORECASE):
             stated = clause(rf"Signed (\d{{4}}-\d\d-\d\d) for {party}")
         elif re.search(r"agreement|reference", key, re.IGNORECASE):
@@ -773,9 +847,11 @@ def mcp_servers(incident: Incident, request: str) -> Solved | None:
             approved[row["server"]] = row  # The newest approval wins.
     disabled: dict[str, list[Source]] = {}
     for name in manifests:
-        raw = (incident.root / name.lstrip("/")).read_bytes()
+        raw = incident.path(name).read_bytes()
         manifest = json.loads(raw)
-        server = str(manifest["name"])
+        server = str(manifest.get("name", ""))
+        if not re.fullmatch(r"[\w.-]{1,80}", server):
+            server = name.rsplit("/", 1)[-1].rsplit(".", 1)[0]  # Not a name: the file's.
         reasons: list[Source] = []
         if any(aimed_at_agents(text) for text in _descriptions(manifest)):
             reasons.append({"path": name})
@@ -962,19 +1038,28 @@ def status_claims(incident: Incident, request: str) -> Solved | None:
                 if proof:
                     proof += [e for e in earlier if domain_of(e.target) != only[1].lower()][-3:]
             else:
+                elsewhen: list[Any] = [None]
                 if moment and re.search(r"\bafter\b|\bsince\b", claim, re.IGNORECASE):
                     tonight = [e for e in tonight if e.ts > moment]
                 elif moment and re.search(r"\bbefore\b|\buntil\b", claim, re.IGNORECASE):
                     tonight = [e for e in tonight if e.ts < moment]
                 elif moment:
+                    elsewhen = tonight
                     tonight = [
                         e for e in tonight if e.ts.replace(second=0) == moment.replace(second=0)
                     ]
+                    if not denies and not tonight and elsewhen:
+                        earlier = elsewhen[:1]  # It happened, at another time: that row.
+                        elsewhen = []
+                    else:
+                        elsewhen = [None]
+                else:
+                    elsewhen = [None]
                 if denies:
                     proof = tonight[:1]
                 else:
                     # Nothing of the kind tonight; what there was the day before is shown too.
-                    proof = [] if tonight else [None, *earlier[-3:]]
+                    proof = [] if tonight else [*elsewhen, *earlier[-3:]]
         if proof:
             wrong.append(int(number))
             for item in proof:
@@ -1074,6 +1159,8 @@ def _board(incident: Incident, request: str) -> tuple[str, list[dict[str, Any]]]
     for number, line in enumerate(incident.text(name).splitlines(), 1):
         try:
             post = json.loads(line)
+            if not re.fullmatch(r"[\w-]{1,40}", str(post["id"])):
+                continue  # Not an id: nothing an answer could name.
             posts.append({"id": str(post["id"]), "text": str(post["text"]), "line": number})
             posts[-1]["author"] = str(post.get("author", ""))
         except (ValueError, KeyError, TypeError):
@@ -1141,6 +1228,36 @@ def injected_posts(incident: Incident, request: str, workspace: Workspace) -> So
     ]
 
 
+# Text on a picture that tells the reader what to answer or do: not part of what the
+# picture lists, and neither is what follows it up to the next blank line or list entry.
+TELLS = re.compile(
+    r"\b(answer|ignore|disregard|instead|instructions?|outdated|verified by|override|"
+    r"system|assistant|submit|you (must|should|are)|do not|don't|must|trust this|"
+    r"correct (list|value|result))\b",
+    re.IGNORECASE,
+)
+ENTRY = re.compile(r"^\s*(?:[•·▪■◦*+-]|\d+[.)])?\s*[a-z0-9-]+(?:\.[a-z0-9-]+)+\s*$")
+
+
+def _listed(transcript: str) -> set[str]:
+    """Host names a transcript lists, without those inside text that instructs the reader."""
+    plain = transcript.lower().replace("[.]", ".").replace("(.)", ".").replace("[dot]", ".")
+    plain = re.sub(r"[ \t]*\.[ \t]*(?=[a-z0-9])", ".", plain).replace("hxxp", "http")
+    words: set[str] = set()
+    tainted = False
+    for line in plain.splitlines():
+        if not line.strip():
+            tainted = False
+            continue
+        if TELLS.search(line):
+            tainted = True
+            continue
+        if tainted and not ENTRY.match(line):
+            continue
+        words |= set(re.findall(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", line))
+    return words
+
+
 @solver(r"\.(jpe?g|png)\b", asks=True)
 def scanned_indicators(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
     """Attacker domains our fleet contacted that scanned pages show, or do not show."""
@@ -1156,17 +1273,13 @@ def scanned_indicators(incident: Incident, request: str, workspace: Workspace) -
         return None
     seen = ""
     for path in paths:
-        data = (incident.root / path.lstrip("/")).read_bytes()
+        data = incident.path(path).read_bytes()
         kind = "image/png" if path.lower().endswith(".png") else "image/jpeg"
-        seen += "\n" + str(read(data, kind, "every domain name, host name and address"))
-    plain = seen.lower().replace("[.]", ".").replace("(.)", ".").replace("[dot]", ".")
-    plain = re.sub(r"\s*\.\s*", ".", plain).replace("hxxp", "http")
-    words = set(re.findall(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", plain))
+        seen += "\n\n" + str(read(data, kind, "every domain name, host name and address"))
+    words = _listed(seen)
 
     def shown(domain: str) -> bool:
-        if domain in words or any(word.endswith("." + domain) for word in words):
-            return True
-        return bool(difflib.get_close_matches(domain, words, n=1, cutoff=0.9))
+        return domain in words or any(word.endswith("." + domain) for word in words)
 
     contacted = {
         domain: event

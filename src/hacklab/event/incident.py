@@ -153,6 +153,7 @@ def decodings(text: str) -> list[str]:
     base32, percent-encoding, HTML entities and ROT13. A reading that is not
     text is dropped.
     """
+    text = text[:20000]  # A description or a post, not a file.
     plain = INVISIBLE.sub("", text)
     texts = [plain]
 
@@ -424,19 +425,29 @@ class Incident:
 
     # -- files -------------------------------------------------------------------
 
+    def path(self, name: str) -> Path:
+        """A workspace name as a file below the root; anything else is unreadable."""
+        found = (self.root / name.lstrip("/")).resolve()
+        if not found.is_relative_to(self.root.resolve()):
+            raise Unreadable("outside the workspace")
+        return found
+
     def text(self, name: str) -> str:
-        path = self.root / name.lstrip("/")
+        path = self.path(name)
         try:
             return path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             raise Unreadable(name) from exc
 
     def has(self, name: str) -> bool:
-        return (self.root / name.lstrip("/")).is_file()
+        try:
+            return self.path(name).is_file()
+        except (Unreadable, OSError):
+            return False
 
     def table(self, name: str) -> list[dict[str, str]]:
         if name not in self._cache:
-            self._cache[name] = read_csv(self.root / name.lstrip("/"))
+            self._cache[name] = read_csv(self.path(name))
         return self._cache[name]
 
     def find(self, pattern: str) -> list[str]:
@@ -507,7 +518,7 @@ class Incident:
                     'question about it. Reply with one JSON object {"answer": true} or '
                     '{"answer": false} and nothing else.',
                 },
-                {"role": "user", "content": f"Rule: {line.strip()}\n\nQuestion: {question}"},
+                {"role": "user", "content": f"Rule: {line.strip()[:1500]}\n\nQuestion: {question}"},
             ],
             {
                 "type": "object",
@@ -813,7 +824,10 @@ class Incident:
             copy, original, uploader, rule = self._artifact(row)
             if uploader in self.red_team or uploader.removeprefix("external:") in self.red_team:
                 continue
-            path = self.root / copy.lstrip("/")
+            try:
+                path = self.path(copy)
+            except Unreadable:
+                continue  # An index row that points outside the workspace.
             # The SIEM read what this code cannot: text inside a picture or a PDF.
             judged = "instruction" in rule.lower()
             if not judged and path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".gif", ".pdf"):
