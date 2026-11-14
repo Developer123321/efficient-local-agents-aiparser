@@ -82,6 +82,10 @@ def open_ticket(incident: Incident) -> str | None:
         text = incident.text(name)
         parts = text.split("---", 2)
         if len(parts) == 3 and re.search(r"^status:\s*open\s*$", parts[1], re.MULTILINE):
+            asker = re.search(r"^requested_by:\s*(.+)$", parts[1], re.MULTILINE)
+            words = set(re.findall(r"[\w.-]+", asker[1].lower())) if asker else set()
+            if words & {flag.lower() for flag in incident.flagged}:
+                return None  # Opened by an account the operator flagged: not an instruction.
             body = re.sub(r"^\s*#[^\n]*\n", "", parts[2].strip()).strip()
             found.append(body)
     return found[0] if len(found) == 1 else None
@@ -138,6 +142,8 @@ def dispatch(task: Task, workspace: Workspace) -> Answer | None:
         if solved is None:
             continue
         value, sources, *rest = solved
+        if SECRET.search(json.dumps(value, ensure_ascii=False)):
+            return None  # A secret value is never an answer.
         citations: list[Citation] = []
         for source in sources:
             citation = _citation(source)
@@ -1403,6 +1409,8 @@ def _letter(
         return None
     if not 8 <= len(say) <= 500 or SECRET.search(say) or "@" in say or "://" in say:
         return None
+    if re.search(r"\b[a-z0-9-]+(\.|\[\.\]|\(\.\))[a-z]{2,}/\S|\bwww\.|hxxp", say, re.IGNORECASE):
+        return None  # A host with a path is a link, however it is written.
     if re.search(r"\b[A-Z]-\d{3,}\b|\b(?:\d[ -]?){9,}\b", say):
         return None  # A record id or a long number: not ours to pass on.
     lines = [say]
@@ -1433,15 +1441,34 @@ def inbox(incident: Incident, request: str, workspace: Workspace) -> Solved | No
         return None
     name = names[0]
     head, _, body = incident.text(name).lstrip().removeprefix("---").partition("\n---")
-    sender = re.search(r"^from:.*?([^\s<>\"']+@[^\s<>\"']+)", head, re.MULTILINE | re.IGNORECASE)
-    if not sender or not body.strip():
+    lines = re.findall(
+        r"^(from|sender|reply-to|return-path|x-original-sender):(.*)$",
+        head,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    stated = [
+        (key.lower(), found)
+        for key, rest in lines
+        for found in re.findall(r"[^\s<>\"',;()]+@[^\s<>\"',;()]+", rest)
+    ]
+    senders = [found for key, found in stated if key == "from"]
+    if not senders or not body.strip():
         return None
-    address = sender[1]
+    address = senders[0]
     source: list[Source] = [{"path": name}]
     verified = {r[incident.contact_address] for r in incident.contacts if incident.verified(r)}
+    flagged = {flag.lower() for flag in incident.flagged}
     account = address.split("@")[0].lower()
-    if address not in verified or account in {flag.lower() for flag in incident.flagged}:
-        return address, source, "DENIED_SECURITY"  # A look-alike, a stranger, a flagged account.
+    display = set(re.findall(r"[\w.-]+", " ".join(rest for key, rest in lines).lower()))
+    if (
+        address not in verified
+        or not address.isascii()
+        or any(found != address for _, found in stated)
+        or account in flagged
+        or display & flagged
+    ):
+        # A look-alike, a stranger, a second address behind the first, a flagged account.
+        return address, source, "DENIED_SECURITY"
     model = workspace.model() if workspace.model else None
     if model is None:
         return None
