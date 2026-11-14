@@ -286,6 +286,20 @@ def read_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
     return title, rows
 
 
+def _service_column(rows: list[dict[str, str]], taken: set[str]) -> str:
+    """The column that names a service: one lower-case word per cell, such as hub-api."""
+    for name in ("svc", "service", "system"):
+        if name in rows[0]:
+            return name
+    word = re.compile(r"[a-z]+(-[a-z]+)*")
+    keys = [k for k in rows[0] if k not in taken and not k.startswith("_")]
+    for key in keys[1:]:  # Never the first column: that is the row's id.
+        values = [row[key] for row in rows]
+        if all(word.fullmatch(value) for value in values) and len(set(values)) > 1:
+            return key
+    raise Unreadable("no service column")
+
+
 @dataclass
 class Event:
     ts: datetime
@@ -558,8 +572,22 @@ class Incident:
         return column(self.contacts, "via", "channel", "email", where=lambda v: "@" in v)
 
     @cached_property
+    def _owners(self) -> tuple[str, str]:
+        """(name column of the contacts, owner column of the roster): where the two lists meet."""
+        best: tuple[int, str, str] = (1, "", "")
+        for theirs in [k for k in self.contacts[0] if not k.startswith("_")]:
+            names = {row[theirs] for row in self.contacts if " " in row[theirs]}
+            for ours in [k for k in self.roster[0] if not k.startswith("_")]:
+                shared = len(names & {row[ours] for row in self.roster})
+                if shared > best[0]:
+                    best = (shared, theirs, ours)
+        if not best[1]:
+            raise Unreadable("no owner column")
+        return best[1], best[2]
+
+    @cached_property
     def contact_name(self) -> str:
-        return column(self.contacts, "name", "label", "person")
+        return self._owners[0]
 
     def verified(self, row: dict[str, str]) -> bool:
         return row.get("verified", "").lower() in ("yes", "true", "1")
@@ -582,14 +610,31 @@ class Incident:
 
     @cached_property
     def roster_id(self) -> str:
-        return column(self.roster, "agent_id", "id", "agent")
+        return column(self.roster, "agent_id", first=True)
 
     @cached_property
     def roster_owner(self) -> str:
-        names = {row[self.contact_name] for row in self.contacts}
-        return column(
-            self.roster, "responsible", "owner_person", "owner", where=lambda v: v in names
-        )
+        return self._owners[1]
+
+    @cached_property
+    def roster_stand_in(self) -> str:
+        """The roster column that names stand-ins: agent ids, one or several."""
+        ids = {row[self.roster_id] for row in self.roster}
+        for key in [k for k in self.roster[0] if k != self.roster_id and not k.startswith("_")]:
+            values = [row[key] for row in self.roster if row[key]]
+            if values and all(set(re.split(r"\s*;\s*", value)) <= ids for value in values):
+                return key
+        raise Unreadable("no stand-in column")
+
+    @cached_property
+    def roster_critical(self) -> str:
+        """The roster column that marks critical agents: filled exactly where a stand-in is."""
+        marked = [bool(row[self.roster_stand_in]) for row in self.roster]
+        taken = (self.roster_id, self.roster_stand_in, self.roster_owner)
+        for key in [k for k in self.roster[0] if k not in taken and not k.startswith("_")]:
+            if [bool(row[key]) for row in self.roster] == marked:
+                return key
+        raise Unreadable("no critical column")
 
     def owner_contact(self, agent: str) -> dict[str, str]:
         """The verified contact row of an agent's human owner."""
@@ -911,41 +956,48 @@ class Incident:
     @cached_property
     def tokens(self) -> list[dict[str, str]]:
         """The token inventory with `id`, `svc`, `owner` and `consumers` columns."""
+        rows = self.table("fleet/tokens.csv")
         agents = {row[self.roster_id] for row in self.roster}
+        owner = column(rows, "owner_agent", where=lambda value: value in agents)
+        consumers = column(
+            rows,
+            "consumer_services",
+            "used_by",
+            whole=lambda values: any(";" in value for value in values),
+        )
+        service = _service_column(rows, taken={owner, consumers})
         return canon(
-            self.table("fleet/tokens.csv"),
-            id=(("secret_id", "token_id", "token"), {"first": True}),
-            svc=(("svc", "service"), {}),
-            owner=(("owner_agent", "owner"), {"where": lambda value: value in agents}),
-            consumers=(
-                ("consumer_services", "used_by", "consumers"),
-                {"whole": lambda values: any(";" in value for value in values)},
-            ),
+            rows,
+            id=(("secret_id", "token_id"), {"first": True}),
+            svc=((service,), {}),
+            owner=((owner,), {}),
+            consumers=((consumers,), {}),
         )
 
     @cached_property
     def calendar(self) -> list[dict[str, Any]]:
         """Active entries of the change calendar with UTC `start` and `end`."""
-        rows = canon(
-            self.table("ops/change_calendar.csv"),
-            id=(("entry_id", "id"), {"first": True}),
-            svc=(("svc", "service"), {}),
-            kind=(("kind", "type"), {"whole": lambda values: "freeze" in values}),
-            start=(("start", "from", "begin"), {}),
-            end=(("end", "to", "until"), {}),
-            state=(
-                ("status", "outcome", "state"),
-                {"whole": lambda values: "active" in values and len(set(values)) < 6},
-            ),
-        )
+        rows = self.table("ops/change_calendar.csv")
+        kind = column(rows, "kind", whole=lambda values: "freeze" in values)
+        state = column(rows, "status", "outcome", whole=lambda v: "active" in v and len(set(v)) < 6)
+        times = [
+            key
+            for key in rows[0]
+            if not key.startswith("_")
+            and all(is_time(row[key]) for row in rows if row[key])
+            and any(row[key] for row in rows)
+        ]
+        if len(times) != 2:
+            raise Unreadable("calendar times")
+        service = _service_column(rows, taken={kind, state})
         found = []
         for row in rows:
-            if row["state"].lower() != "active":
+            if row[state].lower() != "active":
                 continue
-            entry: dict[str, Any] = dict(row)
-            for key in ("start", "end"):
+            entry: dict[str, Any] = {**row, "svc": row[service], "kind": row[kind]}
+            for name, key in zip(("start", "end"), times, strict=True):
                 zoned = bool(re.search(r"Z$|[+-]\d\d:\d\d$", row[key]))
-                entry[key] = parse_time(row[key], 0.0 if zoned else self.local_offset)
+                entry[name] = parse_time(row[key], 0.0 if zoned else self.local_offset)
             found.append(entry)
         return found
 
@@ -989,12 +1041,12 @@ class Incident:
     def stand_in(self, agent: str, taken: set[str]) -> str | None:
         """A designated stand-in for a critical agent; "" if the agent needs none."""
         row = next((r for r in self.roster if r[self.roster_id] == agent), None)
-        if row is None or "critical" not in row or "stand_in" not in row:
-            raise Unreadable("roster columns")
-        if not row["critical"]:
+        if row is None:
+            raise Unreadable("agent not in roster")
+        if not row[self.roster_critical]:
             return ""
         unusable = set(self.compromised) | set(self.quarantined) | taken
-        for name in (part.strip() for part in row["stand_in"].split(";")):
+        for name in (part.strip() for part in row[self.roster_stand_in].split(";")):
             if name and name not in unusable:
                 return name
         return None

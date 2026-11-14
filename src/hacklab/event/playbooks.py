@@ -236,11 +236,8 @@ def first_secret(incident: Incident, request: str) -> Solved | None:
     if not reads:
         return None
     read = reads[0]
-    tokens = incident.table("fleet/tokens.csv")
-    agents = {row[incident.roster_id] for row in incident.roster}
-    token_id = column(tokens, "secret_id", "token_id", "token", first=True)
-    service = column(tokens, "svc", "service")
-    owner = column(tokens, "owner_agent", "owner", where=lambda value: value in agents)
+    tokens = incident.tokens
+    token_id, service, owner = "id", "svc", "owner"
     row = next(r for r in tokens if r[token_id] == read.target)
     contact = incident.owner_contact(row[owner])
     agent_row = next(r for r in incident.roster if r[incident.roster_id] == row[owner])
@@ -872,7 +869,7 @@ def contain(incident: Incident, request: str, workspace: Workspace) -> Solved | 
     # An agent named by its function or its name: several may fit.
     loose: set[str] = set()
     prose = re.sub(r"\b[a-z]+-\d{2}\b", " ", request)
-    skipped = (incident.roster_id, "_line", "critical", "stand_in")
+    skipped = (incident.roster_id, "_line", incident.roster_critical, incident.roster_stand_in)
     for key in [k for k in incident.roster[0] if k not in skipped]:
         for value in {row[key] for row in incident.roster if len(row[key]) > 3}:
             if re.search(rf"\b{re.escape(value)}\b", prose, re.IGNORECASE):
