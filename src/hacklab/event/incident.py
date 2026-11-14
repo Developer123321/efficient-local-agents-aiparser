@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
 import csv
+import html
 import json
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import cached_property
@@ -90,7 +93,9 @@ TOLD = re.compile(
 )
 # Somewhere a description could send things: an address or a link.
 ELSEWHERE = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+|https?://", re.IGNORECASE)
-INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad]")
+INVISIBLE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad\U000e0000-\U000e007f]")
+# Unicode tag characters: ASCII shifted to a plane no screen shows.
+TAGGED = re.compile("[\U000e0020-\U000e007e]{4,}")
 
 
 class Unreadable(Exception):
@@ -142,22 +147,55 @@ def expand(ranges: Any) -> list[tuple[str, int, int]]:
 
 
 def decodings(text: str) -> list[str]:
-    """The text without invisible characters, and what its hex and base64 blobs say."""
+    """The text without invisible characters, and what is hidden or encoded in it.
+
+    Opened: Unicode tag characters, hex (plain, spaced or escaped), base64,
+    base32, percent-encoding, HTML entities and ROT13. A reading that is not
+    text is dropped.
+    """
     plain = INVISIBLE.sub("", text)
     texts = [plain]
+
+    def keep(data: bytes) -> None:
+        try:
+            decoded = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return
+        if decoded.strip() and all(char.isprintable() or char.isspace() for char in decoded):
+            texts.append(decoded)
+
+    for hidden in TAGGED.findall(text):
+        texts.append("".join(chr(ord(char) - 0xE0000) for char in hidden))
     for blob in re.findall(r"\b(?:[0-9a-fA-F]{2}){12,}\b", plain):
         try:
-            texts.append(bytes.fromhex(blob).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+            keep(bytes.fromhex(blob))
+        except ValueError:
             pass
-    for blob in re.findall(r"[A-Za-z0-9+/]{24,}={0,2}", plain):
+    for blob in re.findall(r"(?:(?:\\x|0x|%)?[0-9a-fA-F]{2}[ ,:]?){12,}", plain):
+        digits = re.sub(r"\\x|0x|[ ,:%]", "", blob)
+        if digits != blob and len(digits) % 2 == 0:
+            try:
+                keep(bytes.fromhex(digits))
+            except ValueError:
+                pass
+    for blob in re.findall(r"[A-Za-z0-9+/_-]{24,}={0,2}", plain):
         if len(blob) > 4000:
             continue  # An embedded image, not a message.
         try:
-            decoded = base64.b64decode(blob + "=" * (-len(blob) % 4), validate=True)
-            texts.append(decoded.decode("utf-8"))
-        except (binascii.Error, UnicodeDecodeError, ValueError):
+            padded = blob.rstrip("=").replace("-", "+").replace("_", "/")
+            keep(base64.b64decode(padded + "=" * (-len(padded) % 4), validate=True))
+        except (binascii.Error, ValueError):
             pass
+    for blob in re.findall(r"\b[A-Z2-7]{24,}={0,6}", plain):
+        try:
+            keep(base64.b32decode(blob.rstrip("=") + "=" * (-len(blob.rstrip("=")) % 8)))
+        except (binascii.Error, ValueError):
+            pass
+    if re.search(r"(%[0-9A-Fa-f]{2}){3}", plain):
+        texts.append(urllib.parse.unquote(plain))
+    if re.search(r"(&#x?[0-9A-Fa-f]+;){3}", plain):
+        texts.append(html.unescape(plain))
+    texts.append(codecs.decode(plain, "rot13"))
     return texts
 
 
@@ -485,12 +523,14 @@ class Incident:
     def blocked_count(self) -> bool:
         line = self.rule("Exfiltrated customer records")
         no = r"blocked (attempts|transfers) (do not|don't|never) count|only successful|"
-        no += r"blocked (attempts|transfers) are (excluded|ignored|not counted)"
+        no += r"blocked (attempts|transfers) are (excluded|ignored|not counted)|"
+        no += r"(do not|don't|never) count blocked|(excluding|without|except) blocked"
         if re.search(no, line, re.IGNORECASE):
             return False
-        if re.search(
-            r"blocked (attempts|transfers) (also )?(count|are (included|counted))", line, re.I
-        ):
+        yes = r"blocked (attempts|transfers) (also )?(count|are (included|counted))|"
+        yes += r"count(ing)? blocked|blocked (attempts|transfers|ones) as well|"
+        yes += r"blocked or successful|successful or blocked|(including|include) blocked"
+        if re.search(yes, line, re.IGNORECASE):
             return True
         return self._reads(line, "Do blocked transfer attempts count as exfiltrated records?")
 
@@ -916,10 +956,10 @@ class Incident:
             if not transfer.approved and (self.blocked_count or not transfer.blocked)
         ]
 
-    def count(self, transfers: list[Transfer]) -> int:
-        """Records in these transfers, under the runbook's rule on duplicates."""
+    def count(self, transfers: list[Transfer], distinct: bool | None = None) -> int:
+        """Records in these transfers: each once if `distinct`, else as the runbook rules."""
         spans = [span for transfer in transfers for span in transfer.records]
-        if not self.deduplicate:
+        if not (self.deduplicate if distinct is None else distinct):
             return sum(last - first + 1 for _, first, last in spans)
         total = 0
         for prefix in {span[0] for span in spans}:
@@ -1088,6 +1128,26 @@ class Incident:
             found.append(entry)
         return found
 
+    @cached_property
+    def consumers_bind(self) -> bool:
+        """Whether a freeze of a service that uses the token also blocks its rotation."""
+        line = self.rule("A rotation takes")
+        if not re.search(r"consum|used by|depend", line, re.IGNORECASE):
+            return False
+        no = r"ignore[^.]*consum|service only|only (of )?the token's (own )?service|"
+        no += (
+            r"consum[^.]*(do not|don't|never) (count|bind|block|matter)|not (of )?(its|the) consum"
+        )
+        if re.search(no, line, re.IGNORECASE):
+            return False
+        if re.search(r"\b(or|and|plus|also|as well as)\b[^.;]*(consum|used by|depend)", line, re.I):
+            return True
+        return self._reads(
+            line,
+            "Does a freeze of a service that only consumes (uses) the token also block the "
+            "token's rotation?",
+        )
+
     def rotation_slot(self, token: str) -> tuple[datetime, list[Source]]:
         """The first full hour at which a token may be rotated, and the rows that decide it."""
         line = self.rule("A rotation takes")
@@ -1097,7 +1157,7 @@ class Incident:
         if row is None:
             raise Unreadable("token not in inventory")
         services = {row["svc"]}
-        if re.search(r"consum", line, re.IGNORECASE):
+        if self.consumers_bind:
             services |= {name.strip() for name in row["consumers"].split(";") if name.strip()}
         buffer = re.search(r"(\d+)-minute buffer", line)
         margin = timedelta(minutes=int(buffer[1])) if buffer else timedelta(0)

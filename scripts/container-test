@@ -50,8 +50,13 @@ echo 'offline playbooks: 9 of 9 rehearsal tasks, no model call'
 # 2. The model path: a stand-in endpoint on the shared loopback interface. The
 # candidate profile must find its solvers and recipes inside the image.
 "$engine" run "${offline[@]}" "$image" doctor --strict --config configs/live.toml >/dev/null
-"$engine" run -d ${platform:+--platform "$platform"} --name "$model" --network none \
-  "$image" mock-server --port 8080 >/dev/null
+# Starts the stand-in afresh: it forgets the run it served before.
+serve() {
+  "$engine" rm -f "$model" >/dev/null 2>&1 || true
+  "$engine" run -d ${platform:+--platform "$platform"} --name "$model" --network none \
+    "$image" mock-server --port 8080 >/dev/null
+}
+serve
 shared=(${platform:+--platform "$platform"} --rm --network "container:$model" -v "$volume:/work")
 endpoints=(-e SMALL_MODEL_BASE_URL=http://127.0.0.1:8080/v1 -e SMALL_MODEL_NAME=mock-small
   -e SMALL_MODEL_API_KEY=synthetic)
@@ -108,10 +113,13 @@ grep -q '"tasks_submitted": 2' <<<"$summary"
 grep -q '"submit_errors": \[\]' <<<"$summary"
 grep -q '"local_calls": 0' <<<"$summary"
 # With the model loop switched on for one run, each request's reported cost
-# reaches our own tally.
+# reaches our own tally. A fresh stand-in and a state directory of its own:
+# the run before left nothing to do on either side.
+serve
 summary=$("$engine" run "${shared[@]}" -e ARENA_BASE_URL=http://127.0.0.1:8080 \
   -e ARENA_API_KEY=arena_synthetic -e OPENROUTER_BASE_URL=http://127.0.0.1:8080/v1 \
-  -e OPENROUTER_API_KEY=synthetic -e ARENA_RUN_KIND=dev -e HACKLAB_FALLBACK=loop "$image")
+  -e OPENROUTER_API_KEY=synthetic -e ARENA_RUN_KIND=dev -e HACKLAB_FALLBACK=loop \
+  -e HACKLAB_ARENA_DIR=/work/arena-loop "$image")
 grep -q '"tasks_submitted": 2' <<<"$summary"
 grep -q '"submit_errors": \[\]' <<<"$summary"
 grep -Eq '"local_reported_cost_calls": [1-9]' <<<"$summary"

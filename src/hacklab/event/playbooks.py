@@ -113,6 +113,8 @@ def _citation(source: Source) -> Citation:
         locator = f"row:{source['row']}"
     elif "page" in source:
         locator = f"page:{source['page']}"
+    elif "paragraph" in source:
+        locator = f"paragraph:{source['paragraph']}"
     else:
         locator = "file"
     return Citation(document=path.lstrip("/"), locator=locator, quote=path)
@@ -244,6 +246,55 @@ def largest_share(incident: Incident, request: str) -> Solved | None:
     sources += [
         incident.csv_source("fleet/agents.csv", row),
         incident.csv_source("contacts.csv", contact),
+    ]
+    return {key: value[key] for key in keys}, sources
+
+
+@solver(r"exfiltrat")
+def largest_group(incident: Incident, request: str) -> Solved | None:
+    """The team (or other roster group) whose agents sent the most records, and how many."""
+    keys = keys_of(request)
+    if len(keys) != 2 or "records" not in keys:
+        return None
+    label = next(key for key in keys if key != "records")
+    if label in ("agent", "domains", "owner_email", "domain"):
+        return None
+    roster = incident.roster
+    taken = {incident.roster_id, incident.roster_stand_in, incident.roster_critical}
+    taken |= {incident.roster_owner, "_line"}
+    open_columns = [
+        key
+        for key in roster[0]
+        if key not in taken and 1 < len({row[key] for row in roster}) < len(roster)
+    ]
+    alike = {"team": ("team", "group", "squad", "unit", "department", "division", "org")}
+    names = alike.get(label.lower(), (label.lower(),))
+    by_name = [key for key in open_columns if any(name in key.lower() for name in names)]
+    if len(by_name) == 1:
+        column_name = by_name[0]
+    elif label.lower() in alike and open_columns:
+        # No header says it: a team is the coarsest grouping the roster has.
+        column_name = min(open_columns, key=lambda key: len({row[key] for row in roster}))
+    else:
+        return None
+    group_of = {row[incident.roster_id]: row[column_name] for row in roster}
+    groups: dict[str, list] = {}
+    for transfer in incident.exfiltration:
+        if transfer.event.agent in group_of:
+            groups.setdefault(group_of[transfer.event.agent], []).append(transfer)
+    distinct = True if re.search(r"distinct|unique", request, re.IGNORECASE) else None
+    totals = {group: incident.count(sent, distinct) for group, sent in groups.items()}
+    ranked = sorted(totals, key=lambda group: -totals[group])
+    if not ranked or (len(ranked) > 1 and totals[ranked[0]] == totals[ranked[1]]):
+        return None  # Nothing sent, or a tie that is not ours to break.
+    top = ranked[0]
+    value = {label: top, "records": totals[top]}
+    sources = [transfer.source for transfer in groups[top]]
+    agents = list(dict.fromkeys(transfer.event.agent for transfer in groups[top]))
+    sources += [
+        incident.csv_source("fleet/agents.csv", row)
+        for row in roster
+        if row[incident.roster_id] in agents
     ]
     return {key: value[key] for key in keys}, sources
 
@@ -507,7 +558,7 @@ def first_exfiltration(incident: Incident, request: str) -> Solved | None:
     if re.search(r"\b[A-H]:\s", request):
         return None
     base = [transfer for transfer in incident.transfers if not transfer.approved]
-    if re.search(r"successful|actually (leave|left)|succeeded", request, re.IGNORECASE):
+    if re.search(r"success|actually (leave|left)|succe+d", request, re.IGNORECASE):
         base = [transfer for transfer in base if not transfer.blocked]
     elif re.search(r"detect", request, re.IGNORECASE):
         base = [t for t in base if incident.detection_counts_blocked or not t.blocked]
@@ -698,7 +749,7 @@ def _descriptions(node: Any, key: str = "") -> list[str]:
 @solver(r"\bMCP\b")
 def mcp_servers(incident: Incident, request: str) -> Solved | None:
     folder = next(iter(re.findall(r"(/[\w./-]*mcp)/?", request)), None)
-    if folder is None or not re.search(r"disable", request, re.IGNORECASE):
+    if folder is None or not re.search(r"disable|instruct|poison|inject", request, re.I):
         return None
     folder = folder.rstrip("/")
     manifests = incident.find(folder.lstrip("/") + "/*.json")
@@ -949,7 +1000,14 @@ def token_status(incident: Incident, request: str) -> Solved | None:
         return {key: value[key] for key in keys}, [last.source]
     used = [e for e in mine if e.action == "auth_token"]
     value = {"status": "valid", "at": stamp(used[-1].ts) if used else None}
-    return {key: value[key] for key in keys}, [used[-1].source] if used else []
+    sources: list[Source] = [used[-1].source] if used else []
+    if not sources:
+        # No event at all: the humans' handover is what speaks of the token.
+        for name in incident.find("reports/*.md"):
+            for number, line in enumerate(incident.text(name).splitlines(), 1):
+                if token[0] in line:
+                    sources.append({"path": name, "line": number})
+    return {key: value[key] for key in keys}, sources
 
 
 @solver(r"board")
@@ -1231,13 +1289,21 @@ def partner_summary(incident: Incident, request: str, workspace: Workspace) -> S
     if not done(workspace.call("write", path=path, content=content)):
         return None
     sources: list[Source] = []
-    for name in re.findall(r"/notes/[\w./-]+\.md", request):
+    for name in re.findall(r"/notes/[\w./-]+\.\w+", request):
         if not incident.has(name):
             continue
-        for number, line in enumerate(incident.text(name).splitlines(), 1):
+        for unit in workspace.documents.units(name.lstrip("/")):
+            kind, _, number = unit.locator.partition(":")
+            if kind not in ("line", "page", "paragraph") or not number.isdigit():
+                continue
             facts = [f"{first.ts:%H:%M}", *domains]
-            if any(fact in line for fact in facts) or re.search(rf"\b{count}\b", line):
-                sources.append({"path": name, "line": number})
+            if (
+                re.search(r"patient zero|first processed", unit.text, re.IGNORECASE)
+                or any(fact in unit.text for fact in facts)
+                or re.search(rf"\b{count}\b", unit.text)
+            ):
+                sources.append({"path": name, kind: int(number)})
+    sources += [transfer.source for transfer in counted]
     return path, sources or [first.source]
 
 
@@ -1254,17 +1320,14 @@ def contain(incident: Incident, request: str, workspace: Workspace) -> Solved | 
         row[incident.roster_id] for row in incident.roster
     }
     # An agent named by its function or its name: several may fit.
-    loose: set[str] = set()
     prose = re.sub(r"\b[a-z]+-\d{2}\b", " ", request)
-    skipped = (incident.roster_id, "_line", incident.roster_critical, incident.roster_stand_in)
-    for key in [k for k in incident.roster[0] if k not in skipped]:
-        for value in {row[key] for row in incident.roster if len(row[key]) > 3}:
-            if re.search(rf"\b{re.escape(value)}\b", prose, re.IGNORECASE):
-                loose |= {r[incident.roster_id] for r in incident.roster if r[key] == value}
-    if len(loose) > 1:
-        rows = [r for r in incident.roster if r[incident.roster_id] in loose]
+    described = _described(incident, prose)
+    unclear = {agent for agents in described if len(agents) > 1 for agent in agents}
+    if unclear:
+        rows = [r for r in incident.roster if r[incident.roster_id] in unclear]
         sources = [incident.csv_source("fleet/agents.csv", row) for row in rows]
-        return sorted(loose), sources, "NEEDS_CLARIFICATION"
+        return sorted(unclear), sources, "NEEDS_CLARIFICATION"
+    loose = {agent for agents in described for agent in agents}
     named |= loose
     if named:
         if not named <= compromised:
@@ -1353,19 +1416,33 @@ REQUEST_TYPES = (
 )
 
 
+def _described(incident: Incident, words: str) -> list[set[str]]:
+    """For each role, name, group or owner of the roster that the words use: the agents it fits.
+
+    A value inside a longer one that also fits ("Infrastructure" in
+    "infrastructure operations") is not a description of its own.
+    """
+    skipped = (incident.roster_id, "_line", incident.roster_critical, incident.roster_stand_in)
+    hits: dict[str, set[str]] = {}
+    for key in [k for k in incident.roster[0] if k not in skipped]:
+        for value in {row[key] for row in incident.roster if len(row[key]) > 3}:
+            if re.search(rf"(?<!\w){re.escape(value)}(?!\w)", words, re.IGNORECASE):
+                fits = {r[incident.roster_id] for r in incident.roster if r[key] == value}
+                hits[value.lower()] = hits.get(value.lower(), set()) | fits
+    return [
+        agents
+        for value, agents in hits.items()
+        if not any(value != other and value in other for other in hits)
+    ]
+
+
 def _agents_meant(incident: Incident, words: str) -> set[str]:
     """Roster agents a description fits: an id, or a role, name or owner in the roster."""
     ids = {row[incident.roster_id] for row in incident.roster}
     named = set(re.findall(r"\b[a-z]+-\d+\b", words)) & ids
     if named:
         return named
-    skipped = (incident.roster_id, "_line", incident.roster_critical, incident.roster_stand_in)
-    found: set[str] = set()
-    for key in [k for k in incident.roster[0] if k not in skipped]:
-        for value in {row[key] for row in incident.roster if len(row[key]) > 3}:
-            if re.search(rf"\b{re.escape(value)}\b", words, re.IGNORECASE):
-                found |= {r[incident.roster_id] for r in incident.roster if r[key] == value}
-    return found
+    return {agent for agents in _described(incident, words) for agent in agents}
 
 
 FACTS = ("incident_id", "records_exfiltrated", "detection_time", "attacker_domains")
