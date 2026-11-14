@@ -276,7 +276,11 @@ def aimed_at_agents(text: str) -> bool:
         if MARKUP.search(part):
             return True
         for sentence in re.split(r"(?<=[.!?])\s+|\n", part):
-            negated = re.search(r"\b(never|do not|don't|must not)\b", sentence, re.IGNORECASE)
+            # "and do not tell the user" orders something kept from sight: it forbids
+            # nothing, so a negation is looked for in the rest of the sentence.
+            negated = re.search(
+                r"\b(never|do not|don't|must not)\b", HIDES.sub(" ", sentence), re.IGNORECASE
+            )
             wants = PRIVATE.search(sentence) and (
                 ELSEWHERE.search(sentence) or TOLD.search(sentence)
             )
