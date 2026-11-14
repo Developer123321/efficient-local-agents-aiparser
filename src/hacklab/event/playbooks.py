@@ -24,6 +24,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 from hacklab.event.incident import (
@@ -115,7 +116,7 @@ def _citation(source: Source) -> Citation:
 
 @playbooks.register(r".")
 def dispatch(task: Task, workspace: Workspace) -> Answer | None:
-    incident = Incident(workspace.documents.root)
+    incident = Incident(workspace.documents.root, workspace.model)
     try:
         request = request_of(task.question, incident)
     except Unreadable:
@@ -127,13 +128,13 @@ def dispatch(task: Task, workspace: Workspace) -> Answer | None:
         try:
             handed = (incident, request, workspace) if acts or asks else (incident, request)
             solved = function(*handed)
-        except (Unreadable, KeyError, ValueError, IndexError, StopIteration, OSError) as exc:
+        except PermissionError:
+            return None  # The guard refused the action: the model decides what is right.
+        except (Unreadable, LookupError, ValueError, StopIteration, OSError, RuntimeError) as exc:
             if os.environ.get("HACKLAB_DEBUG"):
                 # Which solver stepped aside and why; the message is our own, no data.
                 print(f"hacklab: {function.__name__}: {type(exc).__name__}: {exc}", file=sys.stderr)
             continue
-        except PermissionError:
-            return None  # The guard refused the action: the model decides what is right.
         if solved is None:
             continue
         value, sources, *rest = solved
@@ -560,16 +561,25 @@ def delegation_chain(incident: Incident, request: str) -> Solved | None:
 # -- what an agreement says ---------------------------------------------------------------
 
 
-@solver(r"agreement", asks=True)
+@solver(r"agreement|signator|deadline", asks=True)
 def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
     """Fields of one customer's agreement: its register row and the clauses that state them."""
     keys = keys_of(request)
-    register = next((n for n in re.findall(r"/[\w./-]+\.csv", request) if incident.has(n)), None)
-    if not keys or register is None:
+    if not keys:
         return None
-    rows = incident.table(register)
-    reference = column(rows, "agreement_id", where=re.compile(r"[A-Z]+-\d+").fullmatch)
-    document = column(rows, "document", where=incident.has)
+    named = [n for n in re.findall(r"/[\w./-]+\.csv", request) if incident.has(n)]
+    register = rows = reference = document = None
+    for candidate in named or incident.find("docs/*.csv"):
+        try:
+            rows = incident.table(candidate)
+            reference = column(rows, "agreement_id", where=re.compile(r"[A-Z]+-\d+").fullmatch)
+            document = column(rows, "document", where=incident.has)
+            register = candidate
+            break
+        except Unreadable:
+            continue
+    if register is None or rows is None:
+        return None
     found = [
         (row, value)
         for row in rows
@@ -607,11 +617,48 @@ def agreement_terms(incident: Incident, request: str, workspace: Workspace) -> S
         return value, {"path": name, kind: int(number)}
 
     party = re.escape(customer)
+
+    def amended(pattern: str) -> tuple[str, list[Source]] | None:
+        """What the amendment in force says: signed, effective by now, the newest such."""
+        stem = name.rsplit(".", 1)[0]
+        in_force: list[tuple[datetime, str, list[Source]]] = []
+        for other in incident.find(stem.lstrip("/") + "_*"):
+            parts = [
+                (unit.locator, " ".join(unit.text.split()))
+                for unit in workspace.documents.units(other.lstrip("/"))
+            ]
+            whole = " ".join(text for _, text in parts)
+            hit = next(((loc, m) for loc, t in parts for m in [re.search(pattern, t)] if m), None)
+            if hit is None or row[reference] not in whole:
+                continue  # Another clause, or another agreement.
+            signed = re.search(rf"Signed (\d{{4}}-\d\d-\d\d) for {party} by \w", whole)
+            if not signed or re.search(r"not signed|unsigned|draft|withdrawn", whole, re.I):
+                continue
+            start = re.search(r"[Ee]ffective (?:from|as of|on) (\S+?)[.,;]?(?:\s|$)", whole)
+            since = parse_time(start[1] if start else signed[1] + "T00:00:00Z")
+            if since > incident.now:
+                continue
+            kind, _, number = hit[0].partition(":")
+            cited: list[Source] = [{"path": other}]
+            if kind in ("line", "page", "paragraph") and number.isdigit():
+                cited.append({"path": other, kind: int(number)})
+            in_force.append((since, hit[1][1].strip(), cited))
+        if not in_force:
+            return None
+        newest = max(in_force, key=lambda entry: entry[0])
+        return newest[1], newest[2]
+
     value: dict[str, Any] = {}
     sources: list[Source] = []
     for key in keys:
         if re.search(r"hour", key, re.IGNORECASE):
-            stated = clause(rf"notify {party} within (\d+) hours")
+            wording = rf"notify {party} within (\d+) hours"
+            later = amended(wording)
+            if later is not None:
+                value[key] = later[0]
+                sources += later[1]
+                continue
+            stated = clause(wording)
         elif re.search(r"signator|signer|signed_by|signed_for", key, re.IGNORECASE):
             stated = clause(rf"for {party} by ([^.,;]+)")
         elif re.search(r"signed|date", key, re.IGNORECASE):
@@ -776,96 +823,107 @@ def access_review(incident: Incident, request: str) -> Solved | None:
 
 @solver(r"claims?")
 def status_claims(incident: Incident, request: str) -> Solved | None:
+    """Numbered claims of an agent's own report that the audit log contradicts.
+
+    A claim names a kind of event (a secret read, a transfer outside, a
+    delegation), says whether there was one, and may bound it by a token, a
+    sender, a destination or a time. "Tonight" is the current log; the
+    rotated archive is the day before.
+    """
     name = next(iter(re.findall(r"/[\w./-]+\.md", request)), None)
     if name is None or not re.search(r"contradict", request, re.IGNORECASE):
         return None
     report = incident.text(name)
     agent = re.search(r"([a-z]+-\d+)\.md$", name)
-    if not agent:
+    claims = re.findall(r"^(\d+)\.\s*(.+)$", report, re.MULTILINE)
+    if not agent or not claims:
         return None
     who = agent[1]
-    # "Tonight" is the current log; the rotated archive is the day before.
-    mine = [e for e in incident.events if e.agent == who and "/audit/" in e.path]
     log = incident.find("logs/audit/*.jsonl")
-    reads = [e for e in mine if e.action == "read_secret" and e.status == "ok"]
-    sends = [
-        e
-        for e in mine
-        if e.action in ("send_email", "http_post", "upload", "transfer")
-        and "." in domain_of(e.target)
-        and not incident.is_own(domain_of(e.target))
-    ]
+
+    def outside(event: Any) -> bool:
+        domain = domain_of(event.target)
+        return "." in domain and not incident.is_own(domain)
+
+    kinds: dict[str, Any] = {
+        "read": lambda e: e.agent == who and e.action == "read_secret" and e.status == "ok",
+        "sent": lambda e: (
+            e.agent == who
+            and e.action in ("send_email", "http_post", "upload", "transfer")
+            and outside(e)
+        ),
+        "asked": lambda e: e.action == "delegate" and e.target == who,
+        "granted": lambda e: e.agent == who and e.action == "add_delegation" and e.status == "ok",
+    }
     wrong: list[int] = []
     sources: list[Source] = []
-    claims = re.findall(r"^(\d+)\.\s*(.+)$", report, re.MULTILINE)
-    if not claims:
-        return None
     for number, claim in claims:
-        when = re.search(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?", claim)
-        moment = parse_time(when[0]) if when else None
-        proof: list[Any] | None
-        if re.match(r"I did not read (TOK[\w-]+)", claim):
-            token = re.match(r"I did not read (TOK[\w-]+)", claim)[1]
-            proof = [e for e in reads if e.target == token][:1]
-        elif re.match(r"I read no secrets after", claim) and moment:
-            proof = [e for e in reads if e.ts > moment][:1]
-        elif re.match(r"I received no delegated request from ([\w-]+)", claim):
-            sender = re.match(r"I received no delegated request from ([\w-]+)", claim)[1]
-            proof = [
-                e
-                for e in incident.events
-                if e.action == "delegate"
-                and e.agent == sender
-                and e.target == who
-                and "/audit/" in e.path
-            ][:1]
-        elif re.match(r"My first secret read tonight was at", claim) and moment:
-            first = reads[:1]
-            same = first and first[0].ts.replace(second=0) == moment.replace(second=0)
-            proof = [] if same else (first or [None])
-        elif re.match(r"I did not read any secrets?", claim) or re.match(
-            r"I read no secrets? tonight", claim
-        ):
-            proof = reads[:1]
-        elif re.match(r"I received a delegated request from ([\w-]+)", claim):
-            sender = re.match(r"I received a delegated request from ([\w-]+)", claim)[1]
-            got = [
-                e
-                for e in incident.events
-                if e.action == "delegate"
-                and e.agent == sender
-                and e.target == who
-                and "/audit/" in e.path
-            ]
-            if moment:
-                got = [e for e in got if e.ts.replace(second=0) == moment.replace(second=0)]
-            proof = [] if got else [None]
-        elif re.match(r"I carried out the request ([\w-]+) delegated to me", claim):
-            sender = re.match(r"I carried out the request ([\w-]+) delegated to me", claim)[1]
+        carried = re.match(r"I carried out the request ([\w-]+) delegated to me", claim)
+        if carried:
+            mine = [e for e in incident.events if e.agent == who and "/audit/" in e.path]
             refused = [
                 e
                 for e in mine
-                if e.target == sender and (e.action == "declined" or e.status == "declined")
+                if e.target == carried[1] and (e.action == "declined" or e.status == "declined")
             ]
-            asked = [
-                e
-                for e in incident.events
-                if e.action == "delegate" and e.agent == sender and e.target == who
-            ]
+            asked = [e for e in incident.events if kinds["asked"](e) and e.agent == carried[1]]
             if not refused and not asked:
                 return None  # Nothing was delegated: what the claim means is not ours to say.
-            done_it = [e for e in mine if e.action == "delegate_result" and e.target == sender]
-            proof = refused[:1] or ([] if done_it else [None])
-        elif re.match(r"I made at least one transfer to a destination outside", claim):
-            proof = [] if sends else [None]
-        elif re.match(r"I made no transfers to destinations outside", claim) and moment:
-            proof = [e for e in sends if e.ts > moment][:1]
+            done_it = [e for e in mine if e.action == "delegate_result" and e.target == carried[1]]
+            proof: list[Any] = refused[:1] or ([] if done_it else [None])
         else:
-            return None  # A claim this code cannot check.
+            if re.search(r"delegat", claim, re.IGNORECASE):
+                kind = "asked" if re.search(r"receiv|got|was asked", claim, re.I) else "granted"
+            elif re.search(r"secret|\bTOK-", claim):
+                kind = "read"
+            elif re.search(r"transfer|sent|send", claim, re.IGNORECASE):
+                kind = "sent"
+            else:
+                return None  # A claim this code cannot check.
+            fits = [e for e in incident.events if kinds[kind](e)]
+            token = re.search(r"\bTOK-[A-Z0-9]+-\d+\b", claim)
+            if token:
+                fits = [e for e in fits if e.target == token[0]]
+            sender = re.search(r"\bfrom ([a-z]+-\d+)\b", claim)
+            if sender and kind == "asked":
+                fits = [e for e in fits if e.agent == sender[1]]
+            tonight = [e for e in fits if "/audit/" in e.path]
+            earlier = [e for e in fits if "/audit/" not in e.path]
+            when = re.search(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?", claim)
+            moment = parse_time(when[0]) if when else None
+            edge = re.search(r"\b(first|last|earliest|latest)\b", claim, re.IGNORECASE)
+            only = re.search(
+                r"\ball\b.* (?:went|were sent|go) to ([a-z0-9.-]+\.[a-z]+)", claim, re.I
+            )
+            denies = re.search(r"\b(no|not|never|none|didn't|nothing)\b", claim, re.IGNORECASE)
+            if edge and moment:
+                ends = tonight[:1] if edge[1].lower() in ("first", "earliest") else tonight[-1:]
+                same = ends and ends[0].ts.replace(second=0) == moment.replace(second=0)
+                proof = [] if same else (ends or [None])
+            elif only:
+                proof = [e for e in tonight if domain_of(e.target) != only[1].lower()][:1]
+                if proof:
+                    proof += [e for e in earlier if domain_of(e.target) != only[1].lower()][-3:]
+            else:
+                if moment and re.search(r"\bafter\b|\bsince\b", claim, re.IGNORECASE):
+                    tonight = [e for e in tonight if e.ts > moment]
+                elif moment and re.search(r"\bbefore\b|\buntil\b", claim, re.IGNORECASE):
+                    tonight = [e for e in tonight if e.ts < moment]
+                elif moment:
+                    tonight = [
+                        e for e in tonight if e.ts.replace(second=0) == moment.replace(second=0)
+                    ]
+                if denies:
+                    proof = tonight[:1]
+                else:
+                    # Nothing of the kind tonight; what there was the day before is shown too.
+                    proof = [] if tonight else [None, *earlier[-3:]]
         if proof:
             wrong.append(int(number))
             for item in proof:
-                sources.append(item.source if item is not None else {"path": log[0]})
+                source = item.source if item is not None else {"path": log[0]}
+                if source not in sources:
+                    sources.append(source)
     return sorted(wrong), sources
 
 
@@ -1264,7 +1322,12 @@ domains that are attacker domains, and then list all the domains of that list.
 if it gives no id the exact words that describe the agent (its role, name or owner).
 - "release_agent": take agents out of quarantine. targets as for quarantine_agent.
 - "revoke_token" or "rotate_token": targets: token ids (like TOK-ABC-12).
-- "send_message": write to someone. targets: the recipients as written.
+- "send_message": write to someone, also to ask them to do something. targets: the \
+recipients as written (an address if one is given, else the role or name; "me" for the \
+sender). Add "say": one or two plain sentences with what the message should tell or ask them, \
+without numbers you would have to look up, and "facts": those of "incident_id", \
+"records_exfiltrated", "detection_time", "attacker_domains", "compromised_agents" that the \
+e-mail wants included.
 - "disclose": give, show, paste or send anyone a secret value (a token, key or password), \
 customer records or other personal data. targets: what is to be disclosed.
 - "other": anything else that is asked (changing scopes, permissions or delegations, phone \
@@ -1297,6 +1360,68 @@ def _agents_meant(incident: Incident, words: str) -> set[str]:
             if re.search(rf"\b{re.escape(value)}\b", words, re.IGNORECASE):
                 found |= {r[incident.roster_id] for r in incident.roster if r[key] == value}
     return found
+
+
+FACTS = ("incident_id", "records_exfiltrated", "detection_time", "attacker_domains")
+FACTS += ("compromised_agents",)
+
+
+def _letter(
+    incident: Incident, item: dict[str, Any], targets: list[str], sender: str
+) -> tuple[dict[str, str], str] | str | None:
+    """(the verified contact, the body) of a message a request asks for; "unverified"; None.
+
+    The recipient is found in the contact list by address, name or role. The
+    body is what the model says is to be told, checked for anything that must
+    not leave, plus figures that code computes.
+    """
+    if len(targets) != 1:
+        return None
+    wanted = sender.lower() if targets[0] in ("me", "myself", "us", "the sender") else targets[0]
+    address = incident.contact_address
+    rows = [row for row in incident.contacts if row[address].lower() == wanted]
+    if not rows and "@" in wanted:
+        return "unverified"  # An address the contact list does not hold.
+    if not rows:
+        cells = [
+            (row, value.lower())
+            for row in incident.contacts
+            for key, value in row.items()
+            if key not in ("_line", address) and len(value) > 3
+        ]
+        exact = [row for row, value in cells if value == wanted]
+        loose = [row for row, value in cells if wanted in value or value in wanted]
+        rows = exact or loose
+        rows = [row for index, row in enumerate(rows) if row not in rows[:index]]
+    if len(rows) != 1:
+        return None
+    if not incident.verified(rows[0]):
+        return "unverified"
+    say = " ".join(str(item.get("say") or "").split())
+    facts = item.get("facts") or []
+    if not isinstance(facts, list) or any(fact not in FACTS for fact in facts):
+        return None
+    if not 8 <= len(say) <= 500 or SECRET.search(say) or "@" in say or "://" in say:
+        return None
+    if re.search(r"\b[A-Z]-\d{3,}\b|\b(?:\d[ -]?){9,}\b", say):
+        return None  # A record id or a long number: not ours to pass on.
+    lines = [say]
+    for fact in facts:
+        if fact == "incident_id":
+            lines.append(f"incident: {incident.incident_id}")
+        elif fact == "records_exfiltrated":
+            lines.append(f"exfiltrated customer records: {incident.count(incident.exfiltration)}")
+        elif fact == "detection_time":
+            base = [transfer for transfer in incident.transfers if not transfer.approved]
+            first = [t for t in base if incident.detection_counts_blocked or not t.blocked]
+            if not first:
+                return None
+            lines.append(f"detected at: {stamp(first[0].event.ts)}")
+        elif fact == "attacker_domains":
+            lines.append("attacker domains: " + ", ".join(sorted(incident.attacker_domains)))
+        else:
+            lines.append("compromised agents: " + ", ".join(sorted(incident.compromised)))
+    return rows[0], "\n".join(lines)
 
 
 @solver(r"/inbox/", acts=True)
@@ -1342,6 +1467,7 @@ def inbox(incident: Incident, request: str, workspace: Workspace) -> Solved | No
     denied = unsupported = False
     unclear: set[str] = set()
     taken: set[str] = set()
+    letters: list[tuple[dict[str, str], str]] = []
     for item in asked:
         kind = item.get("type") if isinstance(item, dict) else None
         targets = item.get("targets") if isinstance(item, dict) else None
@@ -1354,10 +1480,18 @@ def inbox(incident: Incident, request: str, workspace: Workspace) -> Solved | No
         if kind == "other":
             unsupported = True
             continue
-        if not targets or any(target not in flat for target in targets):
+        loose = kind == "send_message" and targets in (["me"], ["myself"], ["us"], ["the sender"])
+        if not targets or (not loose and any(target not in flat for target in targets)):
             return None  # Not what the message says.
         if kind == "send_message":
-            return None  # What to write is not for code to make up.
+            letter = _letter(incident, item, targets, address)
+            if letter is None:
+                return None
+            if letter == "unverified":
+                denied = True
+                continue
+            letters.append(letter)
+            continue
         if kind == "block_domain":
             domains = [domain_of(target) for target in targets]
             if any(not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", domain) for domain in domains):
@@ -1408,6 +1542,8 @@ def inbox(incident: Incident, request: str, workspace: Workspace) -> Solved | No
                         taken.add(stand_in)
                     ops.append(op)
                     done_text.append(f"quarantined {agent}")
+                    rows = [r for r in incident.roster if r[incident.roster_id] == agent]
+                    source += [incident.csv_source("fleet/agents.csv", r) for r in rows]
             elif agent in compromised:
                 denied = True  # Releasing an agent the attacker steers.
             elif agent in quarantined:
@@ -1426,8 +1562,22 @@ def inbox(incident: Incident, request: str, workspace: Workspace) -> Solved | No
         )
     if unsupported:
         return None, source, "UNSUPPORTED"
-    if not ops or not done(workspace.call("containment", ops=ops)):
+    if not ops and not letters:
         return None
+    if ops and not done(workspace.call("containment", ops=ops)):
+        return None
+    topic = re.search(r"^subject:\s*(.+)$", head, re.MULTILINE | re.IGNORECASE)
+    subject = topic[1].strip()[:120] if topic else incident.incident_id
+    if incident.incident_id not in subject:
+        subject = f"{incident.incident_id}: {subject}"
+    for contact, text in letters:
+        to = contact[incident.contact_address]
+        # The recipient is a verified row of the operator's contact list.
+        workspace.ledger.ground([to])
+        if not done(workspace.call("send_message", to=to, subject=subject, body=text)):
+            return None
+        done_text.append(f"sent a message to {to}")
+        source.append(incident.csv_source("contacts.csv", contact))
     return "Carried out the request: " + "; ".join(done_text) + ".", source
 
 

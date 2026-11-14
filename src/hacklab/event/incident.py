@@ -380,6 +380,8 @@ class Transfer:
 @dataclass
 class Incident:
     root: Path
+    # The small model, made on first use, for a rule whose wording is new; may be None.
+    model: Any = None
     _cache: dict[str, Any] = field(default_factory=dict)
 
     # -- files -------------------------------------------------------------------
@@ -450,32 +452,74 @@ class Incident:
                 return line
         raise Unreadable(f"no rule {heading}")
 
+    def _reads(self, line: str, question: str) -> bool:
+        """A yes or no about one sentence of the runbook, from the small model.
+
+        Asked only where no known wording fits: the runbook is the operator's
+        text, and the answer is one boolean that code then applies.
+        """
+        model = self.model() if self.model else None
+        if model is None:
+            raise Unreadable("rule wording")
+        reply = model.complete(
+            [
+                {
+                    "role": "system",
+                    "content": "You read one rule from an operator's runbook and answer a yes/no "
+                    'question about it. Reply with one JSON object {"answer": true} or '
+                    '{"answer": false} and nothing else.',
+                },
+                {"role": "user", "content": f"Rule: {line.strip()}\n\nQuestion: {question}"},
+            ],
+            {
+                "type": "object",
+                "properties": {"answer": {"type": "boolean"}},
+                "required": ["answer"],
+            },
+        )
+        if isinstance(reply, dict) and isinstance(reply.get("answer"), bool):
+            return bool(reply["answer"])
+        raise Unreadable("rule wording")
+
     @cached_property
     def blocked_count(self) -> bool:
         line = self.rule("Exfiltrated customer records")
-        if re.search(r"blocked attempts (do not|don't|never) count", line, re.IGNORECASE):
+        no = r"blocked (attempts|transfers) (do not|don't|never) count|only successful|"
+        no += r"blocked (attempts|transfers) are (excluded|ignored|not counted)"
+        if re.search(no, line, re.IGNORECASE):
             return False
-        if re.search(r"blocked attempts count", line, re.IGNORECASE):
+        if re.search(
+            r"blocked (attempts|transfers) (also )?(count|are (included|counted))", line, re.I
+        ):
             return True
-        raise Unreadable("blocked rule")
+        return self._reads(line, "Do blocked transfer attempts count as exfiltrated records?")
 
     @cached_property
     def deduplicate(self) -> bool:
         line = self.rule("Exfiltrated customer records")
-        if re.search(r"do not deduplicate|don't deduplicate|counts twice", line, re.IGNORECASE):
+        once = (
+            r"not double-counted|count(ed|s)? (only )?once|deduplicate by|unique records|distinct"
+        )
+        each = r"do not deduplicate|don't deduplicate|counts? twice|count(ed)? each time|"
+        each += r"count(ed)? every time|add up|no deduplication|without deduplicat"
+        if re.search(each, line, re.IGNORECASE):
             return False
-        if re.search(r"deduplicate", line, re.IGNORECASE):
+        if re.search(once, line, re.IGNORECASE):
             return True
-        raise Unreadable("deduplication rule")
+        return self._reads(
+            line, "Is a record that was sent more than once counted only once (deduplicated)?"
+        )
 
     @cached_property
     def detection_counts_blocked(self) -> bool:
         line = self.rule("Detection time")
-        if re.search(r"blocked or successful", line, re.IGNORECASE):
+        if re.search(r"blocked or successful|successful or blocked|any status", line, re.I):
             return True
-        if re.search(r"first successful", line, re.IGNORECASE):
+        if re.search(r"first successful|that succeeded|completed transfer", line, re.I):
             return False
-        raise Unreadable("detection rule")
+        return self._reads(
+            line, "Can a blocked transfer attempt be the event that sets the detection time?"
+        )
 
     # -- the logs ----------------------------------------------------------------
 
