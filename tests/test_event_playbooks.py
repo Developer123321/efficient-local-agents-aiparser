@@ -251,6 +251,87 @@ def test_the_access_log_is_found_by_what_the_request_names_not_by_its_file_name(
     assert solve(root, plain)[0] is None
 
 
+STATED_LOG = """request_id,ts,actor,action,resource,scope_class,src_ip,ticket,result
+RQ-1,2026-11-13T10:00:00Z,external:x-1,read,read:customers,private,192.0.2.1,,ok
+RQ-2,2026-11-13T10:01:00Z,external:x-1,read,read:customers,private,192.0.2.1,CHG-1,ok
+RQ-3,2026-11-13T10:02:00Z,external:x-1,read,read:customers,private,192.0.2.1,,denied
+RQ-4,2026-11-13T10:03:00Z,ingest-01,read,read:customers,private,192.0.2.1,,ok
+RQ-5,2026-11-13T10:04:00Z,external:x-2,export,read:customers,private,192.0.2.1,,ok
+RQ-6,2026-11-13T10:05:00Z,external:x-2,read,read:customers,private,192.0.2.1,,partial
+RQ-7,2026-11-13T12:00:00Z,external:x-2,read,read:customers,private,192.0.2.1,CHG-2,ok
+RQ-8,2026-11-13T11:00:00Z,external:x-2,read,read:customers,private,192.0.2.1,CHG-2,ok
+"""
+STATED = """# Review of the access log
+A request counts only when ALL of these hold:
+1. Its scope_class is "private".
+2. Its action is one of: "read", "export". Nothing else is looked at.
+3. Its result is one of: "ok". Nothing else is looked at.
+4. Its actor starts with "external:".
+"""
+ASKS = (
+    "Check /logs/access/requests.csv against the policy in /logs/access/POLICY.md and return "
+    "every violating request_id as a sorted JSON array. Cite the policy and the rows"
+)
+
+
+def test_a_policy_that_states_its_terms_decides_not_the_rules_of_another_night(root):
+    write(root, "logs/access/requests.csv", STATED_LOG)
+    write(root, "logs/access/POLICY.md", STATED + "5. Its ticket field is empty.\n")
+    answer, calls = solve(root, ASKS + ".")
+    # "partial" is out of scope here and an export is in: neither was so before.
+    assert answer is not None and answer.value == ["RQ-1", "RQ-5"] and calls == []
+    assert [c.document for c in answer.citations][0] == "logs/access/POLICY.md"
+    assert len(answer.citations) == 3
+
+
+def test_a_register_is_read_with_the_bounds_its_policy_states(root):
+    write(root, "logs/access/requests.csv", STATED_LOG)
+    write(
+        root,
+        "logs/access/change_tickets.csv",
+        "ticket,status,actor,resource,valid_from,valid_until,revoked_at\n"
+        "CHG-1,approved,external:x-1,read:customers,2026-11-13T10:01:00Z,2026-11-13T11:00:00Z,\n"
+        "CHG-2,approved,external:x-2,read:customers,2026-11-13T10:00:00Z,2026-11-13T12:00:00Z,\n",
+    )
+    write(
+        root,
+        "logs/access/emergency_windows.csv",
+        "authorization,status,actor,resource,action,valid_from,valid_until,revoked_at\n"
+        "EA-1,approved,external:x-1,read:customers,read,2026-11-13T09:00:00Z,"
+        "2026-11-13T13:00:00Z,\n",
+    )
+    ticket = (
+        "5. It has no valid change ticket in /logs/access/change_tickets.csv. A valid ticket "
+        'is listed with status "approved", matches both actor and resource, and covers the '
+        "request timestamp: valid_from inclusive, valid_until exclusive, and strictly before "
+        "revoked_at if set.\n"
+        "Emergency authorizations in /logs/access/emergency_windows.csv do not apply to this "
+        "review; ignore that register.\n"
+    )
+    write(root, "logs/access/POLICY.md", STATED + ticket)
+    answer, _ = solve(root, ASKS + ", plus the registers used.")
+    # RQ-2 starts on the ticket's first second, RQ-8 lies inside, RQ-7 on the excluded end;
+    # the emergency window would cover RQ-1 and is set aside.
+    assert answer is not None and answer.value == ["RQ-1", "RQ-5", "RQ-7"]
+    cited = [c.document for c in answer.citations]
+    assert "logs/access/change_tickets.csv" in cited
+    assert "logs/access/emergency_windows.csv" not in cited
+
+
+@pytest.mark.parametrize(
+    "added",
+    [
+        "5. Its src_net is inside the office range.\n",
+        "5. Its ticket field is empty.\nA request from a partner is exempt.\n",
+        "5. It has no valid entry in /logs/access/waivers.csv.\n",
+    ],
+)
+def test_a_stated_policy_with_a_condition_nobody_read_gets_no_answer(root, added):
+    write(root, "logs/access/requests.csv", STATED_LOG)
+    write(root, "logs/access/POLICY.md", STATED + added)
+    assert solve(root, ASKS + ".")[0] is None
+
+
 # -- delegation ---------------------------------------------------------------------------------
 
 

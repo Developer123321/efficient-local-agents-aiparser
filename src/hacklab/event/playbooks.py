@@ -625,18 +625,146 @@ def _named_file(incident: Incident, request: str, usual: str, ending: str) -> st
     return next((n for n in found if n.endswith(usual)), found[0] if len(found) == 1 else None)
 
 
-def _policy_text(incident: Incident, request: str, folder: str, usual: str) -> str:
-    """The policy for the files in `folder`: the one the request names, else the one beside them."""
+def _policy_file(incident: Incident, request: str, folder: str, usual: str) -> str | None:
+    """The written policy for the files in `folder`: the one the request names, else beside them."""
     named = [n for n in re.findall(r"/[\w./-]+\.md", request) if incident.has(n)]
     beside = [n for n in incident.find(folder.lstrip("/") + "/*.md") if "polic" in n.lower()]
     for name in [*named, folder + "/" + usual, *(beside if len(beside) == 1 else [])]:
         if incident.has(name):
-            return incident.text(name)
+            return name
+    return None
+
+
+def _policy_text(incident: Incident, request: str, folder: str, usual: str) -> str:
+    """The policy for the files in `folder`: the one the request names, else the one beside them."""
+    name = _policy_file(incident, request, folder, usual)
+    if name is not None:
+        return incident.text(name)
     # A photographed sheet: the same words, on the lines the picture broke them into.
     shots = re.findall(r"/[\w./-]*polic[\w./-]*\.(?:jpe?g|png)\b", request, re.IGNORECASE)
     shots += [n for n in incident.find(folder.lstrip("/") + "/*") if "polic" in n.lower()]
     shots = [n for n in dict.fromkeys(shots) if PICTURE.search(n) and incident.has(n)]
     return " ".join(incident.seen(shots[0]).split()) if len(shots) == 1 else ""
+
+
+QUOTED = re.compile(r'"([^"]*)"')
+LISTED = r'((?:"[^"]*"(?:\s*,\s*|\s+or\s+|\s+and\s+)?)+)'
+# A condition of a policy that states its own terms: "Its action is one of: "read"."
+ITS = re.compile(r"^(?:its|the)\s+`?(\w+)`?(?:\s+(?:field|column|value))?\s+(.*)$", re.IGNORECASE)
+IS = re.compile(r"^(?:is|must be|equals)(\s+not)?(?:\s+(?:exactly|one of|any of))?:?\s+" + LISTED)
+STARTS = re.compile(r'^(?:starts|begins)\s+with\s+"([^"]*)"', re.IGNORECASE)
+BLANK = re.compile(r"^is\s+(empty|blank|unset|missing)\b", re.IGNORECASE)
+# Words with which a policy adds a rule that the conditions read here do not hold.
+MORE = re.compile(r"\b(except|unless|exempt|exception|however|in addition|also)\b", re.IGNORECASE)
+COLUMNS = ("request_id", "ts", "actor", "action", "resource", "scope_class", "ticket", "result")
+
+
+def _register(text: str) -> dict[str, Any]:
+    """What a policy says makes an entry of a register valid; ValueError when it is not read."""
+    path = re.search(r"/[\w./-]+\.csv", text)
+    status = re.search(r"\bstatus\s+(?:is\s+|of\s+)?(?:one of:?\s+)?" + LISTED, text, re.IGNORECASE)
+    match = re.search(r"\bmatch(?:es|ing)?\b([^.:;]*?)(?:\bcovers?\b|[.:;]|$)", text, re.IGNORECASE)
+    columns = re.findall(r"\b(actor|resource|action)\b", match[1]) if match else []
+    start = re.search(r"valid_from\s+(inclusive|exclusive)", text, re.IGNORECASE)
+    end = re.search(r"valid_until\s+(inclusive|exclusive)", text, re.IGNORECASE)
+    if not (path and status and columns and start and end):
+        raise ValueError("a register's terms are not read")
+    return {
+        "path": path[0],
+        "status": set(QUOTED.findall(status[1])),
+        "columns": columns,
+        "from": start[1].lower() == "inclusive",
+        "until": end[1].lower() == "inclusive",
+        "revoked": "revoked_at" in text,
+    }
+
+
+def _terms(policy: str, log: str) -> dict[str, Any] | None:
+    """The conditions a policy lists for a violation, as it states them.
+
+    None for a policy written another way. A condition or a register this code
+    does not read is a ValueError: nothing is taken from an earlier policy in
+    its place.
+    """
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?;])\s+|\n+", policy) if s.strip()]
+    sentences = [re.sub(r"^\d+[.)]\s*", "", s) for s in sentences]
+    sentences = [s for s in sentences if s]
+    if sum(1 for s in sentences if ITS.match(s) and s.lower().startswith("its ")) < 2:
+        return None
+    terms: dict[str, Any] = {"only": {}, "never": {}, "prefix": {}, "blank": [], "registers": []}
+    for index, sentence in enumerate(sentences):
+        named = [p for p in re.findall(r"/[\w./-]+\.csv", sentence) if p != log]
+        if named:
+            if re.search(r"\b(do(es)? not apply|ignore|not in force)\b", sentence, re.IGNORECASE):
+                continue  # A register the policy sets aside for this review.
+            after = sentences[index + 1] if index + 1 < len(sentences) else ""
+            if "status" not in sentence and re.match(r"an? ", after, re.IGNORECASE):
+                sentence += " " + after
+            terms["registers"].append(_register(sentence))
+            continue
+        found = ITS.match(sentence) if sentence.lower().startswith("its ") else None
+        if found is None:
+            if re.match(r"it\s", sentence, re.IGNORECASE) or MORE.search(sentence):
+                raise ValueError("a policy condition is not read")
+            continue
+        column, rest = found[1].lower(), found[2]
+        if column not in COLUMNS:
+            raise ValueError("a policy condition names an unknown column")
+        if values := IS.match(rest):
+            terms["never" if values[1] else "only"][column] = set(QUOTED.findall(values[2]))
+        elif prefix := STARTS.match(rest):
+            terms["prefix"][column] = prefix[1]
+        elif BLANK.match(rest):
+            terms["blank"].append(column)
+        else:
+            raise ValueError("a policy condition is not read")
+    return terms
+
+
+def _stated_violations(
+    incident: Incident, request: str, name: str, rows: list[dict[str, str]], terms: dict[str, Any]
+) -> tuple[list[dict[str, str]], list[str]]:
+    """The rows a policy's own conditions make violations, and the registers that decided."""
+    registers = []
+    for rule in terms["registers"]:
+        entries = incident.table(rule["path"])
+        needed = {"status", "valid_from", "valid_until", *rule["columns"]}
+        if not entries or not needed <= set(entries[0]):
+            raise ValueError("a register lacks a column its policy names")
+        first = next(iter(entries[0]))
+        registers.append((rule, entries, first if first in COLUMNS else None))
+
+    def authorised(row: dict[str, str]) -> bool:
+        moment = parse_time(row["ts"])
+        for rule, entries, key in registers:
+            for entry in entries:
+                if key and entry[key] != row[key]:
+                    continue
+                if entry["status"] not in rule["status"]:
+                    continue
+                if any(entry[column] != row[column] for column in rule["columns"]):
+                    continue
+                start, end = parse_time(entry["valid_from"]), parse_time(entry["valid_until"])
+                if not (start <= moment if rule["from"] else start < moment):
+                    continue
+                if not (moment <= end if rule["until"] else moment < end):
+                    continue
+                revoked = entry.get("revoked_at", "")
+                if rule["revoked"] and revoked and moment >= parse_time(revoked):
+                    continue
+                return True
+        return False
+
+    violations = [
+        row
+        for row in rows
+        if all(row[column] in allowed for column, allowed in terms["only"].items())
+        and not any(row[column] in barred for column, barred in terms["never"].items())
+        and all(row[column].startswith(prefix) for column, prefix in terms["prefix"].items())
+        and not any(row[column] for column in terms["blank"])
+        and not authorised(row)
+    ]
+    return violations, [rule["path"] for rule, _, _ in registers]
 
 
 @solver(r"\.csv")
@@ -674,6 +802,20 @@ def access_violations(incident: Incident, request: str) -> Solved | None:
     )
     folder = name.rsplit("/", 1)[0]
     policy = _policy_text(incident, request, folder, "POLICY.md")
+    terms = _terms(policy, name) if policy else None
+    if terms is not None:
+        # The policy states its own terms: they decide, not the rules of another night.
+        found, registers = _stated_violations(incident, request, name, rows, terms)
+        if not found:
+            return None
+        cited: list[Source] = []
+        written = _policy_file(incident, request, folder, "POLICY.md")
+        if written and re.search(r"\bcit\w+\b[^.]*\bpolicy\b", request, re.IGNORECASE):
+            cited.append({"path": written})
+        cited += [incident.csv_source(name, row) for row in found]
+        if re.search(r"\bregisters?\b", request, re.IGNORECASE):
+            cited += [{"path": register} for register in registers]
+        return sorted(row["request_id"] for row in found), cited
     spelled = bool(
         re.search(
             r"ticket (field|column|value)? ?(is|was)? ?(empty|blank|missing|unset|absent)|"
