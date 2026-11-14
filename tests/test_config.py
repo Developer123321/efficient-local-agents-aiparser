@@ -113,12 +113,14 @@ def test_the_candidate_profile_differs_from_the_measured_one_only_where_the_even
     # More hops, the operator rules in every prompt, and room for both.
     assert all(getattr(live.limits, name) > getattr(measured.limits, name) for name in event_limits)
     assert live.limits.max_total_tokens >= live.limits.max_steps * live.limits.max_context_chars
-    event_agent = {"playbooks", "skills", "rules", "on_unverified"}
+    event_agent = {"playbooks", "skills", "rules", "on_unverified", "fallback"}
     assert live.agent.model_dump(exclude=event_agent) == measured.agent.model_dump(
         exclude=event_agent
     )
     # A wrong answer and no answer both score 0 at the event.
     assert (live.agent.on_unverified, measured.agent.on_unverified) == ("answer", "abstain")
+    # The model loop took nearly all of a dev run's spend for 1.13 of 9 points.
+    assert (live.agent.fallback, measured.agent.fallback) == ("none", "loop")
     scenario = {"allowed_actions", "protected_targets"}
     assert live.guard.model_dump(exclude=scenario) == measured.guard.model_dump(exclude=scenario)
     assert live.model.response_format == measured.model.response_format
@@ -178,3 +180,9 @@ def test_guard_and_agent_settings_are_validated():
         {"agent": {"playbooks": "team.playbooks:registry", "tools": ["read"]}}
     )
     assert config.agent.tools == ["read"] and config.guard.injection == "flag"
+
+
+def test_the_model_loop_can_be_switched_on_for_one_run(monkeypatch):
+    assert load_config(CONFIGS / "live.toml").agent.fallback == "none"
+    monkeypatch.setenv("HACKLAB_FALLBACK", "loop")
+    assert load_config(CONFIGS / "live.toml").agent.fallback == "loop"

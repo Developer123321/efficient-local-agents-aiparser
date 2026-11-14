@@ -1309,3 +1309,15 @@ def test_a_solver_reads_filters_and_acts_through_the_workspace(lab, monkeypatch)
     # and the model took over where the solver stopped.
     assert revoked == ["tok-x1"] and len(calls) == 2
     assert answer.status == "ok" and answer.answer == "a1"
+
+
+def test_without_a_fallback_an_unknown_task_ends_unanswered_and_unpaid(lab, monkeypatch):
+    root, tracker = lab
+    (root / "note.txt").write_text("Budget approved: 42 EUR.\n")
+    config, calls = live(monkeypatch, [final("42 EUR", ["e1"])])
+    config.agent.fallback = "none"
+    task = Task(id="budget", question="Approved budget?", documents=["note.txt"])
+    run_id, answer = agent.run_task(task, root, config, tracker)
+    assert (answer.status, answer.answer, answer.cause) == ("abstain", "", "no_solver")
+    assert calls == []
+    assert ("playbook", "no_solver") in events(tracker, run_id, root.parent)

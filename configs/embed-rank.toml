@@ -30,6 +30,7 @@ inventory = true
 preload_documents_under = 40
 tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
 playbooks = "hacklab.event.playbooks:playbooks"
+fallback = "none"  # As in live.toml; set "loop" to compare the model path.
 rules = "hacklab.event:arena-rules.md"
 on_unverified = "answer"
 

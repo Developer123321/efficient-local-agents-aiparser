@@ -865,7 +865,7 @@ def run_task(
         toolbox = Toolbox(documents, ledger, config, tools, reload)
         solved = None
 
-        def provider() -> Any:
+        def ask() -> Any:
             """The small model for a playbook; None offline or past the end of the run."""
             nonlocal small, jev
             if small is None and (config.model.provider != "mock" or model is not None):
@@ -887,11 +887,15 @@ def run_task(
             if registry is None:
                 tracker.event(run_id, "playbook", {"status": "unavailable"})
             else:
-                workspace = playbook_registry.Workspace(documents, ledger, toolbox, provider)
+                workspace = playbook_registry.Workspace(documents, ledger, toolbox, ask)
                 solved = registry.solve(task, workspace)
         if solved is not None:
             tracker.event(run_id, "playbook", {"status": "ok"})
             answer = solved
+        elif config.agent.fallback == "none":
+            # The profile pays for no open-ended model work: unanswered, at no cost.
+            tracker.event(run_id, "playbook", {"status": "no_solver"})
+            answer = _stopped("no_solver")
         else:
             # Past the end of the run only code answers; a model call would be late.
             budget.check_time()

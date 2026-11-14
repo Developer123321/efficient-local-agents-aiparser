@@ -144,6 +144,10 @@ class AgentConfig(StrictModel):
     # "package.module:attribute" of a hacklab.playbooks.Playbooks instance:
     # deterministic solvers that answer a recognised task without a model call.
     playbooks: str = Field(default="", pattern=r"^([A-Za-z_][\w.]*:[A-Za-z_]\w*)?$")
+    # What happens to a task no playbook answers: the model works through it
+    # with tools ("loop"), or the task ends without an answer and without a
+    # model call ("none", cause `no_solver`).
+    fallback: Literal["loop", "none"] = "loop"
     # How table aggregates read numbers such as 1.234,56: "auto" infers the
     # convention per column and reports it; set it once the data is known.
     decimal_separator: Literal["auto", "point", "comma"] = "auto"
@@ -225,6 +229,9 @@ def load_config(path: Path | None = None) -> Config:
     _openrouter(data)
     if os.environ.get("HACKLAB_CACHE_MODE"):
         data.setdefault("cache", {})["mode"] = os.environ["HACKLAB_CACHE_MODE"]
+    # For one comparison run: "loop" sends unanswered tasks through the model again.
+    if os.environ.get("HACKLAB_FALLBACK"):
+        data.setdefault("agent", {})["fallback"] = os.environ["HACKLAB_FALLBACK"]
     return Config.model_validate(data)
 
 

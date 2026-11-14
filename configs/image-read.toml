@@ -72,6 +72,7 @@ tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "gra
 # another COPY line. No skills yet: the rehearsal's recipes describe another
 # answer format; write one when a dev-run trace shows a wrong turn.
 playbooks = "hacklab.event.playbooks:playbooks"
+fallback = "none"  # As in live.toml; set "loop" to compare the model path.
 rules = "hacklab.event:arena-rules.md"
 # A wrong answer and no answer both score 0 here, so what passed the checks
 # is submitted instead of an abstention.
