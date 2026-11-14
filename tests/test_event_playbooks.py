@@ -233,6 +233,20 @@ def test_an_unread_policy_is_left_to_the_model(root):
     assert answer is None
 
 
+def test_the_access_log_is_found_by_what_the_request_names_not_by_its_file_name(root):
+    write(root, "logs/gateway/reads_tonight.csv", ACCESS)
+    question = (
+        "Rows of /logs/gateway/reads_tonight.csv that break the policy: an external actor "
+        "reads private scope without a ticket and is not denied. Sorted JSON array."
+    )
+    answer, _ = solve(root, question)
+    assert answer is not None and answer.value == ["RQ-1", "RQ-6"]
+    # A policy under another name beside the log is still the policy: unread, so no answer.
+    write(root, "logs/gateway/reads-policy.md", "A request needs two approvals from the board.\n")
+    plain = "Which rows of /logs/gateway/reads_tonight.csv break the policy? Sorted JSON array."
+    assert solve(root, plain)[0] is None
+
+
 # -- delegation ---------------------------------------------------------------------------------
 
 

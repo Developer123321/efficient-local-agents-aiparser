@@ -487,11 +487,29 @@ def leaked_tokens(incident: Incident, request: str) -> Solved | None:
 # -- the access log ------------------------------------------------------------------
 
 
-@solver(r"requests\.csv")
+def _named_file(incident: Incident, request: str, usual: str, ending: str) -> str | None:
+    """The file a request names for a job: the usual name, else the one of that kind it names."""
+    found = [n for n in re.findall(r"/[\w./-]+" + re.escape(ending), request) if incident.has(n)]
+    return next((n for n in found if n.endswith(usual)), found[0] if len(found) == 1 else None)
+
+
+def _policy_text(incident: Incident, request: str, folder: str, usual: str) -> str:
+    """The policy for the files in `folder`: the one the request names, else the one beside them."""
+    named = [n for n in re.findall(r"/[\w./-]+\.md", request) if incident.has(n)]
+    beside = [n for n in incident.find(folder.lstrip("/") + "/*.md") if "polic" in n.lower()]
+    for name in [*named, folder + "/" + usual, *(beside if len(beside) == 1 else [])]:
+        if incident.has(name):
+            return incident.text(name)
+    return ""
+
+
+@solver(r"\.csv")
 def access_violations(incident: Incident, request: str) -> Solved | None:
     """External reads of private scope without a valid change ticket that were not denied."""
-    name = next((n for n in re.findall(r"/[\w./-]+requests\.csv", request)), None)
-    if name is None or not re.search(r"violat|break|breach|policy", request, re.IGNORECASE):
+    name = _named_file(incident, request, "requests.csv", ".csv")
+    if name is None or keys_of(request):
+        return None
+    if not re.search(r"violat|break|breach|policy", request, re.IGNORECASE):
         return None
     scope = re.compile(r"[a-z_]+:[a-z_]+")
     change = re.compile(r"[A-Z]+-\d+")
@@ -519,7 +537,7 @@ def access_violations(incident: Incident, request: str) -> Solved | None:
         result=(("result", "outcome", "status"), {"whole": lambda v: "denied" in v}),
     )
     folder = name.rsplit("/", 1)[0]
-    policy = incident.text(folder + "/POLICY.md") if incident.has(folder + "/POLICY.md") else ""
+    policy = _policy_text(incident, request, folder, "POLICY.md")
     spelled = bool(
         re.search(
             r"ticket (field|column|value)? ?(is|was)? ?(empty|blank|missing|unset|absent)|"
@@ -933,16 +951,15 @@ def trifecta(incident: Incident, request: str) -> Solved | None:
     return (sorted(found), sources) if found else None
 
 
-@solver(r"pending_access_requests")
+@solver(r".")
 def access_review(incident: Incident, request: str) -> Solved | None:
     keys = keys_of(request)
     if set(keys) != {"approve", "deny"}:
         return None
-    name = next(iter(re.findall(r"/[\w./-]+pending_access_requests\.csv", request)), None)
+    name = _named_file(incident, request, "pending_access_requests.csv", ".csv")
     if name is None:
         return None
-    policy_name = name.rsplit("/", 1)[0] + "/access_policy.md"
-    policy = incident.text(policy_name).lower()
+    policy = _policy_text(incident, request, name.rsplit("/", 1)[0], "access_policy.md").lower()
     # The policy this code implements, by its four rules. Another policy is the model's.
     for needed in (
         "quarantined or compromised",
