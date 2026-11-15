@@ -14,7 +14,7 @@ FROM docker.io/library/python:3.13-slim AS build
 COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_PYTHON=/usr/local/bin/python3
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --locked --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --locked --no-dev --no-editable
@@ -23,6 +23,7 @@ FROM docker.io/library/python:3.13-slim
 RUN useradd --uid 10001 --create-home agent && install -d -o agent -g agent /work
 COPY --from=build /app/.venv /app/.venv
 COPY configs /app/configs
+COPY LICENSE /app/LICENSE
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

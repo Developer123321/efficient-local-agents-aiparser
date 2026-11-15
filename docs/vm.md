@@ -1,5 +1,11 @@
 # VM and Nix setup
 
+This is the archived event environment. The flake currently depends on the
+maintainer's private `vm-cli` and `bobshell.nix` repositories, so a public
+checkout alone cannot reproduce it. Their visibility and licenses are outside
+this release. Use `bash scripts/setup` or the Dockerfile for the public
+Python/container path. The optional IBM Bob binary has separate terms.
+
 **You do not need any of this.** Git, uv and Docker or Podman on your own
 laptop are enough: `bash scripts/setup` ([README](../README.md#set-up)). This
 page is for those who want the pinned Nix environment or the ready-made VM.
@@ -89,9 +95,8 @@ Only the build needs the registries and PyPI. On an ARM laptop,
 evaluation machine (slower, through emulation). In Git Bash the script keeps
 Windows from rewriting the container paths.
 
-Still to do at the opening: set the Dockerfile's `CMD` to the organizers' run
-contract and add the starter kit to the build. Keys never go into the image;
-they arrive as environment variables.
+The Dockerfile implements the event's run contract: without a command it runs
+`hacklab arena run`. Keys arrive as environment variables.
 
 ## On a NixOS host
 

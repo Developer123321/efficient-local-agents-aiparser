@@ -1,12 +1,25 @@
-# hacklab-vm
+# efficient-local-agents-aiparser
 
-Our agent for the **Efficient Local Agents Hackathon**, Saturday 14 November
-2026 at IBM Vienna.
+Team **AIParser**'s agent attempts and experiments for the **Efficient Local
+Agents Hackathon**, 14 November 2026 at IBM Vienna. Formerly `hacklab-vm`.
+
+This is an experimental event project, released under the [MIT license](LICENSE).
+The submitted agent (`df31b42`) achieved **0.009 accuracy on 26 final tasks**:
+its solvers depended on the development workspace's paths, the final used a
+different layout, and the model loop was disabled. All tasks were submitted.
+The current source includes an access-policy fix made after submission.
+The [journal](JOURNAL.md) records the measurements and the postmortem.
+
+**Known security gaps remain**, including actions during a read-only inbox
+task and disclosure through the optional model loop. Use synthetic data and
+recording tools when experimenting; do not give this harness real operational
+authority or sensitive records. Read [SECURITY.md](SECURITY.md) and the
+[publication audit](docs/publication-audit.md) before reuse.
 
 The challenge is "The MuggingFace Incident": a hijacked agent swarm attacks a
 model hub, and our agent is the night shift. It has to investigate the
 incident and contain it, on the models every team gets: Gemma 4 31B, Jev
-1.14.0 and Qwen3 Embedding. The score is half accuracy and half cost.
+1.14.0 and Qwen3 Embedding. The score combines accuracy and cost.
 
 Our approach: code does everything code can do (read logs, decode payloads,
 follow who infected whom, check every action). The small model makes one small
@@ -33,7 +46,8 @@ is missing, installs the dependencies and solves the rehearsal incident
 offline. No GPU, no key, no model request.
 
 ```sh
-git clone https://github.com/timfewi/hacklab-vm.git && cd hacklab-vm
+git clone https://github.com/timfewi/efficient-local-agents-aiparser.git
+cd efficient-local-agents-aiparser
 bash scripts/setup             # add --check for format, lint and all tests
 bash scripts/container-test    # builds the image, runs it without network
 ```
@@ -46,7 +60,7 @@ bash scripts/container-test    # builds the image, runs it without network
 | Ubuntu, Debian, Fedora | Git, [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh \| sh`) | `docker.io` or Podman |
 | macOS, Intel or Apple Silicon | Git, uv (`brew install uv`) | Docker Desktop or Colima |
 | Windows | Git for Windows, uv; run the commands in **Git Bash** or in WSL 2 | Docker Desktop |
-| NixOS, or any Linux with Nix | `nix develop`, or the ready-made VM in [docs/vm.md](docs/vm.md) | Podman inside the VM |
+| NixOS, or any Linux with Nix | The Python setup above; the archived [Nix/VM setup](docs/vm.md) requires private maintainer inputs | Podman inside the archived VM |
 
 uv fetches Python by itself. In PowerShell without Git Bash, the same steps
 are `uv sync --locked`, `uv run hacklab doctor` and
@@ -107,9 +121,14 @@ image without another line in the Dockerfile. All commands:
 3. **No change without a number.** Measure before and after on the same
    cases ([how](docs/benchmarks.md)).
 
-The rehearsal data was written for this repository, and the benchmark
-numbers come from a stand-in model. The arena integration, the reload of a
-task's files after an action, the reported cost and the image tool were
-tested against a stand-in platform and stand-in replies only: nothing was
-run on the real arena or on Gemma 4 when they were written
-([what was tested](VERIFICATION.md)).
+The rehearsal data was written for this repository. Early benchmark numbers
+use a stand-in model; the journal separately records the later Arena and
+Gemma 4 runs, including the failed final. [VERIFICATION.md](VERIFICATION.md)
+preserves the earlier, dated checks; the publication audit records the
+current offline checks and their limits. Passing tests do not establish
+security, accuracy on another workspace, or live-model resistance to injection.
+
+The command remains `hacklab`, the Python package remains `hacklab`, and
+the VM directory and Nix service retain `hacklab-vm` for existing users.
+Dependencies, model weights and IBM Bob retain their own licenses; the MIT
+license grants no rights to organizer datasets or private runtime data.

@@ -112,7 +112,7 @@ in
         chmod -R u+w "$project"
         # Establish the Git filtering boundary before the user adds runtime data.
         git -C "$project" init -q -b main
-        git -C "$project" remote add origin https://github.com/timfewi/hacklab-vm.git
+        git -C "$project" remote add origin https://github.com/timfewi/efficient-local-agents-aiparser.git
         git -C "$project" add -- .
         # Bob reads project skills from .bob/skills; the link is Git-ignored.
         if ! HACKATHON_SKILLS_DIR=/run/current-system/sw/share/hackathon-skills \

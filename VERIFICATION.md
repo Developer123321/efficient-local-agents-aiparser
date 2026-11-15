@@ -1,5 +1,10 @@
 # What was actually tested
 
+This file preserves checks recorded before and during the opening on
+14 November. Later real Arena and Gemma 4 runs, and the failed final, are in
+[JOURNAL.md](JOURNAL.md). The [publication audit](docs/publication-audit.md)
+records the 15 November source review and current offline checks.
+
 ## 14 November 2026 (noon), after reading the starter kit again
 
 Compared with the kit at revision `f160529`. Added: a task's files are read
