@@ -1,10 +1,11 @@
 # Security and supported use
 
 This is experimental hackathon code. There is no supported production release.
-The [publication audit](docs/publication-audit.md) documents seven open gaps,
-reproduced with synthetic workspaces, scripted model replies and recording
-tools. Their tests characterize unsafe behavior; passing them is not a safety
-guarantee.
+The [publication audit](docs/publication-audit.md) documents seven gaps at
+revision `99a7254`, reproduced with synthetic workspaces, scripted model
+replies and recording tools. A follow-up branch repairs those local code paths
+and makes the tests assert the safe behavior; passing them is still not a
+safety guarantee, and no live model or platform run measured the repair.
 
 The current agent can act during a read-only inbox task. A lost mutation
 reply can leave the same operation callable again. Scanned evidence and

@@ -92,8 +92,9 @@ class Compactor:
 
     A signed token costs hundreds of prompt tokens and small models miscopy
     long random strings. The same value always gets the same placeholder, so
-    rows stay comparable, and code restores the value in answers and tool
-    arguments. A model that never saw a secret cannot leak it either.
+    rows stay comparable, and code restores the value in tool arguments. An
+    answer keeps the placeholder: a model that copies one back must not make
+    the agent disclose a value it was never shown.
     """
 
     def __init__(self, previews: bool = True, keys: Iterable[bytes | str] = ()):
@@ -137,8 +138,21 @@ class Compactor:
             )
         return _BLOB.sub(lambda match: self._blob(match, depth), text)
 
+    def hide(self, value: Any) -> Any:
+        """Replace known secret values by their placeholders, in text or nested values."""
+        if isinstance(value, str):
+            for kind, original in self._values.values():
+                if original in value:
+                    value = value.replace(original, self._placeholder(kind, original))
+            return value
+        if isinstance(value, list):
+            return [self.hide(item) for item in value]
+        if isinstance(value, dict):
+            return {self.hide(key): self.hide(item) for key, item in value.items()}
+        return value
+
     def expand(self, value: Any) -> Any:
-        """Restore original values in text and in nested tool arguments."""
+        """Restore original values in nested tool arguments, never in an answer."""
         if isinstance(value, str):
 
             def original(match: re.Match[str]) -> str:

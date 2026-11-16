@@ -96,6 +96,38 @@ The production source locations are
 The [journal](../JOURNAL.md) separately records the failed final: path-bound
 solvers with the loop disabled did not generalize to a different workspace.
 
+## Follow-up, 16 November (branch `fix/generalization-and-guard-gaps`)
+
+The table above remains the audit of `99a7254`. A follow-up branch repairs the
+seven local code paths and adds shape-based file location, because the failed
+final stepped aside when the workspace used other folders and file names.
+
+- A1: a read-only instruction no longer authorizes an inbox action. Negated
+  action phrases are removed before the act is read, `/inbox/` alone is not an
+  action, and a loose "send it to me" needs the message to ask for a reply.
+- A2: a typed verdict covers only the post IDs the reader named; a group part
+  is added whole only when every member was named.
+- A3: an instruction taints the rest of a transcript across blank lines. Only
+  a named list heading (destinations, indicators, hosts, ...) clears it, and
+  only bare list entries count as hosts.
+- A4: a brief answer must name agents and domains present in the facts it
+  cites; a clean agent is rejected from a compromised/affected set.
+- A5: `defang` covers dictionary keys as well as values.
+- A6: a copied placeholder stays a placeholder. Secrets are restored only in
+  tool arguments, never in the submitted answer.
+- A7: a mutation already sent is refused on a second identical call, including
+  after a lost reply.
+
+`Incident.locate` tries the dev layout first and then classifies files by
+their shape (JSONL keys, CSV columns, message headers, numbered claims, a
+chain-of-custody table). `Incident.role` requires exactly one fit, and every
+solver and citation path uses it. `tests/test_event_locator.py` covers a
+renamed hospital-like workspace and checks that the dev layout still wins when
+both exist. The four characterization files now assert the safe behavior and
+keep their original clean controls. `configs/live.toml` is unchanged: no
+dev-run number backs a change to it. These are local code paths; no live model
+persuasion, graded run or platform feedback was measured.
+
 ## Reproduce
 
 Use the installed project environment, without real keys or endpoints:

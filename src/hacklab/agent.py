@@ -535,13 +535,13 @@ def _finalize(
         # A result ID in the evidence list stands for the rows behind that result.
         listed = toolbox.result(item) if RESULT_ID.fullmatch(str(item).strip().lower()) else None
         support(listed.evidence if listed is not None else (item,))
-    text = str(ledger.compactor.expand(result.answer))
+    text = str(ledger.compactor.hide(result.answer))
     # A list result is written out by code: no copying, no dropped items.
     reference = result.answer_from or (text if RESULT_ID.fullmatch(text.strip().lower()) else None)
     listed = toolbox.result(reference) if reference else _retyped(split_items(text), toolbox)
     if reference and listed is None:
         problems.append("unknown_result_id")
-    value = None if result.value is None else ledger.compactor.expand(result.value)
+    value = None if result.value is None else ledger.compactor.hide(result.value)
     if listed is None:
         text = _as_computed(text, toolbox)
     if listed is not None:

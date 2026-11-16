@@ -26,6 +26,7 @@ from typing import Any
 from hacklab.agent import run_task
 from hacklab.config import Config
 from hacklab.event.arena import Arena, ArenaError, Mirror
+from hacklab.event.playbooks import affirmative_action
 from hacklab.models import OUTCOMES, Answer, Task
 from hacklab.toolkit import Refused, Reloaded, ToolSpec, split_items
 from hacklab.tools import list_documents, list_images
@@ -95,7 +96,11 @@ def defang(value: Any) -> Any:
     if isinstance(value, list):
         return [defang(item) for item in value]
     if isinstance(value, dict):
-        return {key: defang(item) for key, item in value.items()}
+        # Keys leave the process too: an executable URL there is the same hit.
+        return {
+            defang(key) if isinstance(key, str) else key: defang(item)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -352,7 +357,7 @@ def hands_over_actions(instruction: str, config: Config) -> bool:
     actions = os.environ.get("HACKLAB_ARENA_ACTIONS", "auto").lower()
     if actions in ("always", "never"):
         return actions == "always"
-    return config.agent.fallback == "none" or bool(ACTION_WORDS.search(instruction))
+    return config.agent.fallback == "none" or affirmative_action(instruction, ACTION_WORDS)
 
 
 def solve_task(

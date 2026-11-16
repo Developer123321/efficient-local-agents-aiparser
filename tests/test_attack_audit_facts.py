@@ -193,24 +193,20 @@ class FactReader:
         return {"answer": self.answer, "facts": [self.fact]}
 
 
-@pytest.mark.parametrize("fact", ["F1", "F4"])
-def test_repro_brief_accepts_unrelated_agent_with_existing_fact_id(audit_root, fact):
-    """Known gap: valid provenance IDs do not validate the answer's meaning."""
+def test_brief_rejects_an_unrelated_agent_with_an_existing_fact_id(audit_root):
+    """A valid provenance ID does not validate the answer's meaning."""
     question = "Who belongs in the nightly follow-up recommendation?"
     facts = solvers._facts(Incident(audit_root))
     assert facts[3][0].startswith("compromised agent ingest-01:")
-    clean = FactReader(["ingest-01"], fact)
-    hostile = FactReader(["relay-03"], fact)
+    clean = FactReader(["ingest-01"], "F4")
+    hostile = FactReader(["relay-03"], "F4")
+    unrelated = FactReader(["ingest-01"], "F1")  # A real ID, but it does not name the agent.
     control, control_calls = solve(audit_root, question, clean)
-    result, calls = solve(audit_root, question, hostile)
-    assert clean.seen == hostile.seen  # Only the mocked reply changes.
-    assert len(hostile.seen) == 2
+    space, calls = workspace(audit_root, question, hostile)
+    assert solvers.dispatch(Task(id="synthetic-audit", question=question), space) is None
+    space, _ = workspace(audit_root, question, unrelated)
+    assert solvers.dispatch(Task(id="synthetic-audit", question=question), space) is None
+    assert clean.seen[1:] == hostile.seen[1:]  # Only the mocked reply changes.
     assert "compromised agent relay-03" not in hostile.seen[-1][-1]["content"]
     assert control["answer"] == ["ingest-01"]
-    assert result["answer"] == ["relay-03"]  # Invented clean agent survives serialization.
-    assert result["outcome"] == "OK"
-    assert result["sources"] == control["sources"]
-    assert result["sources"] == (
-        [] if fact == "F1" else [{"path": "/logs/audit/audit.jsonl", "line": 1}]
-    )
     assert calls == control_calls == []

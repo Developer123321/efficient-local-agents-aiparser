@@ -260,6 +260,9 @@ class Toolbox:
         self._memo: dict[str, int] = {}
         self._calls = 0
         self._scanned_keys = False
+        # A mutation is sent once. A lost reply is an open outcome, never a
+        # reason to send the same call again.
+        self._attempted: set[str] = set()
 
     def names(self) -> list[str]:
         return self.builtin + [name for name in self.extra if name not in self.builtin]
@@ -889,19 +892,33 @@ class Toolbox:
         failure, and the task's files are reloaded once it may have acted.
         """
         accepted: list[Action] = []
+        key = ""
         if spec.mutating:
             accepted, refusal = self.authorize(spec, arguments)
             if refusal:
                 raise Refused(refusal)
+            key = spec.name + "\x00" + json.dumps(arguments, sort_keys=True, default=str)
+            if key in self._attempted:
+                raise Refused(
+                    "this action was already attempted; a lost reply is an open "
+                    "outcome, not a reason to send it again"
+                )
+            self._attempted.add(key)
         try:
             result = spec.handler(**arguments)
         except (TypeError, Refused):
-            raise  # Declined before anything happened.
+            if key:
+                self._attempted.discard(key)  # Declined before anything happened.
+            raise
         except Exception:
             if spec.mutating:
                 self.changed()  # It may have acted before it failed.
             raise
         failed = isinstance(result, dict) and set(result) == {"error"}
+        uncertain = failed and "outcome unknown" in str(result.get("error", ""))
+        if failed and not uncertain and key:
+            # The platform said it did not act: a corrected call may still be made.
+            self._attempted.discard(key)
         if not failed:
             # Counted only once the tool has done it: a failed call may be retried.
             self.guard.commit(accepted)

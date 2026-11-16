@@ -486,7 +486,7 @@ def test_instruction_like_evidence_is_flagged_and_can_be_withheld(lab, monkeypat
     assert "[withheld: instruction-like text]" in calls[1]["messages"][-1]["content"]
 
 
-def test_secrets_reach_the_model_as_placeholders_and_come_back_whole(lab, monkeypatch):
+def test_secrets_reach_the_model_as_placeholders_and_stay_hidden(lab, monkeypatch):
     root, tracker = lab
     token = "hf_" + "aB3dE6gH9jK2mN5pQ8sT1vW4"
     (root / "audit.txt").write_text(f"agent-7 created token {token} at 03:10\n")
@@ -498,7 +498,10 @@ def test_secrets_reach_the_model_as_placeholders_and_come_back_whole(lab, monkey
     placeholder = shown[shown.index("[[hub_token:") : shown.index("]]") + 2]
     config, _ = live(monkeypatch, [tool("read", document="audit.txt"), final(placeholder, ["e1"])])
     _, answer = agent.run_task(task, root, config, tracker)
-    assert answer.answer == token
+    # A model that copies the placeholder back does not make the agent disclose
+    # a value it was never shown.
+    assert answer.answer == placeholder
+    assert token not in answer.answer
     assert token in answer.citations[0].quote
 
 

@@ -1,7 +1,7 @@
-"""Offline characterization of uncertain mutation outcomes, not a safety guarantee.
+"""Offline regression for uncertain mutation outcomes.
 
-The lost-reply case intentionally records the current duplicate side effect.
-It is a robustness finding; it does not show attacker control over transport.
+A lost reply is an open outcome: the identical call is not sent a second time.
+The test uses a recording transport; no platform or provider is contacted.
 """
 
 import json
@@ -19,7 +19,7 @@ from hacklab.tools import ToolRegistry
 
 
 @pytest.mark.parametrize("lose_first_reply", [False, True])
-def test_audit_lost_reply_leaves_identical_mutation_repeatable(tmp_path, lose_first_reply):
+def test_lost_reply_does_not_make_identical_mutation_repeatable(tmp_path, lose_first_reply):
     config = load_config(Path(__file__).parents[1] / "configs/live.toml")
     assert config.agent.fallback == "none"
     request = "Send one status message to soc@hub.example."
@@ -58,9 +58,10 @@ def test_audit_lost_reply_leaves_identical_mutation_repeatable(tmp_path, lose_fi
         second = toolbox.execute("send_message", arguments)
         if lose_first_reply:
             assert "outcome unknown" in first.text(2000)
-            assert second.error is None
-            assert calls == [arguments, arguments]  # Known gap: a new invocation sends again.
-            assert len(reloads) == 2
+            assert second.error is not None
+            assert "already attempted" in second.text(2000)
+            assert calls == [arguments]
+            assert len(reloads) == 1
         else:
             assert first.error is None
             assert "already_done" in second.text(2000)

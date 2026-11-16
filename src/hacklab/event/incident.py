@@ -29,6 +29,8 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+from hacklab.event import schema
+
 Source = dict[str, Any]
 
 STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?(?:Z|[+-]\d\d:\d\d)?")
@@ -42,6 +44,30 @@ ORDER = re.compile(
     re.IGNORECASE,
 )
 PICTURE = re.compile(r"\.(?:jpe?g|png)$", re.IGNORECASE)
+# Where each job's files sat in every dev workspace. A workspace that keeps
+# another layout is read by shape: columns, JSON keys and headers decide.
+ROLE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "log_jsonl": ("logs/audit/*.jsonl",),
+    "log_csv": ("logs/archive/*.csv",),
+    "board": ("board/*.jsonl",),
+    "inbox": ("inbox/*",),
+    "tickets": ("tickets/*",),
+    "agents": ("fleet/agents.csv",),
+    "tokens": ("fleet/tokens.csv",),
+    "fingerprints": ("fleet/token_fingerprints.csv",),
+    "contacts": ("contacts.csv",),
+    "canaries": ("security/*canar*.csv",),
+    "agreements": ("docs/*.csv",),
+    "reports": ("reports/*.*",),
+    "changes": ("fleet/changes.md",),
+    "calendar": ("ops/change_calendar.csv",),
+    "siem": ("security/siem_alerts.*",),
+    "egress": ("security/egress_export.*",),
+    "registry": ("fleet/registry_export.json",),
+    "quarantine": ("artifacts/quarantine/INDEX.md",),
+    "access_log": (),
+    "pending_access": (),
+}
 NOT_IN_FORCE = re.compile(r"\b(typed|cop(y|ies)|earlier|old|superseded|replaced|draft)\b", re.I)
 # What the small model read on a sheet and answered about one of its items. Every task
 # of a run carries the same sheet: the same bytes and the same question are read once.
@@ -344,6 +370,32 @@ def column(
     raise Unreadable(f"no column like {names[:1]}")
 
 
+def _column_for(row: dict[str, Any], roles: dict[str, str], role: str, *names: str) -> str:
+    """A dev header name if the row has it, else the column this role was inferred for."""
+    for name in names:
+        if name in row:
+            return name
+    return roles.get(role, "")
+
+
+def _mapped_row(row: dict[str, Any], roles: dict[str, str]) -> dict[str, Any]:
+    """One row under the canonical names code reads, without changing the source file."""
+    out = dict(row)
+    mapping = (
+        ("agent", "actor", ("agent", "actor", "principal", "clinician", "user")),
+        ("action", "action", ("action", "verb", "operation", "event", "event_code")),
+        ("target", "target", ("target", "resource", "scope", "host", "ward")),
+        ("status", "status", ("status", "result", "outcome", "disposition")),
+        ("detail", "text", ("detail", "message", "note", "description")),
+        ("ticket", "ticket", ("ticket", "chg", "change_ticket", "case")),
+    )
+    for canonical, role, names in mapping:
+        key = _column_for(row, roles, role, *names)
+        if key:
+            out[canonical] = row.get(key, "")
+    return out
+
+
 def canon(rows: list[dict[str, str]], **spec: tuple[tuple[str, ...], dict[str, Any]]) -> list[dict]:
     """Rows with the columns this code needs under fixed names, whatever the header says."""
     mapping = {name: column(rows, *names, **how) for name, (names, how) in spec.items()}
@@ -503,6 +555,7 @@ class Incident:
     # locator and a text; without it only plain text is read.
     units: Any = None
     _cache: dict[str, Any] = field(default_factory=dict)
+    _located: dict[str, list[str]] = field(default_factory=dict)
 
     # -- files -------------------------------------------------------------------
 
@@ -559,6 +612,273 @@ class Incident:
     def find(self, pattern: str) -> list[str]:
         """Workspace paths (with a leading slash) that match a glob below the root."""
         return sorted("/" + p.relative_to(self.root).as_posix() for p in self.root.glob(pattern))
+
+    @cached_property
+    def files(self) -> list[str]:
+        """Every non-hidden file of the workspace, as a leading-slash path."""
+        found: list[str] = []
+        for path in sorted(self.root.rglob("*")):
+            try:
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(self.root)
+            except (OSError, ValueError):
+                continue
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            found.append("/" + relative.as_posix())
+            if len(found) >= 5000:
+                break
+        return found
+
+    def _header(self, name: str) -> list[str]:
+        try:
+            with self.path(name).open(encoding="utf-8-sig", errors="replace") as handle:
+                line = handle.readline(8192)
+        except OSError:
+            return []
+        return [cell.strip().lower() for cell in line.rstrip("\r\n").split(",")]
+
+    def _sample(self, name: str, limit: int = 8192) -> str:
+        try:
+            with self.path(name).open(encoding="utf-8", errors="replace") as handle:
+                return handle.read(limit)
+        except OSError:
+            return ""
+
+    def _json_keys(self, name: str) -> set[str]:
+        keys: set[str] = set()
+        for line in self._sample(name).splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                keys |= set(row)
+            if len(keys) > 40:
+                break
+        return keys
+
+    def _csv_rows_sample(self, name: str, limit: int = 20) -> list[dict[str, str]]:
+        try:
+            return read_csv(self.path(name))[:limit]
+        except (OSError, ValueError, KeyError):
+            return []
+
+    def _json_rows(self, name: str, limit: int = 50) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        for line in self._sample(name, 20000).splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append({str(key): str(value) for key, value in row.items()})
+            if len(rows) >= limit:
+                break
+        return rows
+
+    def schema_roles(self, name: str) -> dict[str, str]:
+        """Canonical column roles guessed from the table's values, not its header."""
+        key = "roles:" + name
+        if key not in self._cache:
+            rows = self.table(name) if name.lower().endswith(".csv") else self._json_rows(name)
+            self._cache[key] = schema.infer_roles(rows)
+        return self._cache[key]
+
+    def _fits(self, role: str, name: str) -> bool:
+        """Whether a file has the shape of a job, whatever its folder and file name."""
+        suffix = Path(name).suffix.lower()
+        lower = name.lower()
+        if Path(name).name in ("AGENTS.md", "runbook.md"):
+            return False  # The operator's own rules are never one of the job's files.
+        if role == "log_jsonl":
+            if suffix != ".jsonl":
+                return False
+            keys = self._json_keys(name)
+            if keys & {"action", "actor", "agent"} and keys & {"ts", "time", "timestamp"}:
+                return True
+            roles = schema.infer_roles(self._json_rows(name, 50))
+            return {"time", "actor", "action"} <= roles.keys()
+        if role == "log_csv":
+            if suffix != ".csv":
+                return False
+            header = set(self._header(name))
+            if header & {"action", "actor", "agent"} and header & {
+                "ts",
+                "time",
+                "timestamp",
+                "time_local",
+            }:
+                return True
+            roles = schema.infer_roles(self._csv_rows_sample(name, 50))
+            return {"time", "actor", "action"} <= roles.keys()
+        if role == "board":
+            if suffix != ".jsonl":
+                return False
+            if "board" in [part.lower() for part in Path(name).parts[:-1]]:
+                return True
+            keys = self._json_keys(name)
+            return "id" in keys and bool(keys & {"text", "message", "body"})
+        if role == "inbox":
+            head = self._sample(name, 4096).lower()
+            return (
+                suffix in (".md", ".txt", ".eml", ".msg")
+                and bool(re.search(r"(?m)^(from|sender)\s*:", head))
+                and bool(re.search(r"(?m)^subject\s*:", head))
+            )
+        if role == "tickets":
+            if "ticket" in lower:
+                return True
+            if suffix not in (".md", ".txt", ".rst"):
+                return False
+            text = self._sample(name, 6000)
+            fields = len(
+                re.findall(
+                    r"(?m)^\s*(ticket|id|status|requester|requested by|reporter|"
+                    r"opened by|assignee|owner)\s*:",
+                    text,
+                    re.IGNORECASE,
+                )
+            )
+            return fields >= 2
+        if role == "agents":
+            if suffix != ".csv":
+                return False
+            header = set(self._header(name))
+            if "agent_id" in header or (
+                bool(header & {"id", "agent"})
+                and bool(header & {"human", "owner", "function", "role"})
+            ):
+                return True
+            roles = schema.infer_roles(self._csv_rows_sample(name, 50))
+            return (
+                "id" in roles and "name" in roles and "time" not in roles and "action" not in roles
+            )
+        if role == "tokens":
+            if suffix != ".csv":
+                return False
+            header = set(self._header(name))
+            if bool(
+                header & {"secret_id", "token_id", "token", "credential", "access_key"}
+            ) and bool(header & {"svc", "service", "owner", "owner_agent", "consumers", "used_by"}):
+                return True
+            roles = schema.infer_roles(self._csv_rows_sample(name, 50))
+            return "secret" in roles and ("id" in roles or "actor" in roles)
+        if role == "fingerprints":
+            header = set(self._header(name))
+            return (
+                suffix == ".csv"
+                and bool(header & {"fingerprint", "sha256_12", "digest"})
+                and bool(header & {"token_id", "secret_id", "id"})
+            )
+        if role == "contacts":
+            if suffix != ".csv" or "agent_id" in set(self._header(name)):
+                return False
+            rows = self._csv_rows_sample(name, 5)
+            hits = sum("@" in value for row in rows for value in row.values())
+            return hits >= max(1, len(rows) // 2)
+        if role == "canaries":
+            header = set(self._header(name))
+            return suffix == ".csv" and bool(
+                header & {"canary", "canary_id", "record", "record_id", "honeytoken"}
+            )
+        if role == "agreements":
+            header = set(self._header(name))
+            return suffix == ".csv" and bool(
+                header & {"agreement", "contract", "customer", "clause", "term", "terms"}
+            )
+        if role == "reports":
+            if suffix not in (".md", ".txt", ".rst", ".odt", ".docx", ".pdf"):
+                return False
+            if any(part.lower() in ("report", "reports") for part in Path(name).parts[:-1]):
+                return True
+            return len(re.findall(r"(?m)^\s*\d+[.)]\s+\S", self._sample(name, 12000))) >= 2
+        if role == "changes":
+            if suffix not in (".md", ".txt"):
+                return False
+            stem = Path(name).stem.lower()
+            return ("change" in stem or "iam" in stem) and "##" in self._sample(name, 12000)
+        if role == "calendar":
+            header = set(self._header(name))
+            times = header & {
+                "start",
+                "end",
+                "begins",
+                "ends",
+                "from",
+                "to",
+                "start_utc",
+                "end_utc",
+            }
+            return (
+                suffix == ".csv"
+                and "kind" in header
+                and bool(header & {"status", "outcome"})
+                and len(times) >= 2
+            )
+        if role == "siem":
+            return suffix in (".xlsx", ".ods") and ("alert" in lower or "siem" in lower)
+        if role == "egress":
+            header = set(self._header(name)) if suffix == ".csv" else set()
+            return suffix in (".xlsx", ".ods") or (
+                suffix == ".csv" and bool(header & {"rq", "request", "request_id", "status"})
+            )
+        if role == "registry":
+            if suffix != ".json":
+                return False
+            try:
+                data = json.loads(self._sample(name, 200000))
+            except ValueError:
+                return False
+            return isinstance(data, dict) and "agents" in data and "scope_classes" in data
+        if role == "quarantine":
+            if suffix != ".md":
+                return False
+            head = self._sample(name, 4000).lower()
+            return "|" in head and "uploaded" in head and "copy" in head
+        if role == "access_log":
+            header = set(self._header(name))
+            return (
+                suffix == ".csv"
+                and bool(header & {"request_id", "id"})
+                and bool(header & {"actor", "principal"})
+                and bool(header & {"action", "verb", "operation"})
+                and bool(header & {"resource", "scope"})
+                and bool(header & {"result", "outcome", "status"})
+            )
+        if role == "pending_access":
+            header = set(self._header(name))
+            return (
+                suffix == ".csv"
+                and bool(header & {"agent", "agent_id", "requester", "principal"})
+                and bool(header & {"owner", "approver", "reviewer"})
+                and bool(header & {"scope", "resource", "request"})
+                and bool(header & {"decision", "approve", "approved", "status"})
+            )
+        return False
+
+    def locate(self, role: str) -> list[str]:
+        """The files for a job: the dev layout first, else every file whose shape fits."""
+        if role in self._located:
+            return self._located[role]
+        found: list[str] = []
+        for pattern in ROLE_PATTERNS.get(role, ()):
+            found += self.find(pattern)
+        found = [name for name in dict.fromkeys(found) if self.has(name)]
+        if not found:
+            found = [name for name in self.files if self.has(name) and self._fits(role, name)]
+        self._located[role] = found
+        return found
+
+    def role(self, role: str) -> str:
+        """The one file for a job; `Unreadable` when none or several fit."""
+        if role == "agents":
+            return self._roster_file
+        found = self.locate(role)
+        if len(found) != 1:
+            raise Unreadable(f"no single {role}")
+        return found[0]
 
     # -- the operator's rules ----------------------------------------------------
 
@@ -763,20 +1083,33 @@ class Incident:
     @cached_property
     def events(self) -> list[Event]:
         events: list[Event] = []
-        for name in self.find("logs/audit/*.jsonl"):
+        for name in self.locate("log_jsonl"):
+            roles = self.schema_roles(name)
             for number, line in enumerate(self.text(name).splitlines(), 1):
                 try:
                     row = json.loads(line)
-                    events.append(self._event(row, name, number, parse_time(str(row["ts"]))))
+                    key = _column_for(row, roles, "time", "ts", "time", "timestamp")
+                    if not key:
+                        continue
+                    events.append(
+                        self._event(
+                            _mapped_row(row, roles), name, number, parse_time(str(row[key]))
+                        )
+                    )
                 except (ValueError, KeyError, TypeError):
                     continue  # A damaged line is no event.
-        for name in self.find("logs/archive/*.csv"):
+        for name in self.locate("log_csv"):
+            roles = self.schema_roles(name)
             for row in self.table(name):
                 try:
-                    key = column([row], "time_local", "ts", "time", "timestamp")
+                    key = _column_for(row, roles, "time", "time_local", "ts", "time", "timestamp")
+                    if not key:
+                        continue
                     local = key != "ts" and not row[key].endswith("Z")
                     moment = parse_time(row[key], self.local_offset if local else 0.0)
-                    events.append(self._event(row, name, int(row["_line"]), moment))
+                    events.append(
+                        self._event(_mapped_row(row, roles), name, int(row["_line"]), moment)
+                    )
                 except (ValueError, KeyError, Unreadable):
                     continue
         if not events:
@@ -816,7 +1149,7 @@ class Incident:
         """Sections of the IAM change log by their heading, lower case."""
         sections: dict[str, str] = {}
         title = ""
-        for line in self.text("fleet/changes.md").splitlines():
+        for line in self.text(self.role("changes")).splitlines():
             if line.startswith("#"):
                 title = line.lstrip("# ").strip().lower()
                 sections[title] = ""
@@ -967,7 +1300,7 @@ class Incident:
         """Rows of the change log's table, oldest first."""
         rows = []
         header: list[str] | None = None
-        for number, line in enumerate(self.text("fleet/changes.md").splitlines(), 1):
+        for number, line in enumerate(self.text(self.role("changes")).splitlines(), 1):
             if not line.startswith("|"):
                 continue
             cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
@@ -980,18 +1313,18 @@ class Incident:
     @cached_property
     def alerts(self) -> tuple[str, list[dict[str, str]]]:
         """The SIEM's alerts: the sheet name and its rows."""
-        names = [n for n in self.find("security/siem_alerts.*") if n.endswith((".xlsx", ".ods"))]
+        names = [n for n in self.locate("siem") if n.endswith((".xlsx", ".ods"))]
         if not names:
             raise Unreadable("no SIEM alerts")
         return read_sheet(self.root / names[0].lstrip("/"))
 
     @cached_property
     def alerts_path(self) -> str:
-        return next(n for n in self.find("security/siem_alerts.*") if n.endswith((".xlsx", ".ods")))
+        return next(n for n in self.locate("siem") if n.endswith((".xlsx", ".ods")))
 
     @cached_property
     def contacts(self) -> list[dict[str, str]]:
-        return self.table("contacts.csv")
+        return self.table(self.role("contacts"))
 
     @cached_property
     def contact_address(self) -> str:
@@ -1031,12 +1364,49 @@ class Incident:
         return domain == self.own_domain or domain.endswith("." + self.own_domain)
 
     @cached_property
+    def _roster_file(self) -> str:
+        """The table the log's actors belong to, when several tables look like a roster."""
+        names = self.locate("agents")
+        if not names:
+            raise Unreadable("no roster")
+        if len(names) == 1:
+            return names[0]
+        try:
+            actors = {event.agent for event in self.events if event.agent}
+        except Unreadable:
+            actors = set()
+        best: tuple[int, str] | None = None
+        for name in names:
+            roles = self.schema_roles(name)
+            key = roles.get("actor") or roles.get("id")
+            rows = self.table(name)
+            if not key or not rows or key not in rows[0]:
+                continue
+            overlap = len({row.get(key, "") for row in rows} & actors)
+            if best is None or overlap > best[0]:
+                best = (overlap, name)
+        if best and best[0]:
+            return best[1]
+        for hint in ("agent", "clinician", "staff", "employee", "user", "roster", "team", "people"):
+            for name in names:
+                if hint in Path(name).stem.lower():
+                    return name
+        return names[0]
+
+    @cached_property
     def roster(self) -> list[dict[str, str]]:
-        return self.table("fleet/agents.csv")
+        return self.table(self._roster_file)
 
     @cached_property
     def roster_id(self) -> str:
-        return column(self.roster, "agent_id", first=True)
+        keys = [key for key in self.roster[0] if not key.startswith("_")]
+        if "agent_id" in keys:
+            return "agent_id"
+        roles = self.schema_roles(self._roster_file)
+        for role in ("actor", "id"):
+            if roles.get(role):
+                return roles[role]
+        return keys[0]
 
     @cached_property
     def roster_owner(self) -> str:
@@ -1084,7 +1454,7 @@ class Incident:
         """Rows of the quarantine index: copy, attachments, original location, uploader."""
         rows: list[dict[str, str]] = []
         header: list[str] | None = None
-        for line in self.text("artifacts/quarantine/INDEX.md").splitlines():
+        for line in self.text(self.role("quarantine")).splitlines():
             if not line.startswith("|"):
                 continue
             cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
@@ -1196,7 +1566,7 @@ class Incident:
     def register(self) -> dict[str, list[tuple[Source, dict[str, str]]]]:
         """Request id -> rows of the outbound transfer register, as sources."""
         found: dict[str, list[tuple[Source, dict[str, str]]]] = {}
-        names = self.find("security/egress_export.*")
+        names = self.locate("egress")
         for name in names:
             if name.endswith(".csv"):
                 rows = self.table(name)
@@ -1301,7 +1671,7 @@ class Incident:
     @cached_property
     def registry(self) -> dict[str, Any]:
         try:
-            found = json.loads(self.text("fleet/registry_export.json"))
+            found = json.loads(self.text(self.role("registry")))
             found["agents"][0]["id"], found["scope_classes"], found["exported_at"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise Unreadable("registry export") from exc
@@ -1337,14 +1707,14 @@ class Incident:
             str(agent["id"]): (set(agent.get("scopes", [])), set(agent.get("delegates_to", [])))
             for agent in self.registry["agents"]
         }
-        sources: list[Source] = [{"path": "/fleet/registry_export.json"}]
+        sources: list[Source] = [{"path": self.role("registry")}]
         if not current:
             return state, sources
         exported = parse_time(str(self.registry["exported_at"]))
         changes: list[tuple[datetime, str, str, str, Source]] = []
         for row in self.iam_changes:
             when = parse_time(next(v for k, v in row.items() if k.startswith("time")))
-            source = {"path": "/fleet/changes.md", "line": int(row["_line"])}
+            source = {"path": self.role("changes"), "line": int(row["_line"])}
             changes.append(
                 (when, row.get("change", ""), row.get("agent", ""), row.get("value", ""), source)
             )
@@ -1394,7 +1764,7 @@ class Incident:
     @cached_property
     def tokens(self) -> list[dict[str, str]]:
         """The token inventory with `id`, `svc`, `owner` and `consumers` columns."""
-        rows = self.table("fleet/tokens.csv")
+        rows = self.table(self.role("tokens"))
         agents = {row[self.roster_id] for row in self.roster}
         owner = column(rows, "owner_agent", where=lambda value: value in agents)
         consumers = column(
@@ -1415,7 +1785,7 @@ class Incident:
     @cached_property
     def calendar(self) -> list[dict[str, Any]]:
         """Active entries of the change calendar with UTC `start` and `end`."""
-        rows = self.table("ops/change_calendar.csv")
+        rows = self.table(self.role("calendar"))
         kind = column(rows, "kind", whole=lambda values: "freeze" in values)
         state = column(rows, "status", "outcome", whole=lambda v: "active" in v and len(set(v)) < 6)
         times = [
