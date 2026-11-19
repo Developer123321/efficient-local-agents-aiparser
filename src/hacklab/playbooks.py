@@ -31,6 +31,9 @@ class Workspace:
     # but one typed decision (is this text a request?) or needs a picture read.
     # None, or a call that returns None, when no model may be asked.
     model: Callable[[], Any] | None = None
+    # Jev, made on first use, for a typed choice or a yes/no whose candidates
+    # code has already enumerated. None when Jev is off, has no route, or failed.
+    judge: Callable[[], Any] | None = None
 
     def cite(self, document: str, unit: Unit) -> str:
         """Register a row as evidence and return its ID."""

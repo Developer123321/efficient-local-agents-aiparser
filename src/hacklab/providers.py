@@ -399,9 +399,9 @@ class _HTTPProvider:
                 return self._replay(body, cached, parse, output_allowance, input_allowance)
             if self.cache.mode == "replay":
                 raise ProviderError("cache_miss_in_replay_mode")
-        retries = self.limits.http_retries
+        retries = self.budget.limits.http_retries
         if retries is None:
-            retries = self.limits.max_retries
+            retries = self.budget.limits.max_retries
         for attempt in range(retries + 1):
             if self.spend is not None:
                 self.spend.check()

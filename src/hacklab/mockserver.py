@@ -162,14 +162,21 @@ class Handler(BaseHTTPRequestHandler):
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0},
                 },
             )
-        elif self.path.rstrip("/").endswith("/systemone"):
-            answers = {name: {"type": "noul", "noul": 1.0} for name in request.get("questions", {})}
+        elif self.path.rstrip("/").endswith(("/systemone", "/decisions")):
+            answers = {}
+            for name, question in request.get("questions", {}).items():
+                if isinstance(question, dict) and question.get("type") == "choice":
+                    criteria = question.get("criteria")
+                    first = next(iter(criteria), "") if isinstance(criteria, dict) else ""
+                    answers[name] = {"type": "choice", "choice": first, "confidence": 1.0}
+                else:
+                    answers[name] = {"type": "noul", "noul": 1.0}
             self._send(
                 200,
                 {
                     "model": "mock-jev",
                     "answers": answers,
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "cost": 0.0},
                 },
             )
         elif self.path.rstrip("/").endswith("/embeddings"):

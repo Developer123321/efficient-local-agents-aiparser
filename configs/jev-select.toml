@@ -1,9 +1,10 @@
-# configs/live.toml plus Jev: it judges the finished answer and drops clearly
-# irrelevant preloaded passages before the generator reads them. Compare with
-# live.toml on the same dev seed; tests/test_config.py keeps everything
-# outside [jev] equal to live.toml. With OPENROUTER_API_KEY set, Jev is asked
-# at OpenRouter's /api/alpha/decisions as typesafe/jev-1.14; the model and
-# address below are TypeSafe's own API, used with TYPESAFE_API_KEY.
+# configs/live.toml with Jev's passage selection on as well: it judges the
+# finished answer and drops clearly irrelevant preloaded passages before the
+# generator reads them. Compare with live.toml on the same dev seed;
+# tests/test_config.py keeps everything outside [jev] equal to live.toml. With
+# OPENROUTER_API_KEY set, Jev is asked at OpenRouter's /api/alpha/decisions as
+# typesafe/jev-1.14; the model and address below are TypeSafe's own API, used
+# with TYPESAFE_API_KEY.
 [model]
 provider = "openai"
 response_format = "json_object"
@@ -25,7 +26,7 @@ inventory = true
 preload_documents_under = 40
 tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
 playbooks = "hacklab.event.playbooks:playbooks"
-fallback = "none"  # As in live.toml; set "loop" to compare the model path.
+fallback = "single"  # As in live.toml; set "loop" or "none" to compare.
 rules = "hacklab.event:arena-rules.md"
 on_unverified = "answer"
 

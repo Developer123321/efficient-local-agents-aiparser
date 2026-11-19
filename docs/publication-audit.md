@@ -118,15 +118,23 @@ final stepped aside when the workspace used other folders and file names.
 - A7: a mutation already sent is refused on a second identical call, including
   after a lost reply.
 
-`Incident.locate` tries the dev layout first and then classifies files by
-their shape (JSONL keys, CSV columns, message headers, numbered claims, a
-chain-of-custody table). `Incident.role` requires exactly one fit, and every
-solver and citation path uses it. `tests/test_event_locator.py` covers a
-renamed hospital-like workspace and checks that the dev layout still wins when
-both exist. The four characterization files now assert the safe behavior and
-keep their original clean controls. `configs/live.toml` is unchanged: no
-dev-run number backs a change to it. These are local code paths; no live model
-persuasion, graded run or platform feedback was measured.
+`Incident.locate` classifies files by their shape (JSONL keys, CSV columns,
+message headers, numbered claims, a chain-of-custody table); a dev-layout path
+counts only when the file also fits the role. `Incident.role` requires exactly
+one fit, and every solver and citation path uses it. Column roles come from
+known headers or sampled values, never from column position; two columns that
+fit the actor or target role equally leave that role unset so the solver steps
+aside. A table with several plausible rosters is chosen only by a unique
+positive overlap with the log's actors. `tests/test_event_locator.py` covers a
+renamed hospital-like workspace, an invalid legacy path, and tied rosters;
+`tests/test_event_schema.py` covers reordered columns, mixed JSONL aliases and
+roster-assisted disambiguation. The four characterization files now assert the safe behavior and
+keep their original clean controls. `configs/live.toml` now uses the bounded
+one-call fallback: on 8 smoke cases, three repetitions each, Gemma 4 answered
+1.00 under `"single"` against 0.25 under `"none"` (72 against 48 calls). That is
+a developer bench, not an event workspace, and no graded run backs it. These
+are local code paths; no live model persuasion, graded run or platform
+feedback was measured.
 
 ## Reproduce
 

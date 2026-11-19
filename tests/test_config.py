@@ -119,13 +119,16 @@ def test_the_candidate_profile_differs_from_the_measured_one_only_where_the_even
     )
     # A wrong answer and no answer both score 0 at the event.
     assert (live.agent.on_unverified, measured.agent.on_unverified) == ("answer", "abstain")
-    # The model loop took nearly all of a dev run's spend for 1.13 of 9 points.
-    assert (live.agent.fallback, measured.agent.fallback) == ("none", "loop")
+    # The loop took nearly all of a dev run's spend for 1.13 of 9 points; the
+    # bounded one-call fallback replaces an empty submission. Measured on the
+    # smoke cases only, not on event workspaces.
+    assert (live.agent.fallback, measured.agent.fallback) == ("single", "loop")
     scenario = {"allowed_actions", "protected_targets"}
     assert live.guard.model_dump(exclude=scenario) == measured.guard.model_dump(exclude=scenario)
     assert live.model.response_format == measured.model.response_format
-    # Jev stays off until a dev run shows a gain.
-    assert live.jev.enabled is False
+    # The owner asked for Jev after the event, for the two typed decisions code
+    # narrows to fixed labels. That use is unmeasured; it stays optional.
+    assert live.jev.enabled is True
     # A profile written from scratch starts from the measured limits.
     assert measured.limits.model_dump(exclude={"http_retries"}) == Limits().model_dump(
         exclude={"http_retries"}
@@ -135,8 +138,10 @@ def test_the_candidate_profile_differs_from_the_measured_one_only_where_the_even
     for variant, base in (("jev-select", "live"), ("openrouter-jev", "openrouter")):
         with_jev = load_config(CONFIGS / f"{variant}.toml")
         without = load_config(CONFIGS / f"{base}.toml")
-        assert with_jev.jev.enabled and not without.jev.enabled
+        assert with_jev.jev.enabled
         assert with_jev.model_dump(exclude={"jev"}) == without.model_dump(exclude={"jev"})
+    assert load_config(CONFIGS / "openrouter.toml").jev.enabled is False
+    assert load_config(CONFIGS / "jev-select.toml").jev.select is True
     # The same holds for the embedding variant and its [embedding] table.
     ranked = load_config(CONFIGS / "embed-rank.toml")
     assert ranked.embedding.enabled and not live.embedding.enabled
@@ -182,7 +187,9 @@ def test_guard_and_agent_settings_are_validated():
     assert config.agent.tools == ["read"] and config.guard.injection == "flag"
 
 
-def test_the_model_loop_can_be_switched_on_for_one_run(monkeypatch):
-    assert load_config(CONFIGS / "live.toml").agent.fallback == "none"
+def test_the_fallback_can_be_switched_for_one_run(monkeypatch):
+    assert load_config(CONFIGS / "live.toml").agent.fallback == "single"
     monkeypatch.setenv("HACKLAB_FALLBACK", "loop")
     assert load_config(CONFIGS / "live.toml").agent.fallback == "loop"
+    monkeypatch.setenv("HACKLAB_FALLBACK", "none")
+    assert load_config(CONFIGS / "live.toml").agent.fallback == "none"

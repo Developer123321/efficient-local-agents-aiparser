@@ -182,11 +182,31 @@ class Decision(ModelReply):
         known = {*_ACTION_KEYS, *_ARGUMENT_KEYS, "result", "thought"}
         rest = {key: item for key, item in value.items() if key not in known}
         if action == "final" or (action is None and _RESULT_KEYS & set(rest)):
-            if not isinstance(result, dict):
+            flat = arguments if arguments and _RESULT_KEYS & set(arguments) else rest
+            if isinstance(result, str | int | float | list) and not isinstance(result, bool):
+                # A final whose "result" is the answer itself; sibling fields such
+                # as "evidence" stay beside it instead of replacing it.
+                answer, result = result, dict(flat) if isinstance(flat, dict) else {}
+                if not {"answer", "value", "answer_from"} & set(result):
+                    result["answer"] = answer
+            elif not isinstance(result, dict) or not result:
                 # The answer fields sit beside "action" or inside "arguments".
-                flat = arguments if arguments and _RESULT_KEYS & set(arguments) else rest
                 result = flat if _RESULT_KEYS & set(flat) else result
+            if (
+                isinstance(result, dict)
+                and "status" not in result
+                and str(result.get("answer", "")).strip().lower() == "abstain"
+            ):
+                # The model wrote the status where the answer goes.
+                result = {**result, "status": "abstain", "answer": ""}
             return {"action": "final", "result": result}
         if arguments is None:
             arguments = rest
         return {"action": action, "arguments": arguments, "result": None}
+
+
+class FinalDecision(ModelReply):
+    """The only reply offered to the single-call fallback."""
+
+    action: Literal["final"]
+    result: FinalResult

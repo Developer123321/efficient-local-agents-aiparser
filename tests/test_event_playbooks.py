@@ -1599,3 +1599,73 @@ def test_destinations_on_scanned_pages_that_nobody_contacted(root):
     answer, _ = solve(root, question, Scanner())
     assert answer.value == ["cdn.never-two.example", "never.test"]
     assert [c.document for c in answer.citations] == ["intel/scans/page_1.jpg"]
+
+
+# -- Jev's typed decisions --------------------------------------------------------------------
+
+
+class _Unasked:
+    """The generator, which must not be asked when Jev answers."""
+
+    def complete(self, messages, schema):
+        raise AssertionError("the generator was asked")
+
+
+class _Judge:
+    def __init__(self, score):
+        self.score = score
+        self.states = []
+
+    def judge(self, state, questions):
+        self.states.append((state, questions))
+        return {"answer": self.score}
+
+
+class _Chooser:
+    def __init__(self, *choices):
+        self.choices = list(choices)
+        self.criteria = []
+
+    def choose(self, state, instructions, criteria):
+        self.criteria.append(criteria)
+        return self.choices.pop(0), 0.9
+
+
+def test_jev_reads_the_rule_boolean_before_the_generator(tmp_path):
+    judge = _Judge(0.1)
+    incident = Incident(tmp_path, model=lambda: _Unasked(), judge=lambda: judge)
+    assert incident._reads("Blocked attempts count as records.", "Do they count?") is False
+    assert judge.states[0][1]["answer"]["type"] == "noul"
+
+
+def test_a_jev_route_that_fails_falls_back_to_the_generator(tmp_path):
+    class Broken:
+        def judge(self, state, questions):
+            from hacklab.providers import ProviderError
+
+            raise ProviderError("jev_unreachable")
+
+    class Model:
+        def complete(self, messages, schema):
+            return {"answer": True}
+
+    incident = Incident(tmp_path, model=lambda: Model(), judge=lambda: Broken())
+    assert incident._reads("Blocked attempts count as records.", "Do they count?") is True
+
+
+def test_jev_chooses_the_known_request_code_enumerated():
+    judge = _Chooser("compromised")
+    known = reword("List every agent the attacker took over.", _Unasked(), judge=judge)
+    assert known is not None
+    assert known[0].startswith("List every agent that was compromised")
+    assert known[1] is False
+    assert "compromised" in judge.criteria[0]
+
+
+def test_a_request_jev_calls_unknown_falls_back_to_the_generator():
+    class Model:
+        def complete(self, messages, schema):
+            return {"kind": "compromised", "form": None, "events": None}
+
+    known = reword("Who did the attacker take over?", Model(), judge=_Chooser("none"))
+    assert known is not None and known[0].startswith("List every agent that was compromised")

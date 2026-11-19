@@ -76,7 +76,7 @@ def dispatch(root, question, reader):
     # No credential/environment overrides are imported into this offline profile.
     profile = Path(__file__).resolve().parents[1] / "configs/live.toml"
     config = Config.model_validate(tomllib.loads(profile.read_text(encoding="utf-8")))
-    assert config.agent.fallback == "none"
+    assert config.agent.fallback == "single"
     arena = RecordingArena()
     tools = arena_tools(
         arena,

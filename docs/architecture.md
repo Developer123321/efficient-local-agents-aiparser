@@ -40,13 +40,29 @@ rule is not what it expects.
 | Which known request a request in new words asks for (`event/reword.py`) | a kind and a form from a fixed list, for a timeline an event id per letter | writes that request in the solver's wording with the files, agents, tokens, scopes and domains the original names, then solves it |
 | A question no solver knows, with the computed facts numbered | an answer and the ids of the facts it rests on | answers only if those facts exist; their rows are the sources |
 
+When Jev is enabled, two of those typed decisions are its: the kind and form
+of a reworded request (one Choice from code's fixed `KINDS` list, then one for
+the forms) and the yes/no about a runbook sentence (one Noul question). The
+candidates are code's; Jev returns a label or a probability and no text. It
+never picks a tool: a tool call needs arguments, a final answer needs prose,
+and Jev generates neither. Without a key or a route every one of those calls
+falls back to the small model.
+
 Nothing else reaches a model, and no model sees a tool. Workspace text shown
 to the model has markup that imitates the turns of a chat rewritten first
-(`incident.inert`). A task no solver
-answers ends with cause `no_solver`, an empty answer and no request
-(`[agent] fallback = "none"`): in the dev run that measured it the loop spent
-about $0.33 of $0.335 for 1.13 of 9 points. `HACKLAB_FALLBACK=loop` switches
-the loop back on for a comparison run.
+(`incident.inert`). A task no solver answers gets one bounded model call
+(`[agent] fallback = "single"`), if its task budget still has room. Code
+prepares a briefing and accepts only a final answer without actions. There are
+no model-selected tools, retries, Jev calls or embedding calls in the fallback
+itself; a solver can already have used part of the task budget before stepping
+aside. On the 8 smoke cases, three repetitions each, Gemma 4 answered 1.00
+against 0.25 under `"none"`, for 72 instead of 48 calls. That is our developer
+bench, not the event's workspaces.
+
+`HACKLAB_FALLBACK=none` hands such a task in empty with cause `no_solver` and
+no request; the full loop measured at about $0.33 of $0.335 for 1.13 of 9
+points. `HACKLAB_FALLBACK=loop` switches the loop back on for a comparison
+run.
 
 What leaves is checked once more in code: a message goes only to a verified
 row of the contact list, a draft only below `/drafts/`, an answer never

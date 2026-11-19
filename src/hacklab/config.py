@@ -145,9 +145,11 @@ class AgentConfig(StrictModel):
     # deterministic solvers that answer a recognised task without a model call.
     playbooks: str = Field(default="", pattern=r"^([A-Za-z_][\w.]*:[A-Za-z_]\w*)?$")
     # What happens to a task no playbook answers: the model works through it
-    # with tools ("loop"), or the task ends without an answer and without a
-    # model call ("none", cause `no_solver`).
-    fallback: Literal["loop", "none"] = "loop"
+    # with tools ("loop"), the task ends without an answer and without a model
+    # call ("none", cause `no_solver`), or the model gets one bounded call with
+    # no tool loop ("single"). Single spends one request on a task no solver
+    # knows, instead of submitting an empty answer; it is not measured.
+    fallback: Literal["loop", "none", "single"] = "loop"
     # How table aggregates read numbers such as 1.234,56: "auto" infers the
     # convention per column and reports it; set it once the data is known.
     decimal_separator: Literal["auto", "point", "comma"] = "auto"

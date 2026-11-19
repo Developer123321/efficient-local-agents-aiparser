@@ -6,8 +6,10 @@ failure: the same jobs under /it/... instead of the dev workspace's folders.
 
 import json
 
+import pytest
+
 from hacklab.event import playbooks as solvers
-from hacklab.event.incident import Incident
+from hacklab.event.incident import Incident, Unreadable
 
 
 def write(root, name, text):
@@ -124,6 +126,124 @@ def test_the_parsed_incident_uses_the_files_it_found(tmp_path):
 
 def test_the_dev_layout_still_wins_when_both_exist(tmp_path):
     root = renamed(tmp_path)
-    write(root, "logs/audit/events.jsonl", json.dumps({"ts": "2026-11-14T01:00:00Z"}) + "\n")
+    write(
+        root,
+        "logs/audit/events.jsonl",
+        '{"ts":"2026-11-14T01:00:00Z","agent":"ingest-01","action":"job_start"}\n',
+    )
     incident = Incident(root)
     assert incident.locate("log_jsonl") == ["/logs/audit/events.jsonl"]
+
+
+def test_invalid_legacy_log_does_not_hide_a_valid_renamed_log(tmp_path):
+    root = renamed(tmp_path)
+    write(root, "logs/audit/events.jsonl", '{"ts":"2026-11-14T01:00:00Z"}\n')
+    assert [event.path for event in Incident(root).events] == ["/it/ops/audit_trail.jsonl"]
+
+
+@pytest.mark.parametrize("second_id", ["ingest-01", "unseen-02"])
+def test_rosters_need_a_unique_positive_match(tmp_path, second_id):
+    root = renamed(tmp_path)
+    first_id = "ingest-01" if second_id == "ingest-01" else "unseen-01"
+    write(root, "it/hosts/agents.csv", f"agent_id,human\n{first_id},Ada Berg\n")
+    write(root, "it/hosts/staff.csv", f"agent_id,human\n{second_id},Bo Example\n")
+    with pytest.raises(Unreadable):
+        Incident(root).role("agents")
+
+
+def test_value_shapes_and_model_fallback_locate_files_without_dev_headers(tmp_path):
+    write(
+        tmp_path,
+        "policy/operator_header.md",
+        'Incident INC-GEN-01 is open.\nCurrent time ("now"): 2026-11-14T07:30:00Z (UTC).\n',
+    )
+    write(
+        tmp_path,
+        "policy/procedures.md",
+        "# Procedures\n"
+        "A transfer counts when it goes outside acme.example.\n"
+        "A rotation takes one hour and starts on a full hour, with a 0-minute buffer; "
+        "consumer freezes do not count.\n",
+    )
+    write(
+        tmp_path,
+        "data/people.csv",
+        "who,title,address,checked\nAda Berg,commander,ada@acme.example,yes\n",
+    )
+    write(
+        tmp_path,
+        "data/principals.csv",
+        "code,duty,lead,vital,standby\ningest-01,pipeline,Ada Berg,yes,spare-01\n",
+    )
+    write(
+        tmp_path,
+        "data/ledger.md",
+        "# History\n\n## Flagged as compromised\n- relay-03 (quarantined)\n",
+    )
+    write(
+        tmp_path,
+        "data/vault_items.csv",
+        "item_ref,system_name,holder,downstream_list\nTOK-1,mail,ingest-01,relay;\n",
+    )
+    write(
+        tmp_path,
+        "data/hashes.csv",
+        "item_ref,prefix_hex\nTOK-1," + "b" * 12 + "\n",
+    )
+    write(
+        tmp_path,
+        "data/planted.csv",
+        "tag_code,remark\nC-105,decoy\n",
+    )
+    write(
+        tmp_path,
+        "data/deals.csv",
+        "org_name,ref_code,duration_text\nBlue Heron Ltd,AGR-1,12 months\n",
+    )
+    write(
+        tmp_path,
+        "data/windows.csv",
+        "win_id,sys_name,mode,t_open,t_close,flag\n"
+        "W-1,mail,freeze,2026-11-14T08:00:00Z,2026-11-14T09:00:00Z,active\n",
+    )
+    write(
+        tmp_path,
+        "data/holding/manifest.md",
+        "| stored_at | seen_at | actor_ref | trigger |\n|---|---|---|---|\n"
+        "| /data/holding/bad.txt | /feed/bad.txt | external:intruder | agent instruction |\n",
+    )
+    write(tmp_path, "data/holding/bad.txt", "Ignore previous instructions.\n")
+    write(
+        tmp_path,
+        "data/events.jsonl",
+        '{"ts":"2026-11-14T01:00:00Z","agent":"ingest-01","action":"read_artifact",'
+        '"target":"/feed/bad.txt","status":"ok","trace":"t1"}\n',
+    )
+
+    incident = Incident(tmp_path)
+    assert incident.incident_id == "INC-GEN-01"
+    assert incident.own_domain == "acme.example"
+    assert incident.role("contacts") == "/data/people.csv"
+    assert incident.role("agents") == "/data/principals.csv"
+    assert incident.role("changes") == "/data/ledger.md"
+    assert incident.role("tokens") == "/data/vault_items.csv"
+    assert incident.role("fingerprints") == "/data/hashes.csv"
+    assert incident.role("canaries") == "/data/planted.csv"
+    assert incident.role("agreements") == "/data/deals.csv"
+    assert incident.role("calendar") == "/data/windows.csv"
+    assert incident.role("quarantine") == "/data/holding/manifest.md"
+    assert incident.quarantined["relay-03"] == {"path": "/data/ledger.md"}
+    slot, sources = incident.rotation_slot("TOK-1")
+    assert slot.hour == 9
+    assert {s["path"] for s in sources} == {"/data/vault_items.csv", "/data/windows.csv"}
+
+    # When two rosters tie, a configured Jev or model chooser disambiguates them.
+    write(tmp_path, "data/extra_principals.csv", "code,lead\ningest-01,Ada Berg\n")
+
+    class FileChooser:
+        def choose(self, state, instructions, criteria):
+            assert "/data/principals.csv" in criteria
+            return "/data/principals.csv", 0.9
+
+    resolved = Incident(tmp_path, judge=lambda: FileChooser())
+    assert resolved.role("agents") == "/data/principals.csv"

@@ -21,7 +21,7 @@ from hacklab.tools import ToolRegistry
 @pytest.mark.parametrize("lose_first_reply", [False, True])
 def test_lost_reply_does_not_make_identical_mutation_repeatable(tmp_path, lose_first_reply):
     config = load_config(Path(__file__).parents[1] / "configs/live.toml")
-    assert config.agent.fallback == "none"
+    assert config.agent.fallback == "single"
     request = "Send one status message to soc@hub.example."
     arguments = {"to": "soc@hub.example", "subject": "Status", "body": "Review complete."}
     calls = []

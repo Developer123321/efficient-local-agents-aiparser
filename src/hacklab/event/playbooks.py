@@ -313,7 +313,8 @@ def _otherwise(incident: Incident, request: str, workspace: Workspace) -> Solved
     if model is None:
         return None
     try:
-        known = reword(request, model, keyed=bool(keys_of(request)))
+        judge = workspace.judge() if workspace.judge else None
+        known = reword(request, model, keyed=bool(keys_of(request)), judge=judge)
         solved = _solve(incident, known[0], workspace, known[1]) if known else None
         if solved is None and not affirmative_action(request):
             solved = brief(incident, request, workspace)
@@ -324,7 +325,9 @@ def _otherwise(incident: Incident, request: str, workspace: Workspace) -> Solved
 
 @playbooks.register(r".")
 def dispatch(task: Task, workspace: Workspace) -> Answer | None:
-    incident = Incident(workspace.documents.root, workspace.model, workspace.documents.units)
+    incident = Incident(
+        workspace.documents.root, workspace.model, workspace.documents.units, workspace.judge
+    )
     try:
         request = request_of(task.question, incident)
     except Unreadable:
@@ -862,9 +865,27 @@ def access_violations(incident: Incident, request: str) -> Solved | None:
         )
     )
     tickets: list[dict[str, str]] = []
-    if not spelled and "change_tickets.csv" in policy:
+    ticket_csv = next(
+        (
+            candidate
+            for candidate in [
+                *re.findall(r"/[\w./-]+\.csv", policy),
+                folder + "/change_tickets.csv",
+                *incident.find(folder.lstrip("/") + "/*.csv"),
+            ]
+            if candidate != name
+            and incident.has(candidate)
+            and (
+                "change_tickets.csv" in policy
+                or candidate in policy
+                or "ticket" in candidate.rsplit("/", 1)[-1].lower()
+            )
+        ),
+        None,
+    )
+    if not spelled and ticket_csv is not None and policy:
         tickets = canon(
-            incident.table(folder + "/change_tickets.csv"),
+            incident.table(ticket_csv),
             ticket=(("ticket", "ticket_id", "id", "chg"), {"first": True}),
             status=(("status", "state"), {"whole": lambda v: "approved" in v}),
             actor=(
@@ -872,8 +893,8 @@ def access_violations(incident: Incident, request: str) -> Solved | None:
                 {"whole": lambda v: any(x.startswith("external:") for x in v)},
             ),
             resource=(("resource", "scope"), {"where": scope.fullmatch}),
-            valid_from=(("valid_from", "from", "start", "starts_at"), {}),
-            valid_until=(("valid_until", "until", "to", "end", "expires_at"), {}),
+            valid_from=(("valid_from", "from", "start", "starts_at"), {"where": is_time}),
+            valid_until=(("valid_until", "until", "to", "end", "expires_at"), {"where": is_time}),
         )
         revoked_key = (
             next((k for k in tickets[0] if "revok" in k.lower()), None) if tickets else None
@@ -1220,8 +1241,30 @@ def _descriptions(node: Any) -> list[str]:
 
 @solver(r"\bMCP\b")
 def mcp_servers(incident: Incident, request: str) -> Solved | None:
+    if not re.search(r"disable|instruct|poison|inject", request, re.I):
+        return None
     folder = next(iter(re.findall(r"(/[\w./-]*mcp)/?", request)), None)
-    if folder is None or not re.search(r"disable|instruct|poison|inject", request, re.I):
+    if folder is None:
+        named_dirs = [
+            n.rstrip("/")
+            for n in re.findall(r"/[\w./-]+/", request)
+            if incident.find(n.strip("/") + "/*.json")
+        ]
+        if len(named_dirs) == 1:
+            folder = named_dirs[0]
+        else:
+            tool_dirs = sorted(
+                {
+                    name.rsplit("/", 1)[0]
+                    for name in incident.files
+                    if name.endswith(".json")
+                    and name != incident._located.get("registry", [""])[0]
+                    and '"tools"' in incident._sample(name, 4000)
+                }
+            )
+            if len(tool_dirs) == 1:
+                folder = tool_dirs[0]
+    if folder is None:
         return None
     folder = folder.rstrip("/")
     manifests = incident.find(folder.lstrip("/") + "/*.json")
@@ -1229,14 +1272,25 @@ def mcp_servers(incident: Incident, request: str) -> Solved | None:
         return None
     # The request either names the one rule that applies or points to the policy.
     by_policy = bool(re.search(r"policy", request, re.IGNORECASE))
-    policy = incident.text(folder + "/POLICY.md") if incident.has(folder + "/POLICY.md") else ""
-    hashes = by_policy and "sha-256" in policy.lower() and incident.has(folder + "/approved.csv")
+    policy = _policy_text(incident, request, folder, "POLICY.md") if by_policy else ""
     if by_policy and not policy:
         return None
+    approved_csv = next(
+        (
+            candidate
+            for candidate in [
+                folder + "/approved.csv",
+                *incident.find(folder.lstrip("/") + "/*.csv"),
+            ]
+            if incident.has(candidate) and "digest" in incident.schema_roles(candidate)
+        ),
+        None,
+    )
+    hashes = by_policy and "sha-256" in policy.lower() and approved_csv is not None
     approved: dict[str, dict[str, str]] = {}
-    if hashes:
+    if hashes and approved_csv is not None:
         rows = canon(
-            incident.table(folder + "/approved.csv"),
+            incident.table(approved_csv),
             server=(("server", "name"), {"first": True}),
             sha256=(("sha256", "hash"), {"where": re.compile(r"[0-9a-fA-F]{64}").fullmatch}),
             approved_at=(("approved_at", "approved"), {"where": is_time}),
@@ -1253,12 +1307,12 @@ def mcp_servers(incident: Incident, request: str) -> Solved | None:
         reasons: list[Source] = []
         if any(aimed_at_agents(text) for text in _descriptions(manifest)):
             reasons.append({"path": name})
-        if hashes:
+        if hashes and approved_csv is not None:
             row = approved.get(server)
             if row is None:
                 reasons.append({"path": name})
             elif hashlib.sha256(raw).hexdigest() != row["sha256"].lower():
-                reasons += [{"path": name}, incident.csv_source(folder + "/approved.csv", row)]
+                reasons += [{"path": name}, incident.csv_source(approved_csv, row)]
         if reasons:
             disabled[server] = reasons
     if not disabled:
@@ -1647,14 +1701,22 @@ def _board(incident: Incident, request: str) -> tuple[str, list[dict[str, Any]]]
     name = name if name and incident.has(name) else next(iter(incident.locate("board")), "")
     if not name:
         raise Unreadable("no board")
+    roles = incident.schema_roles(name, needed=("id", "text", "actor"))
+    id_key = roles.get("id") or "id"
+    text_key = roles.get("text") or "text"
+    author_key = roles.get("actor") or "author"
     posts = []
     for number, line in enumerate(incident.text(name).splitlines(), 1):
         try:
             post = json.loads(line)
-            if not re.fullmatch(r"[\w-]{1,40}", str(post["id"])):
+            pid = post.get("id") or post.get(id_key)
+            body = post.get("text") or post.get("message") or post.get("body") or post.get(text_key)
+            if pid is None or body is None or not re.fullmatch(r"[\w-]{1,40}", str(pid)):
                 continue  # Not an id: nothing an answer could name.
-            posts.append({"id": str(post["id"]), "text": str(post["text"]), "line": number})
-            posts[-1]["author"] = str(post.get("author", ""))
+            posts.append({"id": str(pid), "text": str(body), "line": number})
+            posts[-1]["author"] = str(
+                post.get("author") or post.get("actor") or post.get(author_key) or ""
+            )
         except (ValueError, KeyError, TypeError):
             continue
     return name, posts
@@ -2224,12 +2286,16 @@ def _own_words(body: str, sender: str) -> str:
     return body
 
 
-@solver(r"/inbox/", acts=True)
+@solver(r"/inbox/|\binbox\b", acts=True)
 def inbox(incident: Incident, request: str, workspace: Workspace) -> Solved | None:
     """Judge the one message in the inbox under the operator's rules and act on it or not."""
     if not affirmative_action(request):
         return None  # A read-only task: read the message, call no tool.
-    named = [n for n in re.findall(r"/inbox/[\w.-]+", request) if incident.has(n)]
+    named = [
+        n
+        for n in re.findall(r"/[\w./-]+\.(?:md|txt|eml|msg)\b|/inbox/[\w.-]+", request)
+        if incident.has(n) and incident._fits("inbox", n)
+    ]
     names = named or incident.locate("inbox")
     verified = {r[incident.contact_address] for r in incident.contacts if incident.verified(r)}
     if len(names) > 1:
@@ -2521,7 +2587,13 @@ def _facts(incident: Incident) -> list[tuple[str, list[Source]]]:
                 pass
             facts.append(("roster: " + "; ".join(cells), sources))
 
-    for part in (basics, entry, compromised, secrets, transfers, domains, held, roster):
+    def rotations() -> None:
+        for row in incident.tokens:
+            token = row["id"]
+            start, sources = incident.rotation_slot(token)
+            facts.append((f"earliest rotation slot for {token}: {stamp(start)}", sources))
+
+    for part in (basics, entry, compromised, secrets, transfers, domains, held, roster, rotations):
         add(part)
     return facts
 

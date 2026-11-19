@@ -52,8 +52,8 @@ any host machine configuration.
   examples only.
 - The platform's tools that change something (`containment`, `send_message`,
   `write`) are offered to the model loop only when the instruction asks to
-  act (`ACTION_WORDS`). Without the loop (`fallback = "none"`) solver code
-  holds them and acts only on a request it read as one: by its words (`ACTS`)
+  act (`ACTION_WORDS`). Without the loop (`fallback = "none"` or `"single"`)
+  solver code holds them and acts only on a request it read as one: by its words (`ACTS`)
   or by the routing reading (`event/reword.py`). Recipients, paths and URLs
   are checked in code either way (`arena_run.arena_tools`). A new platform
   tool is mutating unless it is listed in `READ_ONLY`.

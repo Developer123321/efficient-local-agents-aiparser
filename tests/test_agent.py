@@ -195,6 +195,22 @@ def test_read_then_final_cites_by_evidence_id(lab, monkeypatch):
     assert tracker.summary(run_id)["calls"] == 2
 
 
+def test_an_evidence_id_written_in_the_sentence_is_moved_out_of_the_answer(lab, monkeypatch):
+    root, tracker = lab
+    (root / "note.txt").write_text("The contact is Mira Keller.\n")
+    config, _ = live(monkeypatch, [final("Mira Keller [e1]")])
+    config.agent.preload_documents_under = 40
+    _, answer = agent.run_task(
+        Task(id="contact", question="Who is the contact?", documents=["note.txt"]),
+        root,
+        config,
+        tracker,
+    )
+    assert answer.status == "ok"
+    assert answer.answer == "Mira Keller"
+    assert [citation.quote for citation in answer.citations] == ["The contact is Mira Keller."]
+
+
 def test_the_first_message_lists_documents_and_columns(lab, monkeypatch):
     root, tracker = lab
     (root / "audit.jsonl").write_text(
@@ -744,6 +760,30 @@ def test_a_number_is_answered_the_way_the_tool_computed_it(lab, monkeypatch):
             "final",
             {},
             {"status": "abstain", "answer": "", "actions": [], "reason": ""},
+        ),
+        (
+            {"action": "final", "result": "Mira Keller [e3]."},
+            "final",
+            {},
+            {"status": "ok", "answer": "Mira Keller [e3]."},
+        ),
+        (
+            {"action": "final", "result": ["a", "b"]},
+            "final",
+            {},
+            {"status": "ok", "answer": "a, b"},
+        ),
+        (
+            {"action": "final", "result": 200.0, "evidence": ["e1"]},
+            "final",
+            {},
+            {"status": "ok", "answer": "200.0", "evidence": ["e1"]},
+        ),
+        (
+            {"action": "final", "result": "abstain", "evidence": ["e1"]},
+            "final",
+            {},
+            {"status": "abstain", "answer": "", "evidence": ["e1"]},
         ),
     ],
 )
@@ -1324,3 +1364,118 @@ def test_without_a_fallback_an_unknown_task_ends_unanswered_and_unpaid(lab, monk
     assert (answer.status, answer.answer, answer.cause) == ("abstain", "", "no_solver")
     assert calls == []
     assert ("playbook", "no_solver") in events(tracker, run_id, root.parent)
+
+
+def test_one_bounded_call_answers_a_task_no_solver_knows(lab, monkeypatch):
+    root, tracker = lab
+    (root / "note.txt").write_text("Budget approved: 42 EUR.\n")
+    config, calls = live(monkeypatch, [final("42 EUR", ["e1"])])
+    config.agent.fallback = "single"
+    config.agent.preload_documents_under = 40
+    task = Task(id="budget", question="Approved budget?", documents=["note.txt"])
+    run_id, answer = agent.run_task(task, root, config, tracker)
+    assert (answer.status, answer.answer) == ("ok", "42 EUR")
+    assert len(calls) == 1
+    assert "one turn: reply with final now" in calls[0]["messages"][1]["content"]
+    assert "Tools:" not in calls[0]["messages"][0]["content"]
+    assert ("playbook", "single_call") in events(tracker, run_id, root.parent)
+
+
+def test_the_one_bounded_call_cannot_become_a_tool_loop(lab, monkeypatch):
+    root, tracker = lab
+    (root / "note.txt").write_text("Budget approved: 42 EUR.\n")
+    config, calls = live(monkeypatch, [tool("read", document="note.txt"), final("42 EUR", ["e1"])])
+    config.agent.fallback = "single"
+    task = Task(id="budget", question="Approved budget?", documents=["note.txt"])
+    run_id, answer = agent.run_task(task, root, config, tracker)
+    assert answer.cause == "final_only_required"
+    assert ("tool", "ok") not in events(tracker, run_id, root.parent)
+    assert len(calls) == 1
+
+
+def test_single_rejects_actions_in_a_final_answer(lab, monkeypatch):
+    root, tracker = lab
+    config, calls = live(monkeypatch, [final(actions=[{"type": "pause", "target": "job-1"}])])
+    config.agent.fallback = "single"
+    config.guard.allowed_actions = ["pause"]
+    _, answer = agent.run_task(Task(id="job", question="Pause job-1."), root, config, tracker)
+    assert answer.cause == "final_only_required"
+    assert not answer.actions
+    assert len(calls) == 1
+
+
+def test_single_does_not_reuse_the_playbook_judge(lab, monkeypatch):
+    root, tracker = lab
+    (root / "note.txt").write_text("Budget approved: 42 EUR.\n")
+    config, calls = live(monkeypatch, [final("42 EUR", ["e1"])])
+    providers = agent.make_providers
+    judgments = []
+
+    class Judge:
+        def judge(self, *args):
+            judgments.append(args)
+            return {}
+
+    def with_judge(*args, **kwargs):
+        small, _ = providers(*args, **kwargs)
+        return small, Judge()
+
+    registry = Playbooks()
+
+    @registry.register(r".")
+    def decline(task, workspace):
+        assert workspace.model() is not None
+        return None
+
+    monkeypatch.setattr(agent, "make_providers", with_judge)
+    monkeypatch.setattr(agent, "jev_usable", lambda config: True)
+    monkeypatch.setattr(agent, "_playbooks", lambda reference: registry)
+    config.jev.enabled = True
+    config.agent.playbooks = "example:playbooks"
+    config.agent.fallback = "single"
+    config.agent.preload_documents_under = 40
+    task = Task(id="budget", question="Approved budget?", documents=["note.txt"])
+    _, answer = agent.run_task(task, root, config, tracker)
+    assert answer.answer == "42 EUR"
+    assert len(calls) == 1
+    assert judgments == []
+
+
+def test_single_cannot_raise_an_exhausted_call_limit(lab, monkeypatch):
+    root, tracker = lab
+    config, calls = live(monkeypatch, [final()], limits=Limits(max_calls=1))
+    registry = Playbooks()
+
+    @registry.register(r".")
+    def decline(task, workspace):
+        workspace.model().complete([{"role": "user", "content": "Check the request."}], {})
+        return None
+
+    monkeypatch.setattr(agent, "_playbooks", lambda reference: registry)
+    config.agent.playbooks = "example:playbooks"
+    config.agent.fallback = "single"
+    _, answer = agent.run_task(
+        Task(id="budget", question="Approved budget?"), root, config, tracker
+    )
+    assert answer.cause == "request_budget_exhausted"
+    assert len(calls) == 1
+
+
+def test_single_disables_http_retry_on_a_reused_provider(lab, monkeypatch):
+    root, tracker = lab
+    config, calls = live(monkeypatch, [final()], limits=Limits(http_retries=3), http_status=503)
+    registry = Playbooks()
+
+    @registry.register(r".")
+    def decline(task, workspace):
+        assert workspace.model() is not None
+        return None
+
+    monkeypatch.setattr(agent, "_playbooks", lambda reference: registry)
+    config.agent.playbooks = "example:playbooks"
+    config.agent.fallback = "single"
+    _, answer = agent.run_task(
+        Task(id="budget", question="Approved budget?"), root, config, tracker
+    )
+    assert answer.cause == "provider_http_503"
+    assert len(calls) == 1

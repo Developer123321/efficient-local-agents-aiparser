@@ -7,7 +7,11 @@ This is an experimental event project, released under the [MIT license](LICENSE)
 The submitted agent (`df31b42`) achieved **0.009 accuracy on 26 final tasks**:
 its solvers depended on the development workspace's paths, the final used a
 different layout, and the model loop was disabled. All tasks were submitted.
-The current source includes an access-policy fix made after submission.
+The current source includes an access-policy fix made after submission, a
+bounded one-call fallback (`fallback = "single"`), and Jev making two typed
+decisions (request kind and a runbook yes/no). The fallback is measured only
+on the developer smoke bench, not on event workspaces; the submitted archive
+`df31b42` still has Jev and the fallback off.
 The [journal](JOURNAL.md) records the measurements and the postmortem.
 
 **Known security gaps remain**, including actions during a read-only inbox

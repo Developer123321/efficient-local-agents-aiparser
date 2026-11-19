@@ -12,7 +12,7 @@ output_usd_per_million = 0.40
 extra_body = { usage = { include = true }, provider = { order = ["deepinfra/fp8", "crusoe", "novita"], only = ["deepinfra/fp8", "crusoe", "novita"], allow_fallbacks = true } }
 
 [jev]
-enabled = false
+enabled = true
 model = "jev-1.14.0"
 base_url = "https://api.typesafe.ai/v1/systemone"
 threshold = 0.7
@@ -30,7 +30,7 @@ inventory = true
 preload_documents_under = 40
 tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "graph"]
 playbooks = "hacklab.event.playbooks:playbooks"
-fallback = "none"  # As in live.toml; set "loop" to compare the model path.
+fallback = "single"  # As in live.toml; set "loop" or "none" to compare.
 rules = "hacklab.event:arena-rules.md"
 on_unverified = "answer"
 

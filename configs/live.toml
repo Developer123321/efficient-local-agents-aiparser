@@ -40,12 +40,16 @@ extra_body = { usage = { include = true }, provider = { order = ["deepinfra/fp8"
 # output_usd_per_million = 0.0
 
 [jev]
-# Off until a dev run shows a gain after its cost: as a judge on the stand-in
-# model, Jev lowered accuracy and raised cost (docs/benchmarks.md).
-# configs/jev-select.toml is this file with Jev on. With OPENROUTER_API_KEY
+# On by the owner's request after the event: Jev now makes two decisions that
+# code has already narrowed to fixed labels (which known request a new wording
+# asks for, and one yes/no about a runbook sentence). That use is not measured;
+# as a judge on the stand-in model it lowered accuracy and raised cost
+# (docs/benchmarks.md). Without a key or route every path falls back to code
+# and the small model, so the profile still answers. configs/jev-select.toml is
+# this file with Jev's passage selection on as well. With OPENROUTER_API_KEY
 # set, Jev is asked at OpenRouter's /api/alpha/decisions as typesafe/jev-1.14;
 # the two lines below are TypeSafe's own API, used with TYPESAFE_API_KEY.
-enabled = false
+enabled = true
 model = "jev-1.14.0"
 base_url = "https://api.typesafe.ai/v1/systemone"
 # Public list price is NOT necessarily the event's scoring tariff.
@@ -75,11 +79,15 @@ tools = ["search", "read", "table", "after", "calculate", "decode", "iocs", "gra
 # another COPY line. No skills yet: the rehearsal's recipes describe another
 # answer format; write one when a dev-run trace shows a wrong turn.
 playbooks = "hacklab.event.playbooks:playbooks"
-# A task no solver answers ends unanswered instead of going through the model
-# loop. Dev run run_OAGLAyT-5QoS: the loop took 9 of 48 tasks, earned 1.13 of
-# their 9 points and spent about $0.33 of the run's $0.335; cost is half the
-# score. HACKLAB_FALLBACK=loop switches it back on for a comparison run.
-fallback = "none"
+# A task no solver answers gets one bounded model call instead of an empty
+# submission. Dev run run_OAGLAyT-5QoS measured the full loop as too costly:
+# it took 9 of 48 tasks, earned 1.13 of their 9 points and spent about $0.33
+# of the run's $0.335. On the 8 smoke cases, three repetitions each, Gemma 4
+# answered 1.00 under "single" against 0.25 under "none", for 72 instead of 48
+# calls ($0.00768 against $0.00571 reported). "single" adds no tools, actions,
+# retries, Jev, embeddings or picture reading. HACKLAB_FALLBACK=loop or none
+# switches it for one comparison run. Not measured on event workspaces.
+fallback = "single"
 rules = "hacklab.event:arena-rules.md"
 # A wrong answer and no answer both score 0 here, so what passed the checks
 # is submitted instead of an abstention.
